@@ -80,7 +80,14 @@ export function PartNumbersView() {
   const writeBlocked = status !== 'connected';
   // Without Manage Part Numbers rows open the details read-only and no
   // change is offered (Phase 14 slice 3); the server checks every write.
-  const canManage = useSession().can('MANAGE_PART_NUMBER_MASTER');
+  // A holder of Delete Work Orders and Part Numbers permanently also finds
+  // Delete permanently… in the dialog of a listed Part Number (Phase 16,
+  // archival design D17), whichever mode it opens in.
+  const session = useSession();
+  const canManage = session.can('MANAGE_PART_NUMBER_MASTER');
+  const canDeletePermanently = session.can(
+    'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+  );
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [limit, setLimit] = useState(PART_NUMBERS_PAGE_SIZE);
@@ -284,6 +291,7 @@ export function PartNumbersView() {
         <EditPartNumberDialog
           pn={dialog.kind === 'edit' ? dialog.pn : undefined}
           readOnly={!canManage}
+          permanentDeletion={canDeletePermanently && dialog.kind === 'edit'}
           writeBlocked={writeBlocked}
           onClose={closeDialog}
         />

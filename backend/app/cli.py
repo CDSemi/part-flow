@@ -98,24 +98,30 @@ Commands:
   age limit is the interval of Administration → Backups plus two hours.
   0 ok, 1 a finding, 2 could not run.
 - ``delete-permanently (--work-order NUMBER | --part-number PN)... --operator
-  TEXT --reason TEXT [--confirm] [--backup-name NAME] [--lock-timeout
-  SECONDS]`` (interim test-data tool; OPERATIONS_RUNBOOK §10): preview, or
-  with ``--confirm`` delete, Work Orders and Part Numbers entered only for
-  testing in one transaction, keeping one audit row per deleted record;
-  refused (nothing deleted) when the data is linked to data that stays.
-  Runs as the database owner role (``app.application.permanent_deletion``).
-  0 preview shown or deleted, 1 refused, 2 failed or its outcome is unknown.
+  TEXT --reason TEXT [--confirm] [--lock-timeout SECONDS]`` (the operator's
+  way to permanent deletion; OPERATIONS_RUNBOOK §10): preview, or with
+  ``--confirm`` record a deletion request of Work Orders and Part Numbers
+  entered only for testing, with the operator's name and reason; the host
+  job carries it out (``history-archive``) with a pre-purge backup and one
+  audit row per deleted record. Refused (nothing recorded) when the data is
+  linked to data that stays or another deletion request is open. Runs as
+  the database owner role (``app.application.permanent_deletion``). 0 preview
+  shown or request recorded, 1 refused, 2 failed or its outcome is unknown.
 - ``history-archive (settings | recover | next | export --run N | verify
   --run N | copy --run N | purge --run N [--backup NAME --backup-started-at
-  UTC] | status)`` (Phase 16, history archival design B steps 1 and 2;
-  ``deploy/production/archive.sh``): the host job of Movement-history
-  archival, run as the maintenance database role with the archive folder in
+  UTC] | start-deletion --request N | delete --request N --backup NAME
+  --backup-started-at UTC | status)`` (Phase 16, history archival design B
+  steps 1 to 3; ``deploy/production/archive.sh``): the host job of
+  Movement-history archival and of permanent deletion requests, run as the
+  maintenance database role with the archive folder in
   ``PARTFLOW_ARCHIVE_DIR`` and the optional off-host copy folder in
   ``PARTFLOW_ARCHIVE_COPY_DIR`` (``app.application.history_archive_job``).
-  Only ``purge`` deletes: the archived Movements of its run, after the
-  pre-purge backup. 0 the step is done (``result`` says what happened), 1
-  refused (or, for ``status``, a finding), 2 could not run or its outcome
-  is unknown, 3 the run failed and is now FAILED with its reason.
+  Only ``purge`` and ``delete`` delete: the archived Movements of a run, and
+  the stored rows of a deletion request, each after its pre-purge backup. 0
+  the step is done (``result`` says what happened), 1 refused (or, for
+  ``status``, a finding), 2 could not run, its outcome is unknown, or it
+  was interrupted, 3 the run or request failed and is now FAILED with its
+  reason.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
@@ -796,7 +802,7 @@ def _backup_name(value: str) -> backups.BackupName:
     if parsed is None:
         raise argparse.ArgumentTypeError(
             "must be <YYYYMMDDTHHMMSSZ>-scheduled, -daily, -manual,"
-            " -pre-release-<release tag> or -pre-purge-<archive name>,"
+            " -pre-release-<release tag> or -pre-purge-<archive name or deletion label>,"
             f" got {value!r}"
         )
     return parsed
@@ -1189,9 +1195,14 @@ def _run_status(args: argparse.Namespace) -> int:
 
 
 _DELETE_PERMANENTLY_HELP = (
-    "Preview, or with --confirm delete, Work Orders and Part Numbers entered only for testing,"
-    " as if they had never been entered (one audit row per deleted record). Runs as the"
+    "Preview, or with --confirm request, the permanent deletion of Work Orders and Part Numbers"
+    " entered only for testing, as if they had never been entered; the host job carries a"
+    " request out with a pre-purge backup (one audit row per deleted record). Runs as the"
     " database owner role; refused when the data is linked to data that stays."
+)
+_BACKUP_NAME_REMOVED = (
+    "--backup-name is no longer used: the host job takes the pre-purge backup of the deletion"
+    " request itself and records it"
 )
 
 
@@ -1210,11 +1221,6 @@ def _part_number(value: str) -> str:
         return permanent_deletion.requested_part_number(value)
     except ApplicationError as exc:
         raise argparse.ArgumentTypeError(exc.message) from None
-
-
-def _backup_name_text(value: str) -> str:
-    _backup_name(value)
-    return value
 
 
 def _add_delete_permanently_parser(subparsers: Any) -> None:
@@ -1248,25 +1254,29 @@ def _add_delete_permanently_parser(subparsers: Any) -> None:
     parser.add_argument(
         "--confirm",
         action="store_true",
-        help="Delete. Without it the command only shows what it would delete.",
+        help=(
+            "Record the deletion request; the host job carries it out. Without it the command"
+            " only shows what it would delete."
+        ),
     )
     parser.add_argument(
         "--backup-name",
-        type=_backup_name_text,
         metavar="NAME",
-        help="The backup taken before the deletion (recorded in the audit rows).",
+        help=f"Refused: {_BACKUP_NAME_REMOVED}.",
     )
     parser.add_argument(
         "--lock-timeout",
         type=_bounded_int(1, 600),
         default=migration.DEFAULT_LOCK_TIMEOUT_SECONDS,
         metavar="SECONDS",
-        help="How long it may wait for a table lock (1-600, default %(default)s).",
+        help="How long recording the request may wait for a lock (1-600, default %(default)s).",
     )
 
     def handler(args: argparse.Namespace) -> int:
         if not args.work_orders and not args.part_numbers:
             parser.error("give at least one --work-order or --part-number")
+        if args.backup_name is not None:
+            parser.error(_BACKUP_NAME_REMOVED)
         return _run_delete_permanently(args)
 
     parser.set_defaults(handler=handler)
@@ -1279,7 +1289,6 @@ def _delete_permanently_report(args: argparse.Namespace) -> permanent_deletion.D
         operator=args.operator,
         reason=args.reason,
         confirm=args.confirm,
-        backup_name=args.backup_name,
     )
     try:
         get_settings()
@@ -1308,19 +1317,26 @@ def _run_delete_permanently(args: argparse.Namespace) -> int:
 
 
 _HISTORY_ARCHIVE_HELP = (
-    "The host job of Movement-history archival (deploy/production/archive.sh), run as the"
-    " maintenance database role with the archive folder in PARTFLOW_ARCHIVE_DIR and the"
-    " optional off-host copy folder in PARTFLOW_ARCHIVE_COPY_DIR. Only purge deletes, and only"
-    " the archived Movements of its run."
+    "The host job of Movement-history archival and of permanent deletion requests"
+    " (deploy/production/archive.sh), run as the maintenance database role with the archive"
+    " folder in PARTFLOW_ARCHIVE_DIR and the optional off-host copy folder in"
+    " PARTFLOW_ARCHIVE_COPY_DIR. Only purge and delete delete: the archived Movements of a run,"
+    " and the stored rows of a deletion request."
 )
 _HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
-    "settings": "Print what the host script needs (the Start minute of the hourly work).",
-    "recover": (
-        "Right after the host script took its lock: make a stale RUNNING run FAILED, remove the"
-        " unfinished entries of finished runs and copy missing purge receipts. A PURGING run is"
-        " left for purge to resume."
+    "settings": (
+        "Print what the host script needs at every start: the Start minute of the hourly work"
+        " and whether a deletion request is open."
     ),
-    "next": "Print the run the job must work on and what to run for it.",
+    "recover": (
+        "Right after the host script took its lock: make a stale RUNNING run or deletion request"
+        " FAILED, remove the unfinished entries of finished runs and copy missing purge"
+        " receipts. A PURGING run is left for purge to resume."
+    ),
+    "next": (
+        "Print the work the job must do now: an open deletion request first, then the run and"
+        " what to run for it."
+    ),
     "export": "Export an APPROVED run's archive into .partial and record what it holds.",
     "verify": "Verify the exported archive and publish its folder.",
     "copy": "Copy the archive off the host, or accept a confirmation, or wait for one.",
@@ -1328,14 +1344,35 @@ _HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
         "Purge the archived Movements of a copied run after its pre-purge backup (--backup and"
         " --backup-started-at), or resume a PURGING run (no backup)."
     ),
-    "status": "Report the open run, the last finished run and the archive folder's space.",
+    "start-deletion": (
+        "Start an APPROVED deletion request (RUNNING) before its pre-purge backup is taken, after"
+        " checking its requester; print the backup's label."
+    ),
+    "delete": (
+        "Carry out a RUNNING deletion request after its pre-purge backup (--backup and"
+        " --backup-started-at): delete its stored rows in one transaction."
+    ),
+    "status": (
+        "Report the open run, the last finished run, the archive folder's space and the open and"
+        " last finished deletion requests."
+    ),
 }
 
 
 def _history_archive_engine() -> Engine | None:
-    """The CLI's engine, or None without a valid database configuration."""
+    """The CLI's engine, or None without a valid database configuration.
+
+    It has the connect timeout of ``status`` (``system_status``):
+    ``archive.sh`` runs the cheap check ``history-archive settings`` at every
+    5-minute start, so a hung database must end the command, not keep it
+    waiting.
+    """
     try:
-        return _engine()
+        return build_engine(
+            get_settings().database_url,
+            application_name=schema_revision.CLI_APPLICATION_NAME,
+            connect_timeout=system_status.CONNECT_TIMEOUT_SECONDS,
+        )
     except (ValidationError, ArgumentError, ValueError):
         return None
 
@@ -1354,6 +1391,28 @@ def _add_history_archive_parser(subparsers: Any) -> None:
         if step in ("export", "verify", "copy", "purge"):
             step_parser.add_argument(
                 "--run", type=_run_number, required=True, metavar="N", help="The run number."
+            )
+        if step in ("start-deletion", "delete"):
+            step_parser.add_argument(
+                "--request",
+                type=_run_number,
+                required=True,
+                metavar="N",
+                help="The deletion request number.",
+            )
+        if step == "delete":
+            # Plain text: the job judges the backup and answers a refusal as JSON.
+            step_parser.add_argument(
+                "--backup",
+                required=True,
+                metavar="NAME",
+                help="The pre-purge backup: <YYYYMMDDTHHMMSSZ>-pre-purge-<the request's label>.",
+            )
+            step_parser.add_argument(
+                "--backup-started-at",
+                required=True,
+                metavar="UTC",
+                help="Its dump start as backup-verify reports it: YYYY-MM-DDTHH:MM:SSZ.",
             )
         if step == "purge":
             # Plain text: the job judges the backup and answers a refusal as JSON.
@@ -1398,6 +1457,15 @@ def _run_history_archive(args: argparse.Namespace) -> int:
             report = history_archive_job.copy(engine, folders, args.run)
         elif args.step == "purge":
             report = history_archive_job.purge(engine, folders, args.run, backup)
+        elif args.step == "start-deletion":
+            report = history_archive_job.start_deletion(engine, folders, args.request)
+        elif args.step == "delete":
+            report = history_archive_job.delete_request(
+                engine,
+                folders,
+                args.request,
+                history_archive_job.PurgeBackup(args.backup, args.backup_started_at),
+            )
         else:
             report = history_archive_job.status(engine, folders)
     finally:

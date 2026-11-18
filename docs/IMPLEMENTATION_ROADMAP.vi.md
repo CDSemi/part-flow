@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi chưa commit ngày 2026-11-18. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `d094f5e` cộng các thay đổi chưa commit ngày 2026-11-18. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -49,16 +49,18 @@ ty, nơi PartFlow go-live ngày 2026-11-09 với release `v1.0.0`; các release 
 | Phase 13 — Full Administration and Production Identity Configuration | Đã đóng (2026-10-07) | Worker, nhận diện Worker và phiên, quản lý master data, chính sách, User và role dưới dạng cấu hình. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Đã đóng (2026-10-08) | Đăng nhập, cưỡng chế permission, thiết bị Scan Station đã enroll và các workflow hiệu chỉnh có thẩm quyền. |
 | Phase 15 — File-Based Work Order Import | Đã đóng (2026-10-08) | Tạo và cập nhật Work Order từ file CSV hoặc Excel. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16, bước 1 của lưu trữ (archival) lịch sử Movement (các lần chạy chỉ xuất, không xóa) từ 2026-11-17 và bước 2 (purge lịch sử Movement đã lưu trữ) từ 2026-11-18; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và các bước 3 đến 7 của archival. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | Đang làm | Production stack đã triển khai xong và chạy thật trên NAS của công ty từ 2026-11-09, với backup cấu hình trong Administration và `pf` tối giản từ 2026-11-16, bước 1 của lưu trữ (archival) lịch sử Movement (các lần chạy chỉ xuất, không xóa) từ 2026-11-17 và các bước 2 và 3 (purge lịch sử Movement đã lưu trữ, và các yêu cầu xóa vĩnh viễn) từ 2026-11-18; còn lại các kiểm tra trên máy chủ sau go-live, các việc còn mở và các bước 4 đến 7 của archival. |
 | Phase 17 — Owner Decisions After Go-Live | Đã đóng (2026-11-17) | Các permission key để dành, giới hạn độ dài khi nhập tay, role Super User tạo sẵn, tên Area và Planned Route duy nhất, Worker đã phân bổ trên dòng phân bổ, Add to Hot list khi tạo Work Order, bản xem trước các thiết lập và đăng nhập đa yếu tố tùy chọn. |
 | Phase 18 — Owner Requests of 2026-11-17 | Đã đóng (2026-11-17) | Xóa vĩnh viễn dữ liệu thử nghiệm, in nhiều nhãn barcode cùng lúc, xem một Scan Station không cần thiết bị đã đăng ký, và mục Administration → Security. |
 
-**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0041_phase16_history_purge`
-(`backend/alembic/versions/20261118_0041_phase16_history_purge.py`: việc purge của archival lịch sử Movement — chốt
-chặn xóa Movement, các trạng thái và cột purge của các lần chạy, các thiết lập đợt purge và số bản backup trước-purge
-được giữ). Phase 15 không thêm migration nào; Phase 16 thêm `0035_phase16_backup_policy` (chính sách backup của
+**Lược đồ cơ sở dữ liệu.** Head migration Alembic hiện tại là `0042_phase16_deletion_requests`
+(`backend/alembic/versions/20261118_0042_phase16_deletion_requests.py`: các yêu cầu xóa vĩnh viễn — permission key,
+các bảng yêu cầu, các chốt chặn cấp dòng trên mọi bảng mà một lần xóa xóa dữ liệu, và quyền của role bảo trì).
+Phase 15 không thêm migration nào; Phase 16 thêm `0035_phase16_backup_policy` (chính sách backup của
 Administration → Backups), `0040_phase16_history_archive` (các lần chạy và bản ghi chuyển tiếp của archival lịch sử
-Movement và các thiết lập của Administration → History archival & purge) và `0041_phase16_history_purge`; Phase 17
+Movement và các thiết lập của Administration → History archival & purge), `0041_phase16_history_purge` (việc purge:
+chốt chặn xóa Movement, các trạng thái và cột purge của các lần chạy, các thiết lập đợt purge và số bản backup
+trước-purge được giữ) và `0042_phase16_deletion_requests`; Phase 17
 thêm `0033_phase17_super_user_role` (role Super User),
 `0034_phase17_unique_names` (tên Area và Planned Route duy nhất), `0036_phase17_outgoing_mail` (địa chỉ email của user
 và mail server gửi đi), `0037_phase17_two_step` (xác thực hai bước, two-step sign-in) và `0038_phase17_passkeys`
@@ -1129,7 +1131,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - backup cấu hình trong Administration (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: Administration → Backups sửa khoảng cách giữa các lần backup và số bản backup theo giờ, theo ngày và theo tuần được giữ lại, mặc định mỗi giờ một bản với 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần được giữ (mục tiêu điểm khôi phục một giờ; migration `0035_phase16_backup_policy`); tác vụ trên máy chủ chạy `backup.sh --kind scheduled` mỗi giờ, đọc chính sách từ database (`app.cli backup-policy`), chỉ lấy backup khi đến hạn (`backup-due`) và xoay vòng các backup scheduled theo các giá trị đó (`backup-rotate --keep-hourly`); `--kind daily` và các option retention của nó bị từ chối kèm lệnh cần dùng thay thế, và ngưỡng tuổi backup của `check.sh` là khoảng cách đó cộng 2 giờ trừ khi có `--max-backup-age-hours`
 - log truy cập `web` không ghi các lần Production Board tự làm mới thành công (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: log truy cập `web` bỏ qua một lượt `GET /api/production-board` hay `GET /api/policies/due-soon` thành công (DEPLOYMENT §3.1), để một board làm mới mỗi 5 giây không còn làm log ngắn lại; một lần làm mới thất bại vẫn được ghi
 - một `pf` tối giản (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: `deploy/production/pf` chạy mỗi quy trình đã mô tả của production stack bằng một lệnh: `install` (SYNOLOGY_NAS §7 và §8 trên một database trống), `update TAG` (fetch, checkout và `release.sh`, nên mọi lần cập nhật vẫn có kiểm tra (j) trên bản ứng viên), `backup` (một bản sao lưu thủ công), `restore NAME --approved-by OWNER` (khôi phục vào instance mới theo OPERATIONS_RUNBOOK §6) và `status` (các container, `/api/health` và tóm tắt của `status`, hoặc `check.sh` với `--url`); Deployment Admin chỉ dành cho staging mà nó thay thế (`deploy/synology/`, `compose.nas.yaml`, `pf.sh` và `deployment/SYNOLOGY_ADMIN.md`) đã được gỡ bỏ, và dự án bộ công cụ triển khai riêng được tạm dừng
-- **bảo trì archival/purge lịch sử Movement có tính quản trị** (PROJECT_PROFILE §28): thời hạn lưu giữ cấu hình được, chọn theo mốc cắt → xuất archive không mất mát → kiểm tra → bản sao ngoài máy chủ → backup trước-purge → purge đúng các dòng đã được archive và kiểm tra, theo từng đợt gồm trọn các cụm flow kèm một biên nhận purge, qua một đường bảo trì đặc quyền riêng (bước 1 và 2 đã có, xem *Archival và purge lịch sử Movement* bên dưới); giữ nguyên vẹn các chuỗi đảo ngược/tham chiếu và các nhóm lệnh nguyên tử để không dòng nào được giữ lại tham chiếu tới lịch sử đã purge; gồm các cơ chế kích hoạt theo chính sách / ngưỡng kích thước / thủ công, xem trước phạm vi, lý do bắt buộc và audit đầy đủ; runtime thông thường vẫn chỉ-ghi-thêm; không xây một engine lưu giữ/archival đầy đủ trước phase này; thời hạn lưu giữ đã được Phase 13 lưu (`application_policy.retention_period_months`, số tháng nguyên hoặc không có), và thước đo cùng đơn vị của ngưỡng kích thước dữ liệu được định nghĩa ở đây cùng với cơ chế kích hoạt của nó
+- **bảo trì archival/purge lịch sử Movement có tính quản trị** (PROJECT_PROFILE §28): thời hạn lưu giữ cấu hình được, chọn theo mốc cắt → xuất archive không mất mát → kiểm tra → bản sao ngoài máy chủ → backup trước-purge → purge đúng các dòng đã được archive và kiểm tra, theo từng đợt gồm trọn các cụm flow kèm một biên nhận purge, qua một đường bảo trì đặc quyền riêng (bước 1 đến 3 đã có, xem *Archival và purge lịch sử Movement* bên dưới); giữ nguyên vẹn các chuỗi đảo ngược/tham chiếu và các nhóm lệnh nguyên tử để không dòng nào được giữ lại tham chiếu tới lịch sử đã purge; gồm các cơ chế kích hoạt theo chính sách / ngưỡng kích thước / thủ công, xem trước phạm vi, lý do bắt buộc và audit đầy đủ; runtime thông thường vẫn chỉ-ghi-thêm; không xây một engine lưu giữ/archival đầy đủ trước phase này; thời hạn lưu giữ đã được Phase 13 lưu (`application_policy.retention_period_months`, số tháng nguyên hoặc không có), và thước đo cùng đơn vị của ngưỡng kích thước dữ liệu được định nghĩa ở đây cùng với cơ chế kích hoạt của nó
 
 Xóa cứng PartNumber master **không** phải là một thao tác bảo trì của Phase 16. Nó thuộc Management → Part Numbers của
 Phase 13 và chỉ gỡ metadata.
@@ -1213,12 +1215,14 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
   nhất (`backend/app/infrastructure/database_privileges.py`): chỉ SELECT và INSERT trên `part_movements`, `audit_events`,
   `machine_lifecycle_events`, `quantity_flow_lineage` và `work_order_allocations`; giữ UPDATE trên `worker_sessions`;
   DELETE nhưng không UPDATE trên `assigned_route_steps`; không TRUNCATE ở đâu cả; gỡ quyền PUBLIC và quyền mặc định. Role
-  bảo trì `partflow_maintenance` đọc các bảng sản xuất, ghi các bảng archival và chỉ có DELETE trên `part_movements`.
-  Một bảng chưa được phân loại làm lệnh từ chối. Grant không bao giờ được khôi phục từ dump; chúng được suy ra lại sau
+  bảo trì `partflow_maintenance` đọc các bảng sản xuất, ghi các bảng archival và chỉ có DELETE trên mười bảng mà một
+  lần purge hoặc một lần xóa vĩnh viễn xóa dữ liệu, mỗi bảng được một trigger cấp dòng canh giữ. Một bảng chưa được
+  phân loại làm lệnh từ chối. Grant không bao giờ được khôi phục từ dump; chúng được suy ra lại sau
   mọi lần migration và restore.
 - `backend` production kết nối bằng `partflow_app` và không bao giờ giữ thông tin xác thực của owner; các trigger
-  raise-on-write vẫn là lớp bảo vệ đầu tiên — trên `part_movements` một trigger cấp dòng chỉ cho DELETE khi purge của
-  một lần chạy archival — và kiểm tra đối soát (h) xác minh cả hai lớp từ catalog.
+  raise-on-write vẫn là lớp bảo vệ đầu tiên — các trigger cấp dòng chỉ cho DELETE khi purge của một lần chạy archival
+  (trên `part_movements`) và với các dòng đã lưu của một yêu cầu xóa vĩnh viễn đang chạy — và kiểm tra đối soát (h)
+  xác minh cả hai lớp từ catalog.
 - Các test backend cũng chạy dưới role của ứng dụng (`PARTFLOW_TEST_DATABASE_ROLE=app`, chế độ của CI); chế độ này là
   kiểm tra cục bộ bắt buộc trước khi commit một thay đổi đụng tới thao tác ghi database, grant hay phần thiết lập test.
 
@@ -1253,7 +1257,7 @@ Mô tả đầy đủ nằm trong DEPLOYMENT §3.1. Tóm tắt:
   đồ, tuổi backup và database role đang kết nối.
 - `deploy/production/check.sh` kiểm tra HTTPS, chứng chỉ, container, số lần khởi động lại, lỗi backend, đĩa, database,
   lược đồ và tuổi backup và thoát với mã khác 0 để tới được thông báo lỗi của bộ lập lịch trên máy chủ (ngưỡng: backup cũ
-  hơn 26 giờ, đĩa còn trống dưới 15 %, chứng chỉ còn trong vòng 21 ngày trước khi hết hạn, bất kỳ mức tăng số lần khởi
+  hơn khoảng thời gian của Administration → Backups cộng 2 giờ, đĩa còn trống dưới 15 %, chứng chỉ còn trong vòng 21 ngày trước khi hết hạn, bất kỳ mức tăng số lần khởi
   động lại nào, bất kỳ bản ghi lỗi backend nào; một lỗi lặp lại được thông báo mỗi 6 giờ).
   `deploy/production/scheduled-reconcile.sh` chạy `reconcile` hằng ngày.
 
@@ -1293,7 +1297,7 @@ Linux.
 ### Archival và purge lịch sử Movement
 
 Chủ sở hữu quyết định ngày 2026-11-13 làm archival và purge ngay và đã duyệt bản thiết kế ngày 2026-11-17. Việc xây
-chia thành bảy bước, mỗi bước một commit riêng với cả hai bộ test đầy đủ; bước 1 và 2 đã có.
+chia thành bảy bước, mỗi bước một commit riêng với cả hai bộ test đầy đủ; bước 1 đến 3 đã có.
 
 **Đã có: bước 1, các lần chạy không xóa gì** (migration `0040_phase16_history_archive`):
 
@@ -1349,12 +1353,32 @@ Các lần chạy do bước 1 hoàn tất giữ kết quả `EXPORT_ONLY` (đã
   theo luồng); purge mất 31 giây qua 254 đợt, mỗi đợt giữ các khóa Part Number khoảng 0,12 giây; mọi con số đều bằng
   nhau trước và sau purge, và reconcile sạch.
 
+**Đã có: bước 3, các yêu cầu xóa vĩnh viễn** (migration `0042_phase16_deletion_requests`):
+
+- permission key `Delete Work Orders and Part Numbers permanently`, được migration cấp cho mọi role đã có mọi key khác
+  (ban đầu chỉ Super User; không bao giờ cấp cho Administrator theo tên);
+- các bảng yêu cầu `deletion_requests` và `deletion_request_rows`: một yêu cầu giữ phạm vi, lý do, User hoặc người vận
+  hành đã yêu cầu, số dòng theo từng bảng và mọi dòng mà nó sẽ xóa; nhiều nhất một yêu cầu đang mở; các trạng thái của
+  nó là `APPROVED`, `RUNNING`, `COMPLETED`, `FAILED` và `CANCELLED`, được trigger bảo vệ (role của ứng dụng chỉ ghi
+  nhận và hủy yêu cầu);
+- **Delete permanently…** trong Work Order Details và trong hộp thoại Part Number: bản xem trước với mọi lý do từ chối,
+  một lý do, Work Order Number hoặc Part Number được gõ lại, và trạng thái của yêu cầu; mục **Permanent deletion
+  requests** của Administration → History archival & purge, với Cancel cho tới khi job bắt đầu một yêu cầu;
+- job trên máy chủ thực hiện một yêu cầu đang chờ ở bất kỳ lần khởi động 5 phút nào: `start-deletion` (`RUNNING`, kiểm
+  tra người yêu cầu), một backup `pre-purge` mang nhãn `deletion-<id>-<stamp>`, và `delete` trong một transaction bằng
+  role bảo trì, giữ các khóa Part Number và khóa dòng, tính lại kế hoạch và đòi kế hoạch đó bằng đúng các dòng đã lưu;
+  sau đó là reconcile đầy đủ; một yêu cầu mà lần khởi động sau gặp ở trạng thái `RUNNING` thì thất bại, nên việc
+  restore bản backup trước-purge của nó không bao giờ xóa lại;
+- các chốt chặn cấp dòng trên mười bảng mà một lần xóa xóa dữ liệu chỉ cho xóa các dòng đã lưu của yêu cầu đang
+  `RUNNING` (trên `part_movements` thêm việc purge), và giữ các thao tác xóa có từ trước của ứng dụng đối với bước
+  route, demand line và bản ghi master Part Number; role bảo trì có thêm DELETE trên đúng các bảng đó, và kiểm tra (h)
+  ghim các chốt chặn và grant mới;
+- `pf delete-permanently --confirm` ghi nhận một yêu cầu và khởi động job trên máy chủ ngay; lệnh không tạo backup thủ
+  công và không tắt trigger nào; mọi lần xóa đều cần tác vụ lưu trữ lịch sử (SYNOLOGY_NAS §11.8), và `check.sh` báo
+  một yêu cầu đã chờ lâu hơn `--deletion-wait-minutes` (mặc định 15).
+
 **Các bước còn lại:**
 
-3. Yêu cầu xóa vĩnh viễn: một key `Delete Work Orders and Part Numbers permanently`, chỉ Super User có;
-   **Delete permanently…** trong Work Order Details và trong hộp thoại Part Number ghi một yêu cầu mà job trên máy chủ
-   thực hiện trong vòng 5 phút dưới các chốt chặn của purge, sau một backup `pre-purge`; lệnh tạm thời
-   `pf delete-permanently` chuyển sang cùng các quy tắc đó.
 4. Chạy tự động: một thước đo (mặc định số dòng Movement đang có vượt 5.000.000; tuổi của lịch sử hoặc dung lượng
    database là các lựa chọn khác), bước phê duyệt có thể tắt kèm lý do, số ngày giữa các lần chạy tự động (7) và lời
    nhắc.
@@ -1389,7 +1413,7 @@ lần purge Movement chỉ xóa Movement, không bao giờ xóa dòng `worker_se
 
 - Kiểm tra định danh khi nâng cấp nền tảng: phía Python đã được kiểm tra (j) triển khai; trước mọi lần nâng cấp Python
   hay glibc, chủ sở hữu xem danh sách của kiểm tra đó và quyết định việc chuẩn hóa lại.
-- Archival và purge lịch sử Movement, các bước 3 đến 7 — ở trên.
+- Archival và purge lịch sử Movement, các bước 4 đến 7 — ở trên.
 
 ## Phase 17 — Owner Decisions After Go-Live
 
@@ -1451,11 +1475,10 @@ Chủ sở hữu yêu cầu các thay đổi này ngày 2026-11-17, sau bản ph
 phát hành với tag riêng, và mục nào đã có thì ghi rõ:
 
 1. **Xóa vĩnh viễn dữ liệu thử nghiệm — đã có.** Các Work Order và Part Number chỉ nhập để thử nghiệm trên production
-   được xóa như thể chưa từng được nhập bằng lệnh vận hành `deploy/production/pf delete-permanently`
-   (OPERATIONS_RUNBOOK §10): mặc định chỉ xem trước; với `--confirm`, một bản sao lưu thủ công đã kiểm tra rồi một
-   transaction bằng database role chủ sở hữu (owner); từ chối và nêu tên mọi liên kết tới dữ liệu còn lại; đúng một
-   dòng audit cho mỗi Work Order hoặc Part Number đã xóa. Đây là công cụ tạm thời: chức năng xóa trong ứng dụng cho
-   Super User được thiết kế cùng với việc lưu trữ và xóa dọn lịch sử Movement.
+   được xóa như thể chưa từng được nhập (OPERATIONS_RUNBOOK §10): mặc định chỉ xem trước; từ chối và nêu tên mọi liên
+   kết tới dữ liệu còn lại; đúng một dòng audit cho mỗi Work Order hoặc Part Number đã xóa. Việc xóa là một yêu cầu xóa
+   vĩnh viễn, tạo trong PartFlow hoặc bằng lệnh vận hành `deploy/production/pf delete-permanently`, mà job trên máy chủ
+   thực hiện sau một backup trước-purge (Phase 16, bước 3 của archival lịch sử Movement).
 2. **Print barcodes — đã có.** Management → Machines và Management → Part Numbers in nhiều nhãn barcode cùng lúc
    (GUI_DESIGN §12.6, §14.5): các thẻ chọn được, nhóm theo Area, hoặc với Part Numbers theo Work Order đang chạy hay
    thành một danh sách tìm được, sắp theo PN, tên, ngày thêm hoặc lần dùng cuối trong một Work Order; Select all và
@@ -1513,7 +1536,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | Phase 16: bước 2 của archival lịch sử Movement đã có (các lần chạy purge lịch sử đã lưu trữ sau bản sao ngoài máy chủ và một backup trước-purge, và bản ghi chuyển tiếp giữ mọi con số không đổi); migration `0041_phase16_history_purge` trở thành head của lược đồ. |
+| 2026-11-18 | uncommitted | Phase 16: bước 3 của archival lịch sử Movement đã có (các yêu cầu xóa vĩnh viễn trong PartFlow và từ `pf delete-permanently`, do job trên máy chủ thực hiện sau một backup trước-purge dưới các chốt chặn cấp dòng); migration `0042_phase16_deletion_requests` trở thành head của lược đồ. |
+| 2026-11-18 | `d094f5e` | Phase 16: bước 2 của archival lịch sử Movement đã có (các lần chạy purge lịch sử đã lưu trữ sau bản sao ngoài máy chủ và một backup trước-purge, và bản ghi chuyển tiếp giữ mọi con số không đổi); migration `0041_phase16_history_purge` trở thành head của lược đồ. |
 | 2026-11-17 | `2f12d33` | Phase 16: bước 1 của archival lịch sử Movement đã có (các lần chạy xuất lịch sử của các flow đã đóng ra các tệp archive đã kiểm tra và chép chúng ra ngoài máy chủ, không xóa gì); migration `0040_phase16_history_archive` trở thành head của lược đồ. |
 | 2026-11-17 | `1490927` | Phase 16: dạng chuẩn khi nhập PN đã có; Add Part dùng dạng chuẩn mà server suy ra từ giá trị đúng như đã nhập. |
 | 2026-11-17 | `4539a2b` | Phase 18 mục 4 đã có (Administration → Security với quy tắc mật khẩu và Remember me), việc này đóng Phase 18; migration `0039_security_settings` trở thành head của lược đồ. |

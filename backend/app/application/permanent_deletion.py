@@ -1,15 +1,24 @@
-"""Permanent deletion of test Work Orders and Part Numbers (interim operator command).
+"""Permanent deletion of Work Orders and Part Numbers (Phase 16, history archival design D17).
 
-``python -m app.cli delete-permanently`` (OPERATIONS_RUNBOOK §10) deletes
-Work Orders and Part Numbers that the owner entered only for testing, as
-if they had never been entered, and keeps exactly one new
-``audit_events`` row (``DELETED``, metadata key ``permanent_deletion``)
-per deleted Work Order and per deleted Part Number. It is an interim
-tool until the in-app delete of the history archival and purge design
-exists. It runs as the database owner role only: it disables the
-append-only guard triggers of the tables it deletes from inside its own
-transaction, which the application database role can never do, and it
-changes no grant, trigger definition or function.
+What a permanent deletion deletes, what makes it refuse, and how it is
+carried out. Work Orders and Part Numbers that were entered only for testing
+are deleted as if they had never been entered, and exactly one new
+``audit_events`` row (``DELETED``, metadata key ``permanent_deletion``) is
+kept per deleted Work Order and per deleted Part Number.
+
+Who deletes (design §6.3, build step 3): nobody deletes directly. A
+deletion is first recorded as a request (``deletion_requests``, APPROVED)
+together with every row its plan deletes (``deletion_request_rows``) and the
+row counts per table — by a holder of Delete Work Orders and Part Numbers
+permanently through the API (``app.application.deletion_requests``), or by
+an operator with ``python -m app.cli delete-permanently --confirm``
+(OPERATIONS_RUNBOOK §10), which runs as the database owner role. A refusal
+records nothing. The host job (``app.application.history_archive_job``, as
+the maintenance database role) starts the request (RUNNING), the host script
+takes a ``pre-purge`` backup, and ``carry_out`` deletes the stored rows in
+ONE transaction under the row guards of every table it deletes from, which
+admit exactly the stored rows of the RUNNING request named by
+``partflow.deletion_request_id``. No trigger is ever disabled.
 
 What is deleted
 ---------------
@@ -24,12 +33,12 @@ What is deleted
 - A Part Number: its master row (details and image), every flow of the
   PN with the same closure, and every demand line and allocation of the
   PN — so every Work Order with a line of the PN must be deleted in the
-  same command. An internal Work Order (no Work Order Number, created by
+  same request. An internal Work Order (no Work Order Number, created by
   a Scan Station receipt) whose every demand line is of a Part Number
   being deleted is deleted with it; it cannot be named otherwise.
 
-What makes it refuse (nothing is deleted; each link is named)
---------------------------------------------------------------
+What makes it refuse (nothing is recorded or deleted; each link is named)
+--------------------------------------------------------------------------
 
 An unknown Work Order Number or Part Number; a demand line of a Part
 Number being deleted on a Work Order that stays; a demand line on the
@@ -61,24 +70,36 @@ listed as ``kept_audit_rows`` ("kept: also concerns other records"). No
 read model derives state of remaining data from these rows: the done
 date replay reads only ``completion`` rows of existing Work Orders, the
 Hot list command replays its own command only, and the audit trail is
-scoped by existing demand lines.
+scoped by existing demand lines. Every change of state of a request
+appends one ``DeletionRequest`` audit row. The record of an earlier
+permanent deletion (a ``DELETED`` row with the metadata key
+``permanent_deletion``, whose canonical PN recurs once the Part Number is
+entered again) and every ``DeletionRequest`` row always stay: a deletion
+never plans, deletes or lists them.
 
-Execution
----------
+Execution (``carry_out``)
+-------------------------
 
-A preview runs in one ``REPEATABLE READ, READ ONLY`` transaction and
-never writes. A deletion runs in ONE ``READ COMMITTED`` transaction: the
-lock timeout, the owner check, ``LOCK TABLE … IN EXCLUSIVE MODE`` of the
-touched tables in one fixed order (readers continue, writers wait), the
-plan again under the locks (a refusal rolls back), ``ALTER TABLE …
-DISABLE TRIGGER`` of exactly the guard triggers of the tables it deletes
-from, the deletes in dependency order (each must delete exactly the
-planned rows), ``ENABLE TRIGGER`` of the same triggers, the new audit
-rows, a check that every guard trigger is enabled, and COMMIT. No other
-session can ever see a disabled guard (catalog changes are
-transactional, and the table locks are held until COMMIT);
-``session_replication_role`` is never used. Any failure before COMMIT
-rolls everything back; a failure during COMMIT is ``outcome_unknown``.
+ONE ``READ COMMITTED`` transaction: ``partflow.deletion_request_id`` set
+locally; the request row locked (it must be RUNNING) and its stored rows
+read (their counts must equal the stored counts); the Part Number advisory
+locks of every PN the stored rows name (``part_numbers.acquire_part_number_locks``,
+sorted), then the row locks of the stored demand lines and of the stored
+Work Orders, ascending — the system-wide order PN → demand line → Work
+Order every command follows; the plan again under the locks, which must
+equal the stored rows exactly ("The data changed after the request; nothing
+was deleted. Request it again." with a short difference otherwise); the
+deletes in dependency order, each of exactly the stored count; one
+``DELETED`` audit row per deleted Work Order and Part Number, its actor the
+requesting User; and the request COMPLETED with its pre-purge backup — then
+COMMIT. Any failure before COMMIT rolls everything back; a failure during
+COMMIT is an unknown outcome.
+
+The interim command (``run_deletion``): a preview runs the plan in one
+``REPEATABLE READ, READ ONLY`` transaction and never writes; with
+``confirm`` the plan runs in one ``REPEATABLE READ`` transaction that
+records the operator's request (``requested``): the host job carries it
+out. It runs as the database owner role only.
 """
 
 import contextlib
@@ -88,58 +109,70 @@ import uuid
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 import psycopg.errors
-from sqlalchemy import Engine, text
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy import Connection, Engine, RowMapping, Table, select, text, update
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.application import allocations, audit, projections
+from app.application.common import flush
+from app.application.errors import ConflictError, DeletionRefusedError
 from app.application.migration import RunError, is_connection_failure
-from app.application.part_numbers import canonical_part_number, master_snapshot
+from app.application.part_numbers import (
+    acquire_part_number_locks,
+    canonical_part_number,
+    master_snapshot,
+)
 from app.application.work_orders import work_order_snapshot
-from app.domain.enums import AuditEntityType, AuditEventType, MovementType
-from app.infrastructure.database_privileges import GUARD_TRIGGERS
+from app.domain.enums import (
+    AuditEntityType,
+    AuditEventType,
+    DeletionRequestState,
+    MovementType,
+)
+from app.infrastructure import models
 from app.infrastructure.models import PartNumber, WorkOrder
 
 REPORT_VERSION: Final = 1
 COMMAND: Final = "delete-permanently"
 #: Metadata key of the one audit row per deleted Work Order and Part Number.
 AUDIT_KEY: Final = "permanent_deletion"
+#: The transaction-local setting that names the request the host job carries
+#: out: the row guards admit a delete only for its stored rows.
+REQUEST_SETTING: Final = "partflow.deletion_request_id"
 
-#: The tables the command deletes from, in delete (dependency) order.
-DELETE_ORDER: Final = (
-    "audit_events",
-    "part_movements",
-    "quantity_flow_lineage",
-    "quantity_flows",
-    "assigned_route_steps",
-    "assigned_routes",
-    "work_order_allocations",
-    "work_order_demands",
-    "work_orders",
-    "part_numbers",
-)
-#: The same tables in the one fixed lock order (alphabetical).
-LOCK_ORDER: Final = tuple(sorted(DELETE_ORDER))
+#: The tables the deletion deletes from, in delete (dependency) order.
+DELETE_ORDER: Final = models.DELETION_TABLES
 
-DeletionResult = Literal["preview", "deleted", "refused", "failed", "outcome_unknown"]
+DeletionResult = Literal["preview", "requested", "refused", "failed", "outcome_unknown"]
 
 RUN_MESSAGES: Final = {
-    "database_unavailable": "PartFlow could not reach its database. Nothing was deleted.",
+    "database_unavailable": (
+        "PartFlow could not reach its database. Nothing was requested or deleted."
+    ),
     "lock_not_available": (
-        "delete-permanently waited too long for a table lock (PartFlow is busy writing)."
-        " Nothing was deleted. Run it again at a quiet moment."
+        "delete-permanently waited too long for a lock (PartFlow is busy writing)."
+        " Nothing was requested or deleted. Run it again at a quiet moment."
     ),
     "internal_error": (
-        "delete-permanently failed unexpectedly (internal error). Nothing was deleted."
+        "delete-permanently failed unexpectedly (internal error). Nothing was requested or deleted."
     ),
     "outcome_unknown": (
-        "The database connection failed while committing: the deletion may or may not have"
-        " been stored. Run the preview again to see which records still exist."
+        "The database connection failed while committing: the deletion request may or may not"
+        " have been recorded. Run history-archive status to see the open deletion request."
     ),
 }
+_OPEN_INDEX: Final = "uq_deletion_requests_open"
+_OPEN_REQUEST_MESSAGE: Final = (
+    "Another deletion request is still open. Cancel it or wait until it finishes before"
+    " requesting another deletion."
+)
+_REFUSED_MESSAGE: Final = (
+    "This deletion is refused, so nothing was requested: the data to delete is linked to data"
+    " that stays, or a record does not exist. The refusals name each link."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +182,7 @@ RUN_MESSAGES: Final = {
 
 @dataclass(frozen=True)
 class DeletionRequest:
-    """What the operator asked for; values already validated by the CLI."""
+    """What was asked for; values already validated by the caller."""
 
     work_order_numbers: tuple[str, ...]
     #: Canonical Part Numbers (``part_numbers.canonical_part_number``).
@@ -157,8 +190,6 @@ class DeletionRequest:
     operator: str
     reason: str
     confirm: bool = False
-    #: The backup taken before the deletion (``pf`` records it), if any.
-    backup_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -180,7 +211,7 @@ class _WorkOrderEntry:
 
 @dataclass
 class Plan:
-    """Everything one run would delete, what it keeps, and why it refuses."""
+    """Everything one deletion would delete, what it keeps, and why it refuses."""
 
     work_orders: list[dict[str, object]] = field(default_factory=list)
     part_numbers: list[dict[str, object]] = field(default_factory=list)
@@ -191,6 +222,14 @@ class Plan:
     def counts(self) -> dict[str, int]:
         return {table: len(self.ids[table]) for table in DELETE_ORDER}
 
+    def keys(self) -> dict[str, set[str]]:
+        """Every row's primary key as text, per table (as ``deletion_request_rows`` holds it)."""
+        return {table: {str(value) for value in self.ids[table]} for table in DELETE_ORDER}
+
+    def records(self) -> dict[str, list[dict[str, object]]]:
+        """The Work Orders and Part Numbers the deletion names (``deletion_requests.records``)."""
+        return {"work_orders": self.work_orders, "part_numbers": self.part_numbers}
+
 
 @dataclass
 class DeletionReport:
@@ -199,13 +238,13 @@ class DeletionReport:
     result: DeletionResult = "failed"
     finished_at: datetime.datetime | None = None
     plan: Plan | None = None
-    audit_rows: list[dict[str, object]] = field(default_factory=list)
-    guard_triggers: list[str] = field(default_factory=list)
+    #: The deletion request recorded with ``confirm`` (its summary).
+    recorded: dict[str, object] | None = None
     error: RunError | None = None
 
     @property
     def exit_code(self) -> int:
-        if self.result in ("preview", "deleted"):
+        if self.result in ("preview", "requested"):
             return 0
         return 1 if self.result == "refused" else 2
 
@@ -366,8 +405,8 @@ def _add_part_number_work_orders(
             Refusal(
                 "part_number_used_by_work_order",
                 f"Part Number {row.part_number!r} is used by demand line {int(row.id)} of"
-                f" {label}, which is not being deleted. Delete that Work Order in the same"
-                " command, or keep the Part Number.",
+                f" {label}, which is not being deleted. Delete that Work Order too, or keep the"
+                " Part Number.",
             )
         )
 
@@ -452,7 +491,7 @@ def _check_archived_history(session: Session, flow_ids: set[int], refusals: list
             Refusal(
                 "archived_history",
                 f"The history of Quantity Flow {int(row.flow_id)} was archived by archival run"
-                f" {int(row.run_id)}; this command never deletes archived history.",
+                f" {int(row.run_id)}; a permanent deletion never deletes archived history.",
             )
         )
 
@@ -788,7 +827,7 @@ def _check_stock(
                 f" {stocked_removed[part_number]} stocked, and the Work Orders that stay"
                 f" ({', '.join(holders) or 'none'}) have {allocated_after} allocated, but only"
                 f" {stocked_after} would remain stocked. Reverse those allocations first, or"
-                " delete those Work Orders in the same command.",
+                " delete those Work Orders too.",
             )
         )
 
@@ -846,6 +885,18 @@ _AUDIT_COLUMNS: Final = (
     "a.id, a.event_type, a.entity_type, a.entity_id, a.occurred_at, a.before_data,"
     " a.after_data, a.metadata AS meta"
 )
+#: The audit rows a deletion never plans, never deletes and never lists as
+#: kept: the record of an earlier permanent deletion (a ``DELETED`` row with
+#: the metadata key ``permanent_deletion``; its canonical PN recurs once the
+#: Part Number is entered again) and every row of a deletion request (their
+#: snapshots name the Part Numbers). They always stay.
+_NOT_A_DELETION_RECORD: Final = (
+    "(a.metadata -> :deletion_key) IS NULL AND a.entity_type <> :deletion_request_type"
+)
+_NOT_A_DELETION_RECORD_PARAMETERS: Final = {
+    "deletion_key": AUDIT_KEY,
+    "deletion_request_type": AuditEntityType.DELETION_REQUEST.value,
+}
 
 
 def _reference_term(key: str, parameter: str) -> str:
@@ -868,9 +919,11 @@ def _plan_audit_rows(session: Session, plan: Plan, deleted: Mapping[str, set[str
         int(row.id): row
         for row in _rows(
             session,
-            f"SELECT {_AUDIT_COLUMNS} FROM audit_events a WHERE "
-            + " OR ".join(entity_terms + reference_terms),
+            f"SELECT {_AUDIT_COLUMNS} FROM audit_events a WHERE ("
+            + " OR ".join(entity_terms + reference_terms)
+            + f") AND {_NOT_A_DELETION_RECORD}",
             **parameters,
+            **_NOT_A_DELETION_RECORD_PARAMETERS,
         )
     }
     references: dict[int, dict[str, set[str]]] = {}
@@ -900,13 +953,15 @@ def _plan_audit_rows(session: Session, plan: Plan, deleted: Mapping[str, set[str
     if events or stamps:
         for row in _rows(
             session,
-            f"SELECT {_AUDIT_COLUMNS} FROM audit_events a WHERE EXISTS (SELECT 1 FROM"
+            f"SELECT {_AUDIT_COLUMNS} FROM audit_events a WHERE (EXISTS (SELECT 1 FROM"
             " jsonb_path_query(a.metadata, 'lax $.**.device_event_id') v"
             " WHERE v #>> '{}' = ANY(:events))"
-            " OR (a.entity_type = :demand_type AND a.occurred_at = ANY(:stamps))",
+            " OR (a.entity_type = :demand_type AND a.occurred_at = ANY(:stamps)))"
+            f" AND {_NOT_A_DELETION_RECORD}",
             events=events,
             stamps=stamps,
             demand_type=AuditEntityType.WORK_ORDER_DEMAND.value,
+            **_NOT_A_DELETION_RECORD_PARAMETERS,
         ):
             if int(row.id) not in candidates:
                 siblings[int(row.id)] = row
@@ -1096,71 +1151,356 @@ def build_plan(session: Session, request: DeletionRequest) -> Plan:
 
 
 # ---------------------------------------------------------------------------
-# Execution
+# Requests: recording, their audit rows and the job's changes
 # ---------------------------------------------------------------------------
 
+_REQUESTS: Final = cast(Table, models.DeletionRequest.__table__)
+#: The audited facet of a request: every column (times as UTC text).
+REQUEST_COLUMNS: Final = tuple(column.name for column in _REQUESTS.columns)
 
-def delete_guards(tables: Iterable[str]) -> list[tuple[str, str]]:
-    """(table, trigger) of every guard trigger that refuses DELETE on ``tables``."""
-    wanted = set(tables)
-    return sorted(
-        (guard.table, name)
-        for name, guard in GUARD_TRIGGERS.items()
-        if guard.table in wanted and " DELETE " in f" {guard.definition.split(' ON ')[0]} "
+
+def request_snapshot(values: Mapping[Any, Any]) -> dict[str, Any]:
+    """The audit snapshot of a request: every column, times as UTC text."""
+    return {
+        column: _iso(value) if isinstance(value, datetime.datetime) else value
+        for column, value in ((column, values[column]) for column in REQUEST_COLUMNS)
+    }
+
+
+def request_values(request: models.DeletionRequest) -> dict[str, Any]:
+    return {column: getattr(request, column) for column in REQUEST_COLUMNS}
+
+
+def request_summary(request: Mapping[Any, Any]) -> dict[str, object]:
+    """A request as the host job and the interim command report it."""
+    return {
+        "id": int(request["id"]),
+        "state": str(request["state"]),
+        "scope": {
+            "work_order_numbers": list(request["work_order_numbers"]),
+            "part_numbers": list(request["part_numbers"]),
+        },
+        "requested_at": _iso(request["requested_at"]),
+        "requested_by_user_id": request["requested_by_user_id"],
+        "requested_by_operator": request["requested_by_operator"],
+        "rows": dict(request["row_counts"]),
+        "started_at": _iso(request["started_at"]),
+        "backup_label": request["backup_label"],
+        "pre_purge_backup_name": request["pre_purge_backup_name"],
+        "finished_at": _iso(request["finished_at"]),
+        "failure_reason": request["failure_reason"],
+    }
+
+
+def open_request(connection: Session | Connection) -> RowMapping | None:
+    """The open request (APPROVED or RUNNING), if any; at most one exists."""
+    return (
+        connection.execute(
+            select(_REQUESTS)
+            .where(_REQUESTS.c.state.in_(models.DELETION_REQUEST_OPEN_STATES))
+            .order_by(_REQUESTS.c.id)
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
     )
 
 
-def _refuse_unless_owner(session: Session) -> None:
-    row = session.execute(
+def open_request_message(request: Mapping[Any, Any] | None) -> str:
+    if request is None:
+        return _OPEN_REQUEST_MESSAGE
+    return (
+        f"Deletion request {request['id']} is still open ({request['state']}). Cancel it or wait"
+        " until it finishes before requesting another deletion."
+    )
+
+
+def refusal_list(plan: Plan) -> list[dict[str, str]]:
+    return [{"code": item.code, "message": item.message} for item in plan.refusals]
+
+
+def refuse_if_refused(plan: Plan) -> None:
+    """``DeletionRefusedError`` with every refusal, when the plan refuses."""
+    if plan.refusals:
+        raise DeletionRefusedError(_REFUSED_MESSAGE, refusal_list(plan))
+
+
+def audit_request(
+    connection: Session | Connection,
+    before: Mapping[Any, Any] | None,
+    after: Mapping[Any, Any],
+    *,
+    command: str,
+    source: str,
+    actor_user_id: int | None = None,
+    extra: Mapping[str, object] | None = None,
+) -> None:
+    """Append the ``DeletionRequest`` audit row of one change of state (no RETURNING)."""
+    connection.execute(
         text(
-            "SELECT current_user AS who, (SELECT rolsuper FROM pg_roles"
-            " WHERE rolname = current_user) AS superuser,"
-            " (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-            "  WHERE n.nspname = 'public' AND c.relname = ANY(:tables)"
-            "  AND NOT pg_has_role(current_user, c.relowner, 'USAGE')) AS foreign_tables"
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, actor_user_id,"
+            " occurred_at, before_data, after_data, metadata) VALUES (:event_type,"
+            " :entity_type, :entity_id, :actor, now(), CAST(:before AS jsonb),"
+            " CAST(:after AS jsonb), CAST(:metadata AS jsonb))"
         ),
-        {"tables": list(LOCK_ORDER)},
-    ).one()
-    if not row.superuser and int(row.foreign_tables) > 0:
-        raise _RefusedError(
-            [
-                Refusal(
-                    "owner_role_required",
-                    f"The database role {row.who} does not own the PartFlow tables. Run the"
-                    " command as the database owner role (pf delete-permanently does).",
-                )
-            ]
+        {
+            "event_type": (
+                AuditEventType.CREATED.value if before is None else AuditEventType.UPDATED.value
+            ),
+            "entity_type": AuditEntityType.DELETION_REQUEST.value,
+            "entity_id": str(after["id"]),
+            "actor": actor_user_id,
+            "before": None if before is None else json.dumps(request_snapshot(before)),
+            "after": json.dumps(request_snapshot(after)),
+            "metadata": json.dumps({"source": source, "command": command, **(extra or {})}),
+        },
+    )
+
+
+def mark(connection: Session | Connection, request_id: int) -> None:
+    """Name the request the job works on (transaction-local)."""
+    connection.execute(
+        text("SELECT set_config(:name, :value, true)"),
+        {"name": REQUEST_SETTING, "value": str(request_id)},
+    )
+
+
+def request_row(
+    connection: Session | Connection, request_id: int, *, lock: bool
+) -> RowMapping | None:
+    query = select(_REQUESTS).where(_REQUESTS.c.id == request_id)
+    if lock:
+        query = query.with_for_update()
+    return connection.execute(query).mappings().one_or_none()
+
+
+def change_request(
+    connection: Connection, request: RowMapping, command: str, **values: object
+) -> RowMapping:
+    """The job's change of a request (marked as its own), with its audit row."""
+    mark(connection, int(request["id"]))
+    after = (
+        connection.execute(
+            update(_REQUESTS)
+            .where(_REQUESTS.c.id == request["id"])
+            .values(**values)
+            .returning(*_REQUESTS.c)
         )
+        .mappings()
+        .one()
+    )
+    audit_request(connection, request, after, command=command, source="maintenance")
+    return after
+
+
+def record_request(
+    session: Session,
+    plan: Plan,
+    *,
+    work_order_numbers: Sequence[str],
+    part_numbers: Sequence[str],
+    reason: str,
+    requested_by_user_id: int | None,
+    requested_by_operator: str | None,
+    source: Literal["web", "cli"],
+) -> models.DeletionRequest:
+    """Record an APPROVED request with every planned row; the caller commits.
+
+    ``plan`` is the plan of exactly this scope, computed in the same
+    transaction, and refuses nothing. At most one request is open: an open
+    one is a ``ConflictError`` naming it, also when two requests race (the
+    unique index decides).
+    """
+    if plan.refusals:  # pragma: no cover - every caller refuses first
+        raise DeletionRefusedError(_REFUSED_MESSAGE, refusal_list(plan))
+    existing = open_request(session)
+    if existing is not None:
+        raise ConflictError(open_request_message(existing))
+    request = models.DeletionRequest(
+        state=DeletionRequestState.APPROVED,
+        work_order_numbers=list(dict.fromkeys(work_order_numbers)),
+        part_numbers=list(dict.fromkeys(part_numbers)),
+        reason=reason,
+        requested_by_user_id=requested_by_user_id,
+        requested_by_operator=requested_by_operator,
+        row_counts=plan.counts(),
+        records=plan.records(),
+    )
+    session.add(request)
+    try:
+        flush(session, {})
+    except IntegrityError as exc:
+        # Lost the race for the one open request (flush rolled back): name
+        # the winner; the violation stays the refusal's context.
+        if _constraint_name(exc) != _OPEN_INDEX:
+            raise
+        raise ConflictError(open_request_message(open_request(session))) from exc
+    session.refresh(request)
+    keys = plan.keys()
+    for table in DELETE_ORDER:
+        if keys[table]:
+            session.execute(
+                text(
+                    "INSERT INTO deletion_request_rows (request_id, table_name, row_key)"
+                    " SELECT :id, :table, unnest(CAST(:keys AS text[]))"
+                ),
+                {"id": request.id, "table": table, "keys": sorted(keys[table])},
+            )
+    extra: dict[str, object] = {}
+    if requested_by_operator is not None:
+        extra["operator"] = requested_by_operator
+    audit_request(
+        session,
+        None,
+        request_values(request),
+        command="request",
+        source=source,
+        actor_user_id=requested_by_user_id,
+        extra=extra,
+    )
+    return request
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    return getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+
+
+# ---------------------------------------------------------------------------
+# Execution: the host job carries a RUNNING request out
+# ---------------------------------------------------------------------------
+
+
+class DeletionChangedError(Exception):
+    """The request cannot be carried out as recorded; nothing was deleted.
+
+    The job makes the request FAILED with ``reason``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class CommitOutcomeUnknownError(Exception):
+    """COMMIT of the deletion failed: the request may be COMPLETED or still RUNNING."""
+
+
+@dataclass(frozen=True)
+class Carried:
+    """A request carried out: its row after COMPLETED, the rows deleted, the audit rows."""
+
+    request: RowMapping
+    deleted: dict[str, int]
+    audit_rows: list[dict[str, object]]
+
+
+def _stored_rows(connection: Connection, request_id: int) -> dict[str, set[str]]:
+    stored: dict[str, set[str]] = {table: set() for table in DELETE_ORDER}
+    for row in connection.execute(
+        text("SELECT table_name, row_key FROM deletion_request_rows WHERE request_id = :id"),
+        {"id": request_id},
+    ):
+        stored[str(row.table_name)].add(str(row.row_key))
+    return stored
+
+
+def _ids(keys: Iterable[str]) -> list[int]:
+    return sorted(int(key) for key in keys)
+
+
+def _locked_part_numbers(
+    connection: Connection, request: Mapping[Any, Any], stored: Mapping[str, set[str]]
+) -> set[str]:
+    """Every PN the stored rows and the scope name (demand lines, flows, allocations, masters)."""
+    found = set(request["part_numbers"]) | set(stored["part_numbers"])
+    for row in connection.execute(
+        text(
+            "SELECT part_number FROM work_order_demands"
+            " WHERE id = ANY(CAST(:demands AS integer[]))"
+            " UNION SELECT part_number FROM quantity_flows"
+            " WHERE id = ANY(CAST(:flows AS integer[]))"
+            " UNION SELECT part_number FROM work_order_allocations"
+            " WHERE id = ANY(CAST(:allocations AS integer[]))"
+        ),
+        {
+            "demands": _ids(stored["work_order_demands"]),
+            "flows": _ids(stored["quantity_flows"]),
+            "allocations": _ids(stored["work_order_allocations"]),
+        },
+    ):
+        found.add(str(row.part_number))
+    return found
+
+
+def _lock_rows(connection: Connection, table: str, keys: Iterable[str]) -> None:
+    """Row locks (``FOR UPDATE``) of the stored rows of ``table``, ascending."""
+    ids = _ids(keys)
+    if ids:
+        connection.execute(
+            text(
+                f"SELECT id FROM {_identifier(table)} WHERE id = ANY(CAST(:ids AS integer[]))"
+                " ORDER BY id FOR UPDATE"
+            ),
+            {"ids": ids},
+        )
+
+
+def _listed(sign: str, keys: Sequence[str]) -> str:
+    shown = ", ".join(keys[:3]) + (", …" if len(keys) > 3 else "")
+    return f"{sign}{len(keys)} ({shown})"
+
+
+def _key_order(key: str) -> tuple[int, str]:
+    return (int(key), "") if key.isdigit() else (0, key)
+
+
+def plan_difference(plan: Plan, stored: Mapping[str, set[str]]) -> str | None:
+    """How the plan computed now differs from the stored rows (None: it equals them)."""
+    if plan.refusals:
+        more = len(plan.refusals) - 1
+        return f"It would now be refused: {plan.refusals[0].message}" + (
+            f" ({more} more refusals.)" if more else ""
+        )
+    keys = plan.keys()
+    parts: list[str] = []
+    for table in DELETE_ORDER:
+        added = sorted(keys[table] - stored[table], key=_key_order)
+        removed = sorted(stored[table] - keys[table], key=_key_order)
+        if added or removed:
+            changes = [
+                _listed(sign, found) for sign, found in (("+", added), ("-", removed)) if found
+            ]
+            parts.append(f"{table} {' '.join(changes)}")
+    return None if not parts else "Changed rows: " + "; ".join(parts) + "."
 
 
 def _identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _delete_rows(session: Session, table: str, ids: Sequence[Any]) -> None:
+def _delete_rows(session: Session | Connection, table: str, ids: Sequence[Any]) -> int:
+    """Delete the rows of ``table`` by primary key; the number deleted."""
     if not ids:
-        return
+        return 0
     column = "part_number" if table == "part_numbers" else "id"
     result = session.execute(
         text(f"DELETE FROM {_identifier(table)} WHERE {column} = ANY(:ids)"), {"ids": list(ids)}
     )
-    deleted = int(getattr(result, "rowcount", -1))
-    if deleted != len(ids):
-        raise RuntimeError(
-            f"delete-permanently deleted {deleted} rows of {table}, {len(ids)} planned."
-        )
+    return int(getattr(result, "rowcount", -1))
 
 
-def _audit_document(
-    request: DeletionRequest, plan: Plan, run_id: str
+def audit_document(
+    plan: Plan, request: Mapping[Any, Any], *, backup: str, run_id: str
 ) -> dict[str, dict[str, object]]:
+    """The metadata of the one audit row per deleted Work Order and Part Number."""
     return {
         AUDIT_KEY: {
-            "source": "cli",
+            "source": "cli" if request["requested_by_operator"] is not None else "web",
             "run_id": run_id,
-            "operator": request.operator,
-            "reason": request.reason,
-            "backup": request.backup_name,
+            "request_id": int(request["id"]),
+            "operator": request["requested_by_operator"],
+            "reason": request["reason"],
+            "backup": backup,
             "work_orders": [
                 entry["work_order_number"] or f"internal:{entry['id']}"
                 for entry in plan.work_orders
@@ -1187,25 +1527,21 @@ def _snapshots(
     return work_orders, part_numbers
 
 
-def _execute(
-    session: Session, request: DeletionRequest, plan: Plan, report: DeletionReport
-) -> None:
+def _write_audit_rows(
+    session: Session,
+    plan: Plan,
+    request: Mapping[Any, Any],
+    backup: str,
+    snapshots: tuple[dict[int, dict[str, Any]], dict[str, dict[str, Any] | None]],
+) -> list[dict[str, object]]:
+    """One DELETED row per deleted Work Order and Part Number; the actor is the requester.
+
+    ``snapshots`` are the records' audited fields, read before the deletes.
+    """
+    work_order_before, part_number_before = snapshots
     run_id = uuid.uuid4().hex
-    work_order_before, part_number_before = _snapshots(session, plan)
-    tables = [table for table in DELETE_ORDER if plan.ids[table]]
-    guards = delete_guards(tables)
-    for table, trigger in guards:
-        session.execute(
-            text(f"ALTER TABLE {_identifier(table)} DISABLE TRIGGER {_identifier(trigger)}")
-        )
-    report.guard_triggers = [trigger for _, trigger in guards]
-    for table in DELETE_ORDER:
-        _delete_rows(session, table, plan.ids[table])
-    for table, trigger in guards:
-        session.execute(
-            text(f"ALTER TABLE {_identifier(table)} ENABLE TRIGGER {_identifier(trigger)}")
-        )
-    metadata = _audit_document(request, plan, run_id)
+    metadata = audit_document(plan, request, backup=backup, run_id=run_id)
+    actor = request["requested_by_user_id"]
     for work_order_id, before in work_order_before.items():
         audit.append_audit_event(
             session,
@@ -1214,6 +1550,7 @@ def _execute(
             entity_id=str(work_order_id),
             before_data=before,
             after_data=None,
+            actor_user_id=actor,
             metadata=metadata,
         )
     for part_number, master in part_number_before.items():
@@ -1224,29 +1561,154 @@ def _execute(
             entity_id=part_number,
             before_data=master,
             after_data=None,
+            actor_user_id=actor,
             metadata=metadata,
         )
     session.flush()
-    disabled = session.execute(
-        text(
-            "SELECT t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid"
-            " JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'"
-            " AND t.tgname = ANY(:names) AND t.tgenabled <> 'O'"
-        ),
-        {"names": sorted(GUARD_TRIGGERS)},
-    ).all()
-    if disabled:
-        raise RuntimeError(f"Guard triggers are not enabled: {sorted(r.tgname for r in disabled)}.")
-    report.audit_rows = [
+    return [
         {"id": int(row.id), "entity_type": str(row.entity_type), "entity_id": str(row.entity_id)}
         for row in session.execute(
             text(
                 "SELECT id, entity_type, entity_id FROM audit_events"
-                " WHERE metadata -> :key ->> 'run_id' = :run ORDER BY id"
+                " WHERE ((entity_type = :work_order AND entity_id = ANY(:work_orders))"
+                " OR (entity_type = :part_number AND entity_id = ANY(:part_numbers)))"
+                " AND metadata -> :key ->> 'run_id' = :run ORDER BY id"
             ),
-            {"key": AUDIT_KEY, "run": run_id},
+            {
+                "work_order": AuditEntityType.WORK_ORDER.value,
+                "work_orders": [str(work_order_id) for work_order_id in work_order_before],
+                "part_number": AuditEntityType.PART_NUMBER.value,
+                "part_numbers": list(part_number_before),
+                "key": AUDIT_KEY,
+                "run": run_id,
+            },
         )
     ]
+
+
+def _deleted_counts(
+    session: Session, plan: Plan, stored_counts: Mapping[str, int]
+) -> dict[str, int]:
+    """Delete in dependency order; each table's count must equal the stored count."""
+    deleted: dict[str, int] = {}
+    for table in DELETE_ORDER:
+        try:
+            deleted[table] = _delete_rows(session, table, plan.ids[table])
+        except IntegrityError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "23503":
+                raise
+            raise DeletionChangedError(
+                "The data changed after the request; nothing was deleted. Request it again. A"
+                f" row written meanwhile still refers to a {table} row the request deletes"
+                f" ({_constraint_name(exc)})."
+            ) from exc
+        if deleted[table] != stored_counts[table]:
+            raise DeletionChangedError(
+                f"The deletion deleted {deleted[table]} rows of {table}, but the request stored"
+                f" {stored_counts[table]}; nothing was deleted. Request it again."
+            )
+    return deleted
+
+
+def carry_out(
+    engine: Engine,
+    request_id: int,
+    *,
+    backup_name: str,
+    backup_started_at: datetime.datetime,
+) -> Carried:
+    """Carry out a RUNNING request in ONE transaction (design §6.3; see the module text).
+
+    ``DeletionChangedError`` (nothing deleted; the job fails the request)
+    when the stored rows disagree with their counts, when the plan computed
+    under the locks differs from them, or when a delete does not delete
+    exactly the stored rows. ``CommitOutcomeUnknownError`` when COMMIT fails.
+    Any other error rolls everything back and propagates.
+    """
+    with Session(engine) as session:
+        connection = session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+        mark(connection, request_id)
+        request = request_row(connection, request_id, lock=True)
+        if request is None or request["state"] != DeletionRequestState.RUNNING:
+            raise DeletionChangedError(  # pragma: no cover - checked under the job lock
+                f"Deletion request {request_id} is not RUNNING any more; nothing was deleted."
+            )
+        stored = _stored_rows(connection, request_id)
+        stored_counts = {table: len(stored[table]) for table in DELETE_ORDER}
+        recorded_counts = {
+            table: int(request["row_counts"].get(table, 0)) for table in DELETE_ORDER
+        }
+        if stored_counts != recorded_counts:
+            raise DeletionChangedError(
+                f"The stored rows of deletion request {request_id} do not match its row counts;"
+                " nothing was deleted. Request it again."
+            )
+        # The locks: PNs (sorted), then demand lines, then Work Orders, ascending —
+        # the order every command takes them in. Then the plan again, under them.
+        acquire_part_number_locks(connection, _locked_part_numbers(connection, request, stored))
+        _lock_rows(connection, "work_order_demands", stored["work_order_demands"])
+        _lock_rows(connection, "work_orders", stored["work_orders"])
+        plan = build_plan(
+            session,
+            DeletionRequest(
+                work_order_numbers=tuple(request["work_order_numbers"]),
+                part_numbers=tuple(request["part_numbers"]),
+                operator=request["requested_by_operator"] or "",
+                reason=str(request["reason"]),
+            ),
+        )
+        difference = plan_difference(plan, stored)
+        if difference is not None:
+            raise DeletionChangedError(
+                "The data changed after the request; nothing was deleted. Request it again."
+                f" {difference}"
+            )
+        # The audited fields of the records are read before the deletes.
+        snapshots = _snapshots(session, plan)
+        deleted = _deleted_counts(session, plan, stored_counts)
+        audit_rows = _write_audit_rows(session, plan, request, backup_name, snapshots)
+        after = change_request(
+            connection,
+            request,
+            "delete",
+            state=DeletionRequestState.COMPLETED.value,
+            pre_purge_backup_name=backup_name,
+            pre_purge_backup_started_at=backup_started_at,
+            finished_at=_now(),
+        )
+        try:
+            session.commit()
+        except Exception as exc:
+            raise CommitOutcomeUnknownError(str(exc)) from exc
+    return Carried(after, deleted, audit_rows)
+
+
+# ---------------------------------------------------------------------------
+# The interim command: preview, or record the operator's request
+# ---------------------------------------------------------------------------
+
+
+def _refuse_unless_owner(session: Session) -> None:
+    row = session.execute(
+        text(
+            "SELECT current_user AS who, (SELECT rolsuper FROM pg_roles"
+            " WHERE rolname = current_user) AS superuser,"
+            " (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+            "  WHERE n.nspname = 'public' AND c.relname = ANY(:tables)"
+            "  AND NOT pg_has_role(current_user, c.relowner, 'USAGE')) AS foreign_tables"
+        ),
+        {"tables": [*DELETE_ORDER, "deletion_requests", "deletion_request_rows"]},
+    ).one()
+    if not row.superuser and int(row.foreign_tables) > 0:
+        raise _RefusedError(
+            [
+                Refusal(
+                    "owner_role_required",
+                    f"The database role {row.who} does not own the PartFlow tables. Run the"
+                    " command as the database owner role (pf delete-permanently does).",
+                )
+            ]
+        )
 
 
 def _failure_code(exc: BaseException) -> str:
@@ -1262,7 +1724,7 @@ def _failure_code(exc: BaseException) -> str:
 def deletion_failure(
     report: DeletionReport, code: str, message: str, exception: BaseException | None = None
 ) -> DeletionReport:
-    """Finish ``report`` as failed: nothing was deleted."""
+    """Finish ``report`` as failed: nothing was requested or deleted."""
     report.result = "failed"
     report.error = RunError(code, message, exception)
     report.finished_at = _now()
@@ -1272,37 +1734,52 @@ def deletion_failure(
 def run_deletion(
     engine: Engine, request: DeletionRequest, *, lock_timeout_seconds: int
 ) -> DeletionReport:
-    """One preview or deletion; always a complete report."""
+    """One preview, or (``confirm``) the recording of the operator's request; always a report.
+
+    Nothing is deleted here: the host job carries a recorded request out.
+    """
     report = DeletionReport(started_at=_now(), request=request)
     with Session(engine) as session:
         try:
             if request.confirm:
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
                 session.execute(
                     text("SELECT set_config('lock_timeout', :timeout, true)"),
                     {"timeout": f"{lock_timeout_seconds}s"},
                 )
-                _refuse_unless_owner(session)
-                session.execute(text(f"LOCK TABLE {', '.join(LOCK_ORDER)} IN EXCLUSIVE MODE"))
             else:
                 session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-                _refuse_unless_owner(session)
+            _refuse_unless_owner(session)
             report.plan = build_plan(session, request)
             if report.plan.refusals:
                 raise _RefusedError(report.plan.refusals)
             if request.confirm:
-                _execute(session, request, report.plan, report)
+                try:
+                    recorded = record_request(
+                        session,
+                        report.plan,
+                        work_order_numbers=request.work_order_numbers,
+                        part_numbers=request.part_numbers,
+                        reason=request.reason,
+                        requested_by_user_id=None,
+                        requested_by_operator=request.operator,
+                        source="cli",
+                    )
+                except ConflictError as conflict:
+                    report.plan.refusals.append(Refusal("request_open", conflict.message))
+                    raise _RefusedError(report.plan.refusals) from conflict
+                report.recorded = request_summary(request_values(recorded))
         except _RefusedError as refusal:
-            session.rollback()
+            _rollback(session)
             if report.plan is None:
                 report.plan = Plan(refusals=refusal.refusals)
             report.result = "refused"
             report.finished_at = _now()
             return report
         except Exception as exc:
-            # Every failure before COMMIT rolls the whole run back.
+            # Every failure before COMMIT rolls the whole transaction back.
             _rollback(session)
-            report.audit_rows = []
-            report.guard_triggers = []
+            report.recorded = None
             code = _failure_code(exc)
             return deletion_failure(report, code, RUN_MESSAGES[code], exc)
         if not request.confirm:
@@ -1313,12 +1790,12 @@ def run_deletion(
         try:
             session.commit()
         except Exception as exc:
-            # COMMIT itself failed: the outcome is unknown, never "nothing deleted".
+            # COMMIT itself failed: the outcome is unknown, never "nothing requested".
             report.result = "outcome_unknown"
             report.error = RunError("outcome_unknown", RUN_MESSAGES["outcome_unknown"], exc)
             report.finished_at = _now()
             return report
-    report.result = "deleted"
+    report.result = "requested"
     report.finished_at = _now()
     return report
 
@@ -1335,7 +1812,13 @@ def _rollback(session: Session) -> None:
 
 
 def deletion_document(report: DeletionReport) -> dict[str, object]:
-    """The JSON document of one run (keys in the contract order)."""
+    """The JSON document of one run of the interim command (keys in the contract order).
+
+    ``backup``, ``audit_rows`` and ``guard_triggers`` stay for the readers of
+    the earlier document and are always null or empty: the host job takes the
+    pre-purge backup and writes the audit rows of a recorded request, and no
+    trigger is ever disabled.
+    """
     plan = report.plan
     finished = report.finished_at or report.started_at
     request = report.request
@@ -1350,7 +1833,7 @@ def deletion_document(report: DeletionReport) -> dict[str, object]:
         "mode": "delete" if request.confirm else "preview",
         "operator": request.operator,
         "reason": request.reason,
-        "backup": request.backup_name,
+        "backup": None,
         "requested": {
             "work_orders": list(dict.fromkeys(request.work_order_numbers)),
             "part_numbers": list(dict.fromkeys(request.part_numbers)),
@@ -1359,13 +1842,10 @@ def deletion_document(report: DeletionReport) -> dict[str, object]:
         "part_numbers": [] if plan is None else plan.part_numbers,
         "rows": None if plan is None or plan.refusals else plan.counts(),
         "kept_audit_rows": [] if plan is None or plan.refusals else plan.kept_audit_rows,
-        "refusals": (
-            []
-            if plan is None
-            else [{"code": item.code, "message": item.message} for item in plan.refusals]
-        ),
-        "audit_rows": list(report.audit_rows),
-        "guard_triggers": list(report.guard_triggers),
+        "refusals": [] if plan is None else refusal_list(plan),
+        "request": report.recorded,
+        "audit_rows": [],
+        "guard_triggers": [],
         "error": (
             None
             if report.error is None
@@ -1385,21 +1865,23 @@ def _records(plan: Plan) -> str:
 
 def deletion_summary(report: DeletionReport) -> str:
     plan = report.plan
-    if report.result in ("preview", "deleted") and plan is not None:
+    if report.result in ("preview", "requested") and plan is not None:
         rows = ", ".join(f"{table} {count}" for table, count in plan.counts().items() if count)
         kept = len(plan.kept_audit_rows)
         if report.result == "preview":
             return (
                 f"delete-permanently: preview — would delete {_records(plan)} ({rows});"
                 f" {kept} audit rows kept because they also concern other records. Nothing was"
-                " changed; run again with --confirm to delete."
+                " changed; run again with --confirm to request the deletion."
             )
+        recorded = report.recorded or {}
         return (
-            f"delete-permanently: deleted {_records(plan)} ({rows}); one audit row each;"
-            f" {kept} audit rows kept."
+            f"delete-permanently: requested — deletion request {recorded.get('id')} will delete"
+            f" {_records(plan)} ({rows}); {kept} audit rows kept. The host job carries it out at"
+            " its next start (archive.sh), after a pre-purge backup."
         )
     if report.result == "refused" and plan is not None:
         reasons = " ".join(item.message for item in plan.refusals)
-        return f"delete-permanently: refused — nothing was deleted. {reasons}"
+        return f"delete-permanently: refused — nothing was requested or deleted. {reasons}"
     message = report.error.message if report.error is not None else report.result
     return f"delete-permanently: {message}"

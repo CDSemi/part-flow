@@ -33,7 +33,7 @@ from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0040_phase16_history_archive"
+_PREVIOUS = "0041_phase16_history_purge"
 _ALL = schema_revision.pending_revisions(None)
 
 

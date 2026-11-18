@@ -12,6 +12,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from '../../App';
 import { PERMISSIONS } from '../../api/roles';
 import type { Permission } from '../../api/roles';
+import { DELETION_POLL_MS } from '../../components/permanent-deletion';
 
 // Work Orders regression tests (Phase 4): the view runs against the
 // REAL /api/work-orders surface — these tests exercise it against an
@@ -1026,12 +1027,95 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     }
   }
 
+  // Permanent deletion (archival step 3, D17): the preview of one Work
+  // Order, the request, and the requests the dialog reads again.
+  if (url.startsWith('/api/permanent-deletion/preview?')) {
+    const number = new URL(url, 'http://x').searchParams.get(
+      'work_order_number',
+    );
+    const wo = state.workOrders.find((w) => w.work_order_number === number);
+    return json({
+      scope: { work_order_numbers: [number], part_numbers: [] },
+      work_orders: wo
+        ? [
+            {
+              id: wo.id,
+              work_order_number: wo.work_order_number,
+              internal: false,
+              named: true,
+              part_numbers: wo.demands.map((d) => d.part_number),
+              demand_lines: wo.demands.length,
+            },
+          ]
+        : [],
+      part_numbers: [],
+      rows: deletionRows(wo?.demands.length ?? 0),
+      kept_audit_rows: [],
+      refusals: [],
+      open_request: null,
+    });
+  }
+  if (url === '/api/permanent-deletion/requests' && method === 'POST') {
+    const created = deletionRequestWire(
+      deletionRequests.length + 1,
+      body.work_order_numbers as string[],
+      String(body.reason),
+    );
+    deletionRequests.unshift(created);
+    return json(created, 201);
+  }
+  if (url.startsWith('/api/permanent-deletion/requests?')) {
+    return json(deletionRequests);
+  }
+
   return detailResponse(`Unhandled fake route: ${method} ${url}`, 500);
 }
+
+/** The rows a fake permanent deletion of one Work Order deletes. */
+function deletionRows(demandLines: number) {
+  return {
+    audit_events: 2,
+    part_movements: 0,
+    quantity_flow_lineage: 0,
+    quantity_flows: 0,
+    assigned_route_steps: 0,
+    assigned_routes: 0,
+    work_order_allocations: 0,
+    work_order_demands: demandLines,
+    work_orders: 1,
+    part_numbers: 0,
+  };
+}
+
+/** A permanent deletion request of Work Orders as the API answers it. */
+function deletionRequestWire(id: number, numbers: string[], reason: string) {
+  return {
+    id,
+    state: 'APPROVED',
+    scope: { work_order_numbers: numbers, part_numbers: [] },
+    reason,
+    requested_by: { user_id: 90, display_name: 'Mia Manager' },
+    requested_by_operator: null,
+    requested_at: '2026-11-18T10:00:00Z',
+    work_orders: [],
+    part_numbers: [],
+    rows: deletionRows(3),
+    started_at: null as string | null,
+    backup_label: null as string | null,
+    pre_purge_backup: null as { name: string; dump_started_at: string } | null,
+    finished_at: null as string | null,
+    cancelled_by: null,
+    failure_reason: null,
+  };
+}
+
+/** The permanent deletion requests of the fake, newest first. */
+let deletionRequests: ReturnType<typeof deletionRequestWire>[] = [];
 
 beforeEach(() => {
   state = seedState();
   sessionPermissions = PERMISSIONS;
+  deletionRequests = [];
   nextReleaseRefusal = null;
   availableStock = {};
   allocationRows = [];
@@ -4984,4 +5068,110 @@ test('FV-13: with neither key the import entry is hidden, not disabled', async (
   expect(
     screen.queryByRole('button', { name: 'Import from file…' }),
   ).toBeNull();
+});
+
+/* ============ Archival step 3 (D17) — Delete permanently… ============ */
+
+test('PD-1: Delete permanently… requests the deletion of the Work Order; once deleted, it says so and returns to the list', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    await renderWorkOrders();
+    const details = await openWorkOrderDetail('007201', 'A-100');
+    const zone = details.querySelector('.pdel-zone') as HTMLElement;
+    expect(zone.textContent).toContain(
+      'This removes Work Order 007201 and all its data from the database, as if it had never been entered, after a pre-purge backup.',
+    );
+    fireEvent.click(
+      within(zone).getByRole('button', { name: 'Delete permanently…' }),
+    );
+    const dialog = screen.getByRole('dialog', {
+      name: 'Delete Work Order permanently',
+    });
+    await within(dialog).findByText('What is deleted');
+    expect(
+      within(dialog).getByText('3 demand lines: A-100, B-200, E-500'),
+    ).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText(/^Reason/), {
+      target: { value: 'Test data' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/to confirm$/), {
+      target: { value: '007201' },
+    });
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Request deletion' }),
+    );
+    expect(
+      await within(dialog).findByText('Waiting for the server'),
+    ).toBeInTheDocument();
+    expect(state.calls).toContain('POST /api/permanent-deletion/requests');
+    // Requesting changed nothing: Work Order Details stays open behind.
+    expect(
+      screen.getByRole('dialog', { name: 'Work Order Details' }),
+    ).toBeInTheDocument();
+
+    // The server's history archive task deletes the Work Order.
+    Object.assign(deletionRequests[0], {
+      state: 'COMPLETED',
+      started_at: '2026-11-18T10:05:00Z',
+      backup_label: 'deletion-1-20261118T100500Z',
+      pre_purge_backup: {
+        name: '20261118T100501Z-pre-purge-deletion-1-20261118T100500Z',
+        dump_started_at: '2026-11-18T10:05:01Z',
+      },
+      finished_at: '2026-11-18T10:06:00Z',
+    });
+    state.workOrders = state.workOrders.filter(
+      (w) => w.work_order_number !== '007201',
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DELETION_POLL_MS);
+    });
+    expect(
+      await within(dialog).findByText('Work Order 007201 no longer exists.'),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Back to Work Orders' }),
+    );
+    expect(
+      await screen.findByText(
+        '✓ Work Order 007201 was deleted permanently (deletion request 1).',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /007201/ })).toBeNull(),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('PD-2: only a holder of the key sees Delete permanently…, and only for a Work Order with a number', async () => {
+  await renderWorkOrders();
+  // An internal Work Order has no number to name.
+  const internal = screen.getByRole('button', { name: 'Open Work Order —' });
+  fireEvent.click(internal);
+  const internalDetails = await screen.findByRole('dialog', {
+    name: 'Work Order Details',
+  });
+  await within(internalDetails).findByText('C-300');
+  expect(internalDetails.querySelector('.pdel-zone')).toBeNull();
+  fireEvent.click(
+    within(internalDetails).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  cleanup();
+
+  // Without the key: no zone, nothing read.
+  sessionPermissions = PERMISSIONS.filter(
+    (key) => key !== 'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+  );
+  await renderWorkOrders();
+  const details = await openWorkOrderDetail('007201', 'A-100');
+  expect(details.querySelector('.pdel-zone')).toBeNull();
+  expect(
+    within(details).queryByRole('button', { name: 'Delete permanently…' }),
+  ).toBeNull();
+  expect(
+    state.calls.some((call) => call.includes('/api/permanent-deletion')),
+  ).toBe(false);
 });

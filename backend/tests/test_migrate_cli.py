@@ -56,7 +56,7 @@ pytestmark = pytest.mark.database_owner
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0040_phase16_history_archive"
+_PREVIOUS = "0041_phase16_history_purge"
 # The revision before the last one that alters audit_events (0032): the
 # lock case needs a pending migration that waits for that table.
 _BEFORE_AUDIT_ALTER = "0031_phase14_beyond_demand"
@@ -601,8 +601,8 @@ def test_migrate_applies_the_grants(
     assert document["grants"] == {
         "status": "applied",
         "roles": {"application": roles.app, "maintenance": roles.maintenance},
-        "tables": 37,
-        "sequences": 27,
+        "tables": 39,
+        "sequences": 28,
         "default_privileges_removed": 0,
         "foreign_grantees": [],
     }
@@ -673,7 +673,7 @@ def test_a_new_table_is_granted_in_the_same_transaction(
     assert code == 0, err
     assert document["result"] == "upgraded"
     assert document["applied_revisions"] == [probe_scripts]
-    assert document["grants"]["tables"] == 38
+    assert document["grants"]["tables"] == 40
     privileges = _scalar(
         database,
         "SELECT string_agg(privilege_type, ',' ORDER BY privilege_type)"

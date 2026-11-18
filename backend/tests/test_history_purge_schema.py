@@ -3,8 +3,11 @@
 Runs the real Alembic chain against isolated, temporary PostgreSQL databases
 (created and dropped by the fixtures) and verifies:
 
-- the exact head boundary (``0041_phase16_history_purge`` is the single head,
-  and the models match the schema migrated to it) and the migration's
+- the cases run against this revision inside the current chain; the head
+  boundary and the models parity moved to
+  ``tests/test_deletion_requests_schema.py`` with
+  ``0042_phase16_deletion_requests``, which also replaces the Movement guard's
+  function (it restores this revision's on its downgrade); the migration's
   literals against the models, the enums and migration 0040;
 - the new settings (defaults and range CHECKs);
 - the Movement deletion guard: refused for every row unless a run in
@@ -57,6 +60,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _VERSIONS = _BACKEND_DIR / "alembic" / "versions"
 _PREVIOUS_REVISION = "0040_phase16_history_archive"
 _HEAD_REVISION = "0041_phase16_history_purge"
+_CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _VERSIONS / "20261118_0041_phase16_history_purge.py"
 _PREVIOUS_FILE = _VERSIONS / "20261117_0040_phase16_history_archive.py"
 _HEAD_TEMPLATE = "partflow_test_history_purge_schema_head"
@@ -134,21 +138,11 @@ def head(head_database: URL) -> Iterator[Engine]:
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_has_a_single_head() -> None:
+def test_the_revision_is_in_the_chain() -> None:
     config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-    assert schema_revision.code_head() == _HEAD_REVISION
+    revision = ScriptDirectory.from_config(config).get_revision(_HEAD_REVISION)
+    assert revision is not None and revision.down_revision == _PREVIOUS_REVISION
     assert schema_revision.non_transactional_revisions([_HEAD_REVISION]) == []
-
-
-def test_models_metadata_matches_the_migrated_schema(head: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head.connect() as connection:
-        context = MigrationContext.configure(connection)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
 
 
 def _model_checks(model: type[models.Base]) -> dict[str, str]:
@@ -212,11 +206,11 @@ def test_the_migration_literals_match_the_models_and_0040() -> None:
         _model_checks(models.ApplicationPolicy)["ck_application_policy_backup_keep_pre_purge_range"]
         == models.POLICY_BACKUP_KEEP_PRE_PURGE_SQL
     )
-    # The guards the migration creates are pinned by check (h).
+    # The guards the migration creates are pinned by check (h); 0042 (history
+    # archival step 3) replaces the Movement guard's function, so its pin is 0042's.
     for name, body in (
         (migration._RUNS_FUNCTION, migration._RUNS_BODY),
         (migration._FLOWS_FUNCTION, migration._FLOWS_BODY),
-        (migration._DELETE_FUNCTION, migration._DELETE_BODY),
     ):
         assert hashlib.sha256(body.encode("utf-8")).hexdigest() == GUARD_FUNCTION_SHA256[name]
     assert GUARD_TRIGGERS[migration._DELETE_TRIGGER].function == migration._DELETE_FUNCTION
@@ -228,7 +222,7 @@ def test_the_migration_literals_match_the_models_and_0040() -> None:
 
 def test_a_fresh_install_holds_the_new_defaults(head: Engine) -> None:
     with head.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         row = (
             connection.execute(
                 sa.text(
@@ -830,7 +824,7 @@ def test_the_downgrade_restores_0040(head_database: URL, head: Engine) -> None:
     }
     command.upgrade(_alembic_config(head_database), "head")
     with head.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
 
 
 @pytest.mark.parametrize(
@@ -853,4 +847,4 @@ def test_the_downgrade_refuses_while_purge_data_exists(
     with pytest.raises(DBAPIError, match="History purge data exists"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD

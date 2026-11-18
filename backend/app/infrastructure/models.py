@@ -91,6 +91,7 @@ from app.domain.enums import (
     AllocationSource,
     AuditEntityType,
     AuditEventType,
+    DeletionRequestState,
     HistoryArchiveRunResult,
     HistoryArchiveRunState,
     LineageRelation,
@@ -556,6 +557,102 @@ HISTORY_ARCHIVED_FLOW_SCRAPPED_SQL = (
     " AND (scrapped_quantity IS NULL OR scrapped_quantity > 0)"
 )
 HISTORY_ARCHIVED_FLOW_SKIP_OR_PURGE_SQL = "skipped_at IS NULL OR purged_at IS NULL"
+
+# Permanent deletion requests (Phase 16, history archival design D17 and
+# §6.3; build step 3, migration `0042_phase16_deletion_requests`). Repeated
+# verbatim by that migration; the guard triggers live in the migration only.
+DELETION_REQUEST_FINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED")
+#: The states of an open request; at most one request is open (a partial
+#: UNIQUE index).
+DELETION_REQUEST_OPEN_STATES = ("APPROVED", "RUNNING")
+#: The tables a permanent deletion deletes from, in delete (dependency) order
+#: (``app.application.permanent_deletion.DELETE_ORDER``): the only tables a
+#: request's stored rows may name.
+DELETION_TABLES = (
+    "audit_events",
+    "part_movements",
+    "quantity_flow_lineage",
+    "quantity_flows",
+    "assigned_route_steps",
+    "assigned_routes",
+    "work_order_allocations",
+    "work_order_demands",
+    "work_orders",
+    "part_numbers",
+)
+DELETION_REQUEST_REASON_MAX_LENGTH = 500
+#: The pre-purge backup the job takes for a request: ``<UTC stamp>-pre-purge-``
+#: and the request's ``backup_label`` (``app.application.backups``); the label
+#: starts at character 28.
+DELETION_REQUEST_BACKUP_NAME_PATTERN = (
+    "^[0-9]{8}T[0-9]{6}Z-pre-purge-deletion-[0-9]+-[0-9]{8}T[0-9]{6}Z$"
+)
+DELETION_REQUEST_STATE_SQL = (
+    "state IN (" + ", ".join(f"'{state}'" for state in DeletionRequestState) + ")"
+)
+#: The scope as requested: Work Order Numbers (exactly as stored) and
+#: canonical Part Numbers, at least one entry, no NULL element.
+DELETION_REQUEST_SCOPE_SQL = (
+    "cardinality(work_order_numbers) + cardinality(part_numbers) >= 1"
+    " AND array_position(work_order_numbers, NULL) IS NULL"
+    " AND array_position(part_numbers, NULL) IS NULL"
+)
+DELETION_REQUEST_REASON_SQL = "char_length(reason) BETWEEN 1 AND 500"
+#: A User of PartFlow (the API) or an operator's name (the interim command
+#: ``pf delete-permanently``, recorded by the database owner role).
+DELETION_REQUEST_REQUESTER_SQL = (
+    "(requested_by_user_id IS NULL) <> (requested_by_operator IS NULL)"
+    " AND (requested_by_operator IS NULL OR char_length(requested_by_operator) BETWEEN 1 AND 500)"
+)
+DELETION_REQUEST_PLAN_SQL = (
+    "jsonb_typeof(row_counts) = 'object' AND jsonb_typeof(records) = 'object'"
+)
+#: The job starts a request (RUNNING) at a whole second, with the label of its
+#: pre-purge backup: ``deletion-<id>-<that second, UTC>``.
+DELETION_REQUEST_PROGRESS_SQL = (
+    "(started_at IS NULL) = (backup_label IS NULL)"
+    " AND (state NOT IN ('APPROVED', 'CANCELLED') OR started_at IS NULL)"
+    " AND (state NOT IN ('RUNNING', 'COMPLETED') OR started_at IS NOT NULL)"
+    " AND (started_at IS NULL OR (started_at = date_trunc('second', started_at)"
+    " AND backup_label = 'deletion-' || id || '-'"
+    " || to_char(started_at AT TIME ZONE 'UTC', 'YYYYMMDD\"T\"HH24MISS\"Z\"')))"
+)
+#: The pre-purge backup: its name and dump start come together, the name is
+#: of the kind pre-purge with the request's label, the dump started at or
+#: after the second the request started, and only a COMPLETED request (which
+#: needs one) or a FAILED one has it.
+DELETION_REQUEST_BACKUP_SQL = (
+    "(pre_purge_backup_name IS NULL) = (pre_purge_backup_started_at IS NULL)"
+    " AND (pre_purge_backup_name IS NULL OR (pre_purge_backup_name ~ '"
+    + DELETION_REQUEST_BACKUP_NAME_PATTERN
+    + "' AND substr(pre_purge_backup_name, 28) = backup_label"
+    " AND pre_purge_backup_started_at >= started_at))"
+    " AND (state <> 'COMPLETED' OR pre_purge_backup_name IS NOT NULL)"
+    " AND (pre_purge_backup_name IS NULL OR state IN ('COMPLETED', 'FAILED'))"
+)
+DELETION_REQUEST_FAILURE_SQL = (
+    "(state = 'FAILED') = (failure_reason IS NOT NULL)"
+    " AND (failure_reason IS NULL OR char_length(failure_reason) BETWEEN 1 AND 2000)"
+)
+DELETION_REQUEST_FINISH_SQL = (
+    "(state IN ("
+    + ", ".join(f"'{state}'" for state in DELETION_REQUEST_FINAL_STATES)
+    + ")) = (finished_at IS NOT NULL)"
+    " AND (state = 'CANCELLED') = (cancelled_by_user_id IS NOT NULL)"
+)
+DELETION_REQUEST_OPEN_WHERE_SQL = (
+    "state IN (" + ", ".join(f"'{state}'" for state in DELETION_REQUEST_OPEN_STATES) + ")"
+)
+DELETION_REQUEST_ROW_TABLE_SQL = (
+    "table_name IN (" + ", ".join(f"'{table}'" for table in DELETION_TABLES) + ")"
+)
+#: A stored row's primary key as text: the canonical Part Number of a
+#: ``part_numbers`` row, the decimal id of any other row.
+DELETION_REQUEST_ROW_KEY_SQL = (
+    "(table_name = 'part_numbers' AND row_key = upper(row_key COLLATE \"C\")"
+    " AND row_key COLLATE \"C\" !~ '[[:space:]]' AND row_key <> '')"
+    " OR (table_name <> 'part_numbers' AND row_key ~ '^[1-9][0-9]{0,18}$')"
+)
 
 # Backups (Phase 16, owner decision of 2026-11-13; Administration →
 # Backups): how often the host's hourly task takes a scheduled backup — a
@@ -3120,8 +3217,11 @@ class AuditEvent(Base):
     grants — and (Phase 14 slice 4) ScanStationDevice, the enrollment,
     activation, replacement and revocation of a station device (never a
     code, token or digest) — and (Phase 16) HistoryArchiveRun, every change
-    of state of a Movement-history archival run, the one entity type the
-    maintenance database role may append (``entity_id`` the run id). Rows
+    of state of a Movement-history archival run (``entity_id`` the run id),
+    and DeletionRequest, every change of state of a permanent deletion
+    request (``entity_id`` the request id). The maintenance database role
+    appends only these and, while it carries a deletion request out, the
+    one DELETED row of each Work Order and Part Number it deletes. Rows
     are descriptive history for
     display and accountability: never replayed to build state, never
     describing quantity movement (the `RECEIVED` PartMovement is the
@@ -3182,7 +3282,8 @@ class AuditEvent(Base):
             f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}',"
             f" '{AuditEntityType.ROUTE_TEMPLATE}', '{AuditEntityType.USER}',"
             f" '{AuditEntityType.ROLE}', '{AuditEntityType.SCAN_STATION_DEVICE}',"
-            f" '{AuditEntityType.ASSIGNED_ROUTE}', '{AuditEntityType.HISTORY_ARCHIVE_RUN}')",
+            f" '{AuditEntityType.ASSIGNED_ROUTE}', '{AuditEntityType.HISTORY_ARCHIVE_RUN}',"
+            f" '{AuditEntityType.DELETION_REQUEST}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.
@@ -3534,5 +3635,146 @@ class HistoryArchivedFlow(Base):
             "ix_history_archived_flows_received_demand_id_purged",
             "received_demand_id",
             postgresql_where=text("purged_at IS NOT NULL AND received_demand_id IS NOT NULL"),
+        ),
+    )
+
+
+class DeletionRequest(Base):
+    """One permanent deletion request (Phase 16, history archival design D17
+    and §6.3; build step 3, migration `0042_phase16_deletion_requests`).
+
+    A holder of Delete Work Orders and Part Numbers permanently requests in
+    Work Order Details or the Part Number dialog — or an operator with the
+    interim command ``pf delete-permanently --confirm`` — the deletion of
+    Work Orders (by their numbers) or of Part Numbers, with a reason. At that
+    moment the server computes what the deletion takes
+    (``app.application.permanent_deletion.build_plan``): a refusal records
+    nothing; otherwise the request is recorded APPROVED (the request is the
+    approval) with every planned row in ``deletion_request_rows``, the row
+    counts per table and the records it names. The host job
+    (``python -m app.cli history-archive``, as the maintenance database role)
+    takes it at its next start: RUNNING, the pre-purge backup, then in ONE
+    transaction the recomputed plan must equal the stored rows, the rows
+    are deleted and one DELETED audit row is written per deleted Work Order
+    and Part Number, and the request is COMPLETED with the backup recorded.
+    Any failure makes it FAILED with nothing deleted. Every change of state
+    appends one ``DeletionRequest`` audit row.
+
+    The request columns (scope, reason, requester, request time, the plan's
+    counts and records) never change. The guard trigger
+    ``trg_deletion_requests_guard_mutation`` lets the application role only
+    insert an APPROVED request and cancel an APPROVED one, lets only the
+    table owner record an operator's request, and leaves every other
+    transition to the job, made while ``partflow.deletion_request_id`` names
+    the request; a finished request never changes; no request is ever
+    deleted. At most one request is open (``uq_deletion_requests_open``).
+    """
+
+    __tablename__ = "deletion_requests"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    # The scope as requested: Work Order Numbers exactly as stored, canonical
+    # Part Numbers.
+    work_order_numbers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    part_numbers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_deletion_requests_requested_by_user_id_users")
+    )
+    # The operator's name of a request recorded by ``pf delete-permanently``.
+    requested_by_operator: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # What the plan of the request takes: the rows per table, and the Work
+    # Orders and Part Numbers it names (``permanent_deletion.Plan``).
+    row_counts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    records: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # The job's progress.
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    backup_label: Mapped[str | None] = mapped_column(Text)
+    pre_purge_backup_name: Mapped[str | None] = mapped_column(Text)
+    pre_purge_backup_started_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    cancelled_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_deletion_requests_cancelled_by_user_id_users")
+    )
+
+    __table_args__ = (
+        CheckConstraint(DELETION_REQUEST_STATE_SQL, name=conv("ck_deletion_requests_state")),
+        CheckConstraint(DELETION_REQUEST_SCOPE_SQL, name=conv("ck_deletion_requests_scope_shape")),
+        CheckConstraint(
+            DELETION_REQUEST_REASON_SQL, name=conv("ck_deletion_requests_reason_length")
+        ),
+        CheckConstraint(
+            DELETION_REQUEST_REQUESTER_SQL, name=conv("ck_deletion_requests_requester_shape")
+        ),
+        CheckConstraint(DELETION_REQUEST_PLAN_SQL, name=conv("ck_deletion_requests_plan_shape")),
+        CheckConstraint(
+            DELETION_REQUEST_PROGRESS_SQL, name=conv("ck_deletion_requests_progress_shape")
+        ),
+        CheckConstraint(
+            DELETION_REQUEST_BACKUP_SQL, name=conv("ck_deletion_requests_backup_shape")
+        ),
+        CheckConstraint(
+            DELETION_REQUEST_FAILURE_SQL, name=conv("ck_deletion_requests_failure_shape")
+        ),
+        CheckConstraint(
+            DELETION_REQUEST_FINISH_SQL, name=conv("ck_deletion_requests_finish_shape")
+        ),
+        # At most one open request: a second request, or a request racing the
+        # first, is refused by the database itself.
+        Index(
+            "uq_deletion_requests_open",
+            text("(true)"),
+            unique=True,
+            postgresql_where=text(DELETION_REQUEST_OPEN_WHERE_SQL),
+        ),
+    )
+
+
+class DeletionRequestRow(Base):
+    """One row a permanent deletion request deletes (Phase 16, history
+    archival design D17; build step 3).
+
+    Written with its request, in the same transaction, from the plan the
+    server computed: the table and the row's primary key as text (the
+    canonical Part Number of a ``part_numbers`` row, the decimal id of any
+    other row). The row guard of every table a deletion deletes from admits
+    a delete by the job only for a row listed here for the RUNNING request
+    named by ``partflow.deletion_request_id``. The guard trigger
+    ``trg_deletion_request_rows_guard_mutation`` admits an insert only in
+    the transaction that recorded the request (its ``requested_at`` is that
+    transaction's start) while it is APPROVED; no row is ever changed or
+    deleted.
+    """
+
+    __tablename__ = "deletion_request_rows"
+
+    request_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "deletion_requests.id",
+            name="fk_deletion_request_rows_request_id_deletion_requests",
+        ),
+        primary_key=True,
+    )
+    table_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    row_key: Mapped[str] = mapped_column(Text, primary_key=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            DELETION_REQUEST_ROW_TABLE_SQL, name=conv("ck_deletion_request_rows_table_name")
+        ),
+        CheckConstraint(
+            DELETION_REQUEST_ROW_KEY_SQL, name=conv("ck_deletion_request_rows_row_key_shape")
         ),
     )

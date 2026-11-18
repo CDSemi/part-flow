@@ -35,7 +35,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from alembic import command
 from app import cli
-from app.application import database_roles, migration, reconciliation
+from app.application import database_roles, migration, permanent_deletion, reconciliation
 from app.application.database_roles import DatabaseRoles
 from app.core.config import get_settings
 from app.infrastructure import schema_revision
@@ -85,11 +85,35 @@ _GUARDED = (
     "worker_sessions",
     "history_archive_runs",
     "history_archived_flows",
+    "deletion_requests",
+    "deletion_request_rows",
 )
-#: The tables whose row trigger judges each insert and update the class grants
-#: (history archival, Phase 16): the application role's run request,
-#: cancellation and copy confirmation.
-_ROW_JUDGED = {"history_archive_runs": {"INSERT", "UPDATE"}, "worker_sessions": {"UPDATE"}}
+#: The ordinary tables a permanent deletion deletes from (history archival step
+#: 3): their row guard judges every DELETE the class grants.
+_DELETION_ORDINARY = (
+    "assigned_routes",
+    "part_numbers",
+    "quantity_flows",
+    "work_order_demands",
+    "work_orders",
+)
+#: The tables whose guard judges each statement or row of a privilege the class
+#: grants (history archival, Phase 16): the application role's run request,
+#: cancellation and copy confirmation; its deletion request and cancellation
+#: (step 3); the deletes of every table a permanent deletion deletes from, and
+#: the maintenance role's UPDATE on the two tables whose rows it only locks.
+_ROW_JUDGED = {
+    "history_archive_runs": {"INSERT", "UPDATE"},
+    "worker_sessions": {"UPDATE"},
+    "deletion_requests": {"INSERT", "UPDATE"},
+    "deletion_request_rows": {"INSERT"},
+    "assigned_route_steps": {"DELETE"},
+    "assigned_routes": {"DELETE"},
+    "part_numbers": {"DELETE"},
+    "quantity_flows": {"DELETE"},
+    "work_order_demands": {"DELETE", "UPDATE"},
+    "work_orders": {"DELETE", "UPDATE"},
+}
 _GRANT_KEYS = [
     "report_version",
     "command",
@@ -352,21 +376,38 @@ def test_every_model_table_is_classified() -> None:
     assert set(Base.metadata.tables) | {"alembic_version"} == set(TABLE_CLASSES)
     assert all(isinstance(value, TableClass) for value in TABLE_CLASSES.values())
     assert set(MAINTENANCE_PRIVILEGES) <= set(TABLE_CLASSES)
-    assert len(MAINTENANCE_PRIVILEGES) == 22
+    assert len(MAINTENANCE_PRIVILEGES) == 25
     # Reads what the archive export reads; writes the archival tables and its
-    # own audit rows (history archival design §8.3, step 1); deletes only
-    # Movements, and only those the purge's row guard admits (step 2).
+    # own audit rows (history archival design §8.3, step 1); deletes Movements
+    # only as the purge's row guard admits (step 2); and carries out permanent
+    # deletion requests (step 3): it reads and deletes on exactly the tables a
+    # deletion deletes from, each row admitted by its row guard, and locks the
+    # rows of Work Orders and demand lines (UPDATE refused by a statement guard).
     assert {
         table for table, privileges in MAINTENANCE_PRIVILEGES.items() if privileges != {"SELECT"}
-    } == {"audit_events", "history_archive_runs", "history_archived_flows", "part_movements"}
-    assert MAINTENANCE_PRIVILEGES["audit_events"] == {"INSERT"}
-    # It never requests a run: only a person does, in Administration.
+    } == {
+        "audit_events",
+        "history_archive_runs",
+        "history_archived_flows",
+        "deletion_requests",
+        *permanent_deletion.DELETE_ORDER,
+    }
+    assert MAINTENANCE_PRIVILEGES["audit_events"] == {"SELECT", "INSERT", "DELETE"}
+    # It never requests a run or a deletion: only a person does (or the owner,
+    # for an operator's deletion request).
     assert MAINTENANCE_PRIVILEGES["history_archive_runs"] == {"SELECT", "UPDATE"}
+    assert MAINTENANCE_PRIVILEGES["deletion_requests"] == {"SELECT", "UPDATE"}
+    assert MAINTENANCE_PRIVILEGES["deletion_request_rows"] == {"SELECT"}
     assert MAINTENANCE_PRIVILEGES["history_archived_flows"] == {"SELECT", "INSERT", "UPDATE"}
     assert MAINTENANCE_PRIVILEGES["part_movements"] == {"SELECT", "DELETE"}
-    assert [
+    assert {
         table for table, privileges in MAINTENANCE_PRIVILEGES.items() if "DELETE" in privileges
-    ] == ["part_movements"]
+    } == set(permanent_deletion.DELETE_ORDER)
+    assert {
+        table
+        for table in permanent_deletion.DELETE_ORDER
+        if "UPDATE" in MAINTENANCE_PRIVILEGES[table]
+    } == {"work_orders", "work_order_demands"}
     assert not {
         "user_credentials",
         "user_sessions",
@@ -393,7 +434,7 @@ def test_the_migrated_relations_are_the_classified_ones(context: Context) -> Non
             ).scalars()
         )
     assert relations == set(TABLE_CLASSES)
-    assert len(relations) == 37
+    assert len(relations) == 39
 
 
 def _triggers(engine: Engine) -> dict[str, tuple[str, str, str, str]]:
@@ -465,8 +506,11 @@ def test_guards_and_grants_are_consistent() -> None:
         if table_class in (TableClass.APPEND_ONLY, TableClass.GUARDED_UPDATE, TableClass.NO_UPDATE)
     }
     # history_archived_flows is read-only for the application role; its guard
-    # binds the maintenance role, which writes it.
-    assert set(GUARD_TABLES) - {"areas", "machines"} == guarded | {"history_archived_flows"}
+    # binds the maintenance role, which writes it. The ordinary tables a
+    # permanent deletion deletes from have a row guard of their deletes.
+    assert set(GUARD_TABLES) - {"areas", "machines"} == (
+        guarded | {"history_archived_flows"} | set(_DELETION_ORDINARY)
+    )
     assert guarded | {"history_archived_flows"} == set(_GUARDED)
 
 
@@ -502,7 +546,8 @@ _MATRIX = (
 
 def _allowed(table: str, statement: str) -> bool:
     return (
-        table in ("worker_sessions", "history_archive_runs") and statement.startswith("UPDATE")
+        table in ("worker_sessions", "history_archive_runs", "deletion_requests")
+        and statement.startswith("UPDATE")
     ) or (table == "assigned_route_steps" and statement.startswith("DELETE"))
 
 
@@ -568,8 +613,6 @@ def test_the_maintenance_role_holds_exactly_its_privileges(context: Context) -> 
         "user_sessions",
         "scan_station_devices",
         "mail_server_credentials",
-        "audit_events",
-        "work_order_allocations",
     ):
         assert _as_role(context, role, f"SELECT * FROM {table} WHERE false") == "42501", table
     columns = _first_columns(context)
@@ -658,13 +701,13 @@ def test_apply_grants_on_a_fresh_database_twice(
                     "application": context.roles.app,
                     "maintenance": context.roles.maintenance,
                 },
-                "tables": 37,
-                "sequences": 27,
+                "tables": 39,
+                "sequences": 28,
                 "default_privileges_removed": 0,
                 "foreign_grantees": [],
             }
             assert result.stderr.startswith(
-                f"apply-grants: granted 37 tables to {context.roles.app} and"
+                f"apply-grants: granted 39 tables to {context.roles.app} and"
                 f" {context.roles.maintenance} at revision {_HEAD} ("
             )
             # AG-11: no URL, password or path.
@@ -1424,10 +1467,10 @@ def test_check_h_passes_through_the_cli(
     assert check["title"] == "Append-only guards and database-role privileges intact"
     assert check["examined"] == {
         "roles": 2,
-        "tables": 37,
-        "sequences": 27,
-        "triggers": 17,
-        "guard_functions": 14,
+        "tables": 39,
+        "sequences": 28,
+        "triggers": 32,
+        "guard_functions": 18,
     }
 
 
@@ -1891,7 +1934,7 @@ def test_check_h_under_another_search_path(context: Context) -> None:
                 connection, roles=context.roles, required=True
             )
             assert integrity.findings == []
-            assert integrity.examined["triggers"] == 17
+            assert integrity.examined["triggers"] == 32
             assert connection.execute(sa.text("SHOW search_path")).scalar_one() == "pg_catalog"
         report = reconciliation.run_reconciliation(
             context.engine,

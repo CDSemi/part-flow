@@ -22,6 +22,7 @@ import {
   formatInstant,
   latestRunStep,
   movementsText,
+  PRE_PURGE_BACKUP_LABEL,
   purgedLine,
   runAwaitsCopyConfirmation,
   runCanBeCancelled,
@@ -262,7 +263,7 @@ function RunRow({
                 typical run keeps its few lines. */}
             {run.prePurgeBackup !== null ? (
               <details className="admin-runevidence">
-                <summary>Pre-purge backup</summary>
+                <summary>{PRE_PURGE_BACKUP_LABEL}</summary>
                 <div className="admin-runlines">
                   <span className="admin-runarchive">
                     {run.prePurgeBackup.name}

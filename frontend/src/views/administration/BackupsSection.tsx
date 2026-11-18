@@ -35,7 +35,8 @@ import { ADMIN_SECTIONS } from './sections';
 // scheduled backup (every 1, 2, 3, 4, 6, 8, 12 or 24 hours), how many
 // hourly, daily and weekly scheduled backups its rotation keeps, and how
 // many pre-purge backups (taken by the history archival job before each
-// purge) it keeps, the newest first. Saving takes or removes no backup:
+// purge and each permanent deletion) it keeps, the newest first. Saving
+// takes or removes no backup:
 // the task reads the policy at its next run. Without the Configure system
 // settings permission the values read as text.
 
@@ -93,7 +94,7 @@ export function BackupsSection() {
         <SettingsCard
           title="Scheduled backups"
           description="How often the server takes a backup on its own, and how many scheduled and pre-purge backups it keeps."
-          note="The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Of the pre-purge backups, which the history archival job takes before each purge, it keeps the newest number set here and removes the older ones. Backups taken by hand or before an update are never removed. A change applies from the task's next run."
+          note="The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Of the pre-purge backups, which the history archival job takes before each purge and each permanent deletion, it keeps the newest number set here and removes the older ones. Backups taken by hand or before an update are never removed. A change applies from the task's next run."
         >
           {canWrite ? (
             <BackupPolicyForm

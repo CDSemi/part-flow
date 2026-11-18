@@ -16,6 +16,10 @@ import {
 import type { PartNumberDetails, PartNumberMaster } from '../api/part-numbers';
 import { normalizePartNumber, pnBarcode } from '../views/scan-station/barcode';
 import { ConfirmDialog } from './ConfirmDialog';
+import {
+  DeletePermanentlyDialog,
+  DeletePermanentlyZone,
+} from './DeletePermanentlyDialog';
 import { ImageUploadError, prepareImageUpload } from './image-upload';
 import { ModalDialog } from './ModalDialog';
 import { PnBarcodeLabelDialog } from './PnBarcodeLabelDialog';
@@ -40,6 +44,13 @@ import { ErrorState, LoadingState } from './view-states';
 // read-only (Phase 14 slice 3): `Part Number details`, the saved values
 // as text, the image without its actions, the barcode label, and no
 // write at all.
+//
+// Where its host offers it (Management → Part Numbers, for a holder of
+// Delete Work Orders and Part Numbers permanently; Phase 16, archival
+// design D17), the dialog ends with `Delete permanently…`, which requests
+// the deletion of the Part Number with all its data — kept apart from
+// `Delete details…`, which removes the saved details only. Once the
+// request deleted it, the dialog closes as having written.
 
 const UNKNOWN_OUTCOME_MESSAGE =
   'The server did not answer — this change may or may not have been saved. Close this window to refresh, then check the Part Number before trying again.';
@@ -128,6 +139,7 @@ function IdentityHeader({
 export function EditPartNumberDialog({
   pn,
   readOnly: readOnlyAtOpen = false,
+  permanentDeletion = false,
   writeBlocked,
   onClose,
 }: {
@@ -136,6 +148,9 @@ export function EditPartNumberDialog({
   /** Show the details without any change (a user who may not manage
    * Part Numbers); needs a fixed `pn`. Fixed when the dialog opens. */
   readOnly?: boolean;
+  /** Offer `Delete permanently…` of the fixed PN with all its data; the
+   * host decides (Management → Part Numbers, for a holder of the key). */
+  permanentDeletion?: boolean;
   /** Disables every write while the backend is unreachable; reading,
    * staging an image, the label and closing stay available. */
   writeBlocked: boolean;
@@ -172,6 +187,7 @@ export function EditPartNumberDialog({
   const [serverError, setServerError] = useState<string | null>(null);
   const [labelOpen, setLabelOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deletePermanentlyOpen, setDeletePermanentlyOpen] = useState(false);
   const [leaveConfirm, setLeaveConfirm] = useState(false);
   const wroteAny = useRef(false);
   const exists = useRef<boolean | null>(null);
@@ -690,6 +706,30 @@ export function EditPartNumberDialog({
             </button>
           </div>
         </div>
+      ) : null}
+      {permanentDeletion && ready && fixedPn !== undefined ? (
+        <DeletePermanentlyZone
+          disabled={writeBlocked || controlsBlocked}
+          onOpen={() => setDeletePermanentlyOpen(true)}
+        >
+          This removes Part Number <b>{fixedPn}</b> with all its data, including
+          its production history, from the database, as if it had never been
+          entered, after a pre-purge backup.
+        </DeletePermanentlyZone>
+      ) : null}
+      {deletePermanentlyOpen && fixedPn !== undefined ? (
+        <DeletePermanentlyDialog
+          record={{ kind: 'part-number', partNumber: fixedPn }}
+          writeBlocked={writeBlocked}
+          onClose={() => setDeletePermanentlyOpen(false)}
+          onDeleted={() => {
+            // The Part Number no longer exists: the dialog closes and its
+            // host refreshes the list.
+            wroteAny.current = true;
+            exists.current = false;
+            close();
+          }}
+        />
       ) : null}
       {labelOpen && fixedPn !== undefined ? (
         <PnBarcodeLabelDialog

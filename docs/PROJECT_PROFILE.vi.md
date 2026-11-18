@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi chưa commit ngày 2026-11-18.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `d094f5e` cộng các thay đổi chưa commit ngày 2026-11-18.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -269,7 +269,7 @@ Thay vào đó:
 Các quy tắc sau là bắt buộc:
 
 1. Một PN đã được ghi nhận không bao giờ được trở nên không thể truy vết.
-2. Lịch sử Movement là bất biến: không Movement nào bị thay đổi, và Movement chỉ rời khỏi cơ sở dữ liệu qua việc bảo trì tường minh của §28 Administrative Archival and Purge — việc xóa dọn (purge) của lưu trữ, sau khi đã có một bản lưu trữ đã kiểm tra của chúng nằm ngoài máy chủ, và việc xóa vĩnh viễn dữ liệu thử nghiệm tạm thời.
+2. Lịch sử Movement là bất biến: không Movement nào bị thay đổi, và Movement chỉ rời khỏi cơ sở dữ liệu qua việc bảo trì tường minh của §28 Administrative Archival and Purge — việc xóa dọn (purge) của lưu trữ, sau khi đã có một bản lưu trữ đã kiểm tra của chúng nằm ngoài máy chủ, và một yêu cầu xóa vĩnh viễn các Work Order và Part Number lẽ ra không bao giờ được nhập.
 3. Trạng thái sản xuất hiện tại phải được suy ra từ lịch sử Movement bất cứ khi nào khả thi; với một flow có các Movement đã bị xóa dọn khi lưu trữ, thì từ bản ghi chuyển tiếp (carry-forward record) của nó (§28 Administrative Archival and Purge).
 4. Một PN có thể đồng thời có số lượng ở nhiều Area.
 5. Một PN có thể đồng thời có số lượng được gán cho nhiều Machine.
@@ -1819,7 +1819,11 @@ Không có quyền nào ghi đè trực tiếp lên dữ liệu lịch sử: vai
 
 ## Super User
 
-Vai trò Super User ban đầu cấp mọi permission key: mọi năng lực được liệt kê trong mục này. Các quyền đó là quyền cấp bình thường, không phải siêu người dùng ngầm định: một quản trị viên được ủy quyền có thể đổi tên vai trò này hoặc thay đổi những gì nó cấp như mọi vai trò khác. Khi một bản phát hành thêm một permission key, mọi vai trò đang giữ tất cả các key khác vào lúc đó cũng nhận key mới, nên một vai trò giữ mọi key vẫn tiếp tục giữ mọi key, còn một vai trò đã bị quản trị viên thu hẹp thì vẫn bị thu hẹp.
+Vai trò Super User ban đầu cấp mọi permission key: mọi năng lực được liệt kê trong mục này, kể cả một năng lực mà không vai trò ban đầu nào khác cấp:
+
+- xóa vĩnh viễn Work Order và Part Number — yêu cầu xóa vĩnh viễn một Work Order hoặc một Part Number cùng toàn bộ dữ liệu của nó, và hủy một yêu cầu cho đến khi yêu cầu đó bắt đầu (§28 Administrative Archival and Purge).
+
+Các quyền đó là quyền cấp bình thường, không phải siêu người dùng ngầm định: một quản trị viên được ủy quyền có thể đổi tên vai trò này hoặc thay đổi những gì nó cấp như mọi vai trò khác. Khi một bản phát hành thêm một permission key, mọi vai trò đang giữ tất cả các key khác vào lúc đó cũng nhận key mới, nên một vai trò giữ mọi key vẫn tiếp tục giữ mọi key, còn một vai trò đã bị quản trị viên thu hẹp thì vẫn bị thu hẹp.
 
 ## Đăng nhập của User (User Sign-in)
 
@@ -2065,6 +2069,8 @@ Completed Work Orders (mọi Work Order Demand đã được phân bổ đủ, �
 
 Nếu PN đã có số lượng đang hoạt động, màn hình phải hiển thị phân bố hiện có và yêu cầu xác nhận tường minh về ý định; nó không bao giờ được tự động tạo thêm số lượng vật lý hoặc gộp các Quantity Flow.
 
+Một User có quyền xóa vĩnh viễn Work Order và Part Number (§20) còn thấy **Delete permanently…** trong Work Order Details: thao tác này yêu cầu xóa vĩnh viễn Work Order đó cùng toàn bộ dữ liệu của nó và hiển thị trạng thái của yêu cầu (§28 Administrative Archival and Purge).
+
 Work Order Intake không được phát triển thành chức năng kiểu ERP về khách hàng, định giá, lập hóa đơn, vận chuyển, mua hàng hay kế toán.
 
 ---
@@ -2098,7 +2104,8 @@ Màn hình này phải cung cấp:
 - tạo bản ghi master trước lần dùng đầu tiên trong sản xuất: PN được nhập sẽ được chuẩn hóa (cắt khoảng trắng ở đầu và cuối, từ chối khoảng trắng bên trong, chuyển thành chữ in hoa — §7 Part Number), và mỗi PN chuẩn chỉ có thể có một bản ghi master; việc tạo khi dùng lần đầu ở bước tiếp nhận (intake) (§8.1) không bị ảnh hưởng,
 - chỉnh sửa siêu dữ liệu: tên/mô tả, revision mang tính thông tin, ERP id, và tải lên, thay đổi hoặc gỡ bỏ hình ảnh PN (gỡ bỏ sẽ trở về ảnh giữ chỗ mặc định dùng chung),
 - xem và in một nhãn barcode PN đơn giản: barcode `PF:PN:<part-number>` với văn bản PN bên dưới — không có cấu hình barcode bổ sung; và in nhãn của nhiều PN cùng lúc, chọn từ các PN của các Work Order đang chạy (đã release và chưa hoàn tất, §8.2) hoặc từ các bản ghi master, có thể sắp theo PN, tên, ngày thêm (khi bản ghi master được tạo) hoặc lần dùng cuối trong một Work Order (khi dòng Work Order Demand mới nhất của PN được tạo, kể cả Work Order đã hoàn tất) — mọi nhãn in ra đều là chính nhãn đó,
-- xóa vĩnh viễn (hard delete) một bản ghi master theo §8.1/§28: việc xóa chỉ gỡ bỏ siêu dữ liệu, không bao giờ lan sang WorkOrderDemand, QuantityFlow, PartMovement, Allocation hay lịch sử, mọi bề mặt vẫn hiển thị PN chuẩn bình thường, và sau này có thể tạo lại một bản ghi cho cùng PN chuẩn đó. Không có lưu trữ (archive) PN, không có xóa mềm (soft delete) và không có vòng đời active/inactive.
+- xóa vĩnh viễn (hard delete) một bản ghi master theo §8.1/§28: việc xóa chỉ gỡ bỏ siêu dữ liệu, không bao giờ lan sang WorkOrderDemand, QuantityFlow, PartMovement, Allocation hay lịch sử, mọi bề mặt vẫn hiển thị PN chuẩn bình thường, và sau này có thể tạo lại một bản ghi cho cùng PN chuẩn đó. Không có lưu trữ (archive) PN, không có xóa mềm (soft delete) và không có vòng đời active/inactive,
+- với một User có quyền xóa vĩnh viễn Work Order và Part Number (§20), **Delete permanently…** trong hộp thoại Part Number: khác với việc xóa vĩnh viễn bản ghi master, thao tác này yêu cầu xóa vĩnh viễn Part Number cùng toàn bộ dữ liệu sản xuất của nó (§28 Administrative Archival and Purge).
 
 ---
 
@@ -2142,7 +2149,7 @@ Administration tập trung vào quản trị hệ thống:
 - hành vi quét,
 - chính sách Worker session (thời gian chờ không hoạt động trượt của phiên quét thẻ — một giá trị mặc định cùng các giá trị ghi đè theo từng Area — và các tùy chọn xác nhận bằng thẻ của `DONE`, thao tác trả về `QUEUE` và Undo, §19),
 - thiết lập hiển thị Department (theo từng Department — bao gồm thời gian xoay vòng của Production Board, §21),
-- công việc bảo trì lưu trữ (archive) và xóa dọn (purge) lịch sử cùng các thiết lập lưu giữ (retention) và đợt xóa dọn của nó (§28 Administrative Archival and Purge),
+- công việc bảo trì lưu trữ (archive) và xóa dọn (purge) lịch sử cùng các thiết lập lưu giữ (retention) và đợt xóa dọn của nó, và các yêu cầu xóa vĩnh viễn (§28 Administrative Archival and Purge),
 - thiết lập ứng dụng.
 
 Machine, Route Template và siêu dữ liệu PartNumber master không phải là màn hình của Administration: chúng là dữ liệu chủ sản xuất được quản lý dựa trên quyền trong Management → Machines, Management → Planned Routes và Management → Part Numbers (§20), không có màn hình Administration trùng lặp. Machine vẫn là một phần của điều kiện tiên quyết thiết lập môi trường tối thiểu — được cấu hình qua Management → Machines trước khi chạy sản xuất thực.
@@ -2334,9 +2341,10 @@ Hệ thống phải lưu giữ nhật ký audit đầy đủ cho:
 - Undo,
 - Worker Session,
 - thay đổi cấu hình quản trị,
-- các thao tác lưu trữ (archive) và xóa dọn (purge) quản trị (ai, khi nào, phạm vi, lý do, kết quả, bản lưu trữ và biên nhận xóa dọn của nó).
+- các thao tác lưu trữ (archive) và xóa dọn (purge) quản trị (ai, khi nào, phạm vi, lý do, kết quả, bản lưu trữ và biên nhận xóa dọn của nó),
+- các yêu cầu xóa vĩnh viễn (ai đã yêu cầu hoặc hủy, khi nào, phạm vi, lý do, mỗi lần đổi trạng thái, bản sao lưu trước xóa dọn, và một bản ghi cho mỗi Work Order và Part Number đã xóa).
 
-Bản ghi sản xuất lịch sử không bao giờ biến mất qua các quy trình thông thường của ứng dụng — trong lúc vận hành sản xuất bình thường, dữ liệu chỉ được ghi thêm (**bất biến trong lúc vận hành sản xuất**). Chỉ việc bảo trì tường minh của *Administrative Archival and Purge* bên dưới mới xóa bản ghi sản xuất: việc xóa dọn của lưu trữ, sau khi đã có một bản lưu trữ đã kiểm tra của chúng nằm ngoài máy chủ, và việc xóa vĩnh viễn dữ liệu thử nghiệm tạm thời. Việc xóa dọn của lưu trữ không bao giờ xóa các sự kiện audit.
+Bản ghi sản xuất lịch sử không bao giờ biến mất qua các quy trình thông thường của ứng dụng — trong lúc vận hành sản xuất bình thường, dữ liệu chỉ được ghi thêm (**bất biến trong lúc vận hành sản xuất**). Chỉ việc bảo trì tường minh của *Administrative Archival and Purge* bên dưới mới xóa bản ghi sản xuất: việc xóa dọn của lưu trữ, sau khi đã có một bản lưu trữ đã kiểm tra của chúng nằm ngoài máy chủ, và một yêu cầu xóa vĩnh viễn do job trên host thực hiện. Việc xóa dọn của lưu trữ không bao giờ xóa các sự kiện audit; việc xóa vĩnh viễn xóa các dòng audit chỉ liên quan đến những bản ghi mà nó xóa.
 
 Khi khả thi, ràng buộc cơ sở dữ liệu nên đảm bảo:
 
@@ -2364,14 +2372,16 @@ Vận hành sản xuất bình thường chỉ ghi thêm (append-only) và khôn
 - nếu PN xuất hiện lại sau này, có thể tạo một bản ghi metadata master mới cho cùng định danh PN chuẩn;
 - không có kho lưu trữ PN, xóa mềm (soft delete) hay bản ghi bia mộ (tombstone) nào được giữ chỉ để bảo toàn định danh PN — chính chuỗi PN chuẩn đảm nhận trách nhiệm đó.
 
-**Xóa vĩnh viễn dữ liệu thử nghiệm (công cụ vận hành tạm thời).** Các Work Order và Part Number mà chủ sở hữu đã nhập chỉ để thử nghiệm trên production có thể bị xóa vĩnh viễn, như thể chúng chưa từng được nhập, bằng lệnh vận hành `deploy/production/pf delete-permanently` (`python -m app.cli delete-permanently`; OPERATIONS_RUNBOOK §10). Đây là ngoại lệ duy nhất của quy tắc chỉ ghi thêm (append-only) ở trên, và là công cụ tạm thời cho đến khi chức năng xóa trong ứng dụng dành cho Super User được thiết kế cùng với việc lưu trữ và xóa dọn lịch sử:
+**Xóa vĩnh viễn Work Order và Part Number.** Các Work Order và Part Number lẽ ra không bao giờ được nhập — chẳng hạn các bản ghi mà chủ sở hữu đã nhập chỉ để thử nghiệm trên production — có thể bị xóa vĩnh viễn, như thể chúng chưa từng được nhập. Ngoài việc xóa dọn của lưu trữ, đây là ngoại lệ duy nhất của quy tắc chỉ ghi thêm (append-only) ở trên:
 
-- lệnh chỉ chạy bằng database role chủ sở hữu (owner), không bao giờ qua role của ứng dụng hay một quy trình nào của ứng dụng; role của ứng dụng không được thêm quyền nào;
-- mặc định lệnh chỉ hiển thị bản xem trước; với `--confirm` lệnh tạo trước một bản sao lưu thủ công đã kiểm tra, rồi xóa trong một transaction;
-- lệnh xóa một Work Order cùng các demand line, các allocation của chúng, các Quantity Flow đã release cho chúng và mọi flow liên kết với các flow đó qua lineage, các Movement, cạnh lineage và bản sao Assigned Route của chúng; một Part Number cùng bản ghi master và mọi flow, demand line và allocation của PN đó; và các dòng audit chỉ liên quan đến các bản ghi này;
-- lệnh từ chối, không xóa gì và nêu tên từng liên kết, mỗi khi dữ liệu cần xóa liên kết với dữ liệu còn lại (một liên kết lineage, một lệnh hay một lần đảo ngược trải trên dữ liệu còn lại, số lượng đã nhập kho mà các allocation còn lại cần, một Part Number vẫn được một Work Order còn lại dùng, một demand line nằm trong Hot list);
-- lệnh giữ đúng một dòng audit mới (`DELETED`) cho mỗi Work Order và mỗi Part Number đã xóa, ghi lại người vận hành, thời điểm, lý do, bản sao lưu và số dòng đã xóa; các dòng audit cũng liên quan đến các bản ghi còn lại được giữ nguyên;
-- dữ liệu đã xóa vẫn còn trong các bản sao lưu hiện có và các bản sao ngoài máy chủ (off-host) của chúng cho đến khi chúng hết hạn.
+- một User có vai trò cấp quyền xóa vĩnh viễn Work Order và Part Number (§20; ban đầu chỉ vai trò Super User) yêu cầu việc này bằng **Delete permanently…** trong Work Order Details hoặc trong hộp thoại Part Number (§21); một người vận hành trên máy chủ yêu cầu bằng lệnh `deploy/production/pf delete-permanently` (OPERATIONS_RUNBOOK §10);
+- yêu cầu hiển thị bản xem trước trước tiên — những gì sẽ bị xóa, hoặc mọi lý do từ chối — và đòi một lý do cùng Work Order Number hoặc Part Number được gõ lại; PartFlow ghi nhận yêu cầu cùng chính xác các dòng mà nó sẽ xóa; mỗi lúc chỉ có tối đa một yêu cầu đang mở, và một yêu cầu có thể bị hủy cho đến khi job trên host bắt đầu thực hiện nó;
+- ứng dụng web chỉ ghi nhận yêu cầu: nó không bao giờ tự xóa bản ghi sản xuất, và role của ứng dụng không có quyền xóa nào trên một bảng chỉ ghi thêm;
+- job trên host thực hiện yêu cầu ở lần chạy kế tiếp, trong vòng 5 phút theo tác vụ lưu trữ lịch sử: trước tiên là một bản sao lưu trước xóa dọn đã kiểm tra, sau đó là việc xóa trong một transaction bằng role cơ sở dữ liệu bảo trì, dưới các guard cấp dòng chỉ cho phép xóa đúng các dòng mà yêu cầu đã ghi nhận. Không có gì bị xóa, và yêu cầu thất bại kèm lý do, khi User đã yêu cầu không còn hoạt động hoặc không còn giữ quyền đó, hoặc khi dữ liệu đã thay đổi sau khi yêu cầu; khi đó phải yêu cầu lại;
+- việc xóa gồm một Work Order cùng các demand line, các allocation của chúng, các Quantity Flow đã release cho chúng và mọi flow liên kết với các flow đó qua lineage, các Movement, cạnh lineage và bản sao Assigned Route của chúng; một Part Number cùng bản ghi master và mọi flow, demand line và allocation của PN đó; và các dòng audit chỉ liên quan đến các bản ghi này — không bao giờ xóa một dòng audit ghi lại một lần xóa vĩnh viễn trước đó hay một yêu cầu xóa, những dòng này luôn được giữ;
+- việc xóa bị từ chối, không xóa gì và nêu tên từng liên kết, mỗi khi dữ liệu cần xóa liên kết với dữ liệu còn lại (một liên kết lineage, một lệnh hay một lần đảo ngược trải trên dữ liệu còn lại, số lượng đã nhập kho mà các allocation còn lại cần, một Part Number vẫn được một Work Order còn lại dùng, một demand line nằm trong Hot list);
+- việc xóa giữ đúng một dòng audit mới (`DELETED`) cho mỗi Work Order và mỗi Part Number đã xóa, ghi lại User đã yêu cầu hoặc người vận hành, thời điểm, lý do, yêu cầu, bản sao lưu trước xóa dọn và số dòng đã xóa; các dòng audit cũng liên quan đến các bản ghi còn lại được giữ nguyên, và yêu cầu cùng mỗi lần đổi trạng thái của nó có các dòng audit riêng;
+- dữ liệu đã xóa vẫn còn trong các bản sao lưu hiện có, kể cả bản sao lưu trước xóa dọn, và các bản sao ngoài máy chủ (off-host) của chúng cho đến khi chúng hết hạn.
 
 **Lưu giữ, lưu trữ và xóa dọn lịch sử Movement.** PartMovement là bất biến trong lúc vận hành sản xuất: các quy trình thông thường không bao giờ sửa hoặc xóa bản ghi Movement. Tính bất biến **không** có nghĩa là mọi dòng Movement phải nằm mãi mãi trong cơ sở dữ liệu PostgreSQL chính — lưu trữ và xóa dọn theo một chính sách lưu giữ (retention) tường minh là việc bảo trì vòng đời/lưu trữ, tách biệt với vận hành sản xuất. Khi lịch sử Movement lớn dần, PartFlow có thể áp dụng một **chính sách lưu giữ có thể cấu hình** (ví dụ: giữ N năm lịch sử trong cơ sở dữ liệu chính — thời hạn lưu giữ là cấu hình, không bao giờ là một số năm hard-code trong quy tắc domain). Khi đó, lịch sử cũ hơn được:
 
@@ -2382,7 +2392,7 @@ Vận hành sản xuất bình thường chỉ ghi thêm (append-only) và khôn
 
 Các tệp lưu trữ trở thành nơi lưu trữ lịch sử dài hạn cho phần lịch sử đã bị xóa dọn. Quy tắc bắt buộc:
 
-- **Vận hành sản xuất bình thường không bao giờ được UPDATE hoặc DELETE các dòng `PartMovement`.** Role của ứng dụng không có quyền nào trong hai quyền đó; một trigger cấp câu lệnh từ chối mọi UPDATE và TRUNCATE; và một trigger cấp dòng từ chối việc DELETE bất kỳ Movement nào, trừ một Movement đã lưu trữ của lần chạy đang xóa dọn lúc đó (trạng thái `PURGING`) và cũ hơn mốc cắt của lần chạy ấy — việc xóa vĩnh viễn dữ liệu thử nghiệm tạm thời, ở trên, là ngoại lệ duy nhất khác. Lưu trữ/xóa dọn chỉ được thực hiện qua một **đường bảo trì Admin đặc quyền riêng** với cơ chế ủy quyền riêng — job trên host, chạy bằng role cơ sở dữ liệu bảo trì, vốn chỉ có quyền DELETE trên Movement — không bao giờ qua role của ứng dụng, các quy trình thông thường của ứng dụng hay bất kỳ đường ghi sản xuất nào.
+- **Vận hành sản xuất bình thường không bao giờ được UPDATE hoặc DELETE các dòng `PartMovement`.** Role của ứng dụng không có quyền nào trong hai quyền đó; một trigger cấp câu lệnh từ chối mọi UPDATE và TRUNCATE; và một trigger cấp dòng từ chối việc DELETE bất kỳ Movement nào, trừ một Movement đã lưu trữ của lần chạy đang xóa dọn lúc đó (trạng thái `PURGING`) và cũ hơn mốc cắt của lần chạy ấy, và một Movement mà yêu cầu xóa vĩnh viễn đang chạy đã ghi nhận (ở trên). Lưu trữ/xóa dọn và xóa vĩnh viễn chỉ được thực hiện qua một **đường bảo trì Admin đặc quyền riêng** với cơ chế ủy quyền riêng — job trên host, chạy bằng role cơ sở dữ liệu bảo trì, vốn chỉ có quyền xóa trên các bảng mà một lần xóa dọn hoặc một lần xóa vĩnh viễn xóa dữ liệu, mỗi bảng được một trigger cấp dòng canh giữ, chỉ cho phép đúng các dòng đó — không bao giờ qua role của ứng dụng, các quy trình thông thường của ứng dụng hay bất kỳ đường ghi sản xuất nào.
 - **Không bao giờ xóa dọn trước khi có một lần xuất lưu trữ thành công và đã được kiểm tra, trước khi bản lưu trữ đã kiểm tra cũng nằm ngoài máy chủ, và khi chưa có một bản sao lưu mới**: job bảo trì chép bản lưu trữ sang một thư mục thứ hai trên một thiết bị khác và kiểm tra bản sao, hoặc một người tự chép rồi xác nhận bản sao trong Administration; sau đó job tạo một bản sao lưu cơ sở dữ liệu đã kiểm tra (bản sao lưu trước xóa dọn, pre-purge), bắt đầu sau lần kiểm tra bản lưu trữ, và ghi tên bản sao lưu đó vào lần chạy trước khi xóa bất cứ thứ gì.
 - Bản lưu trữ phải giữ đủ dữ liệu để xác định PN, số lượng, loại Movement, Area, Operation, Machine, Worker, các mốc thời gian, quan hệ/ngữ cảnh sửa sai và các trường audit bắt buộc.
 - PN trong lịch sử lưu trữ được lưu trực tiếp dưới dạng chuỗi PN chuẩn — không bao giờ phụ thuộc vào master PN.
@@ -2509,7 +2519,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §2, §6, §8.11, §11, §13, §16, §20, §21, §27 và §28: các lần chạy xóa dọn lịch sử Movement đã lưu trữ sau bản sao ngoài máy chủ và một bản sao lưu trước xóa dọn, và bản ghi chuyển tiếp giữ mọi con số không đổi. |
+| 2026-11-18 | uncommitted | §6, §20, §21 và §28: người giữ quyền mới xóa vĩnh viễn Work Order và Part Number yêu cầu việc xóa trong PartFlow, và job trên host thực hiện nó sau một bản sao lưu trước xóa dọn, dưới các guard cấp dòng; lệnh vận hành cũng ghi nhận một yêu cầu. |
+| 2026-11-18 | d094f5e | §2, §6, §8.11, §11, §13, §16, §20, §21, §27 và §28: các lần chạy xóa dọn lịch sử Movement đã lưu trữ sau bản sao ngoài máy chủ và một bản sao lưu trước xóa dọn, và bản ghi chuyển tiếp giữ mọi con số không đổi. |
 | 2026-11-17 | 2f12d33 | §20 và §28: quyền chạy lưu trữ và xóa dọn lịch sử, quy tắc mốc cắt và cụm flow của một lần chạy, và bản sao ngoài máy chủ của bản lưu trữ. |
 | 2026-11-17 | 4539a2b | §20 và §21: Administration → Security gom các thiết lập đăng nhập, với quy tắc mật khẩu và Remember me có thể cấu hình. |
 | 2026-11-17 | 4be2389 | §15 và §20: một User có quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, chỉ để đọc. |

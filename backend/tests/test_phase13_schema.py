@@ -199,6 +199,8 @@ _USERS_ROLES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0028_phase13_users_roles
 # 0040 (Phase 16, history archival) widens the permission vocabulary, the audit
 # entity types and the retention CHECK these Phase 13 literals started.
 _HISTORY_ARCHIVE_MIGRATION_FILE = _VERSIONS_DIR / "20261117_0040_phase16_history_archive.py"
+# 0042 (Phase 16, history archival step 3) widens the permission vocabulary again.
+_DELETION_REQUESTS_MIGRATION_FILE = _VERSIONS_DIR / "20261118_0042_phase16_deletion_requests.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -548,6 +550,7 @@ def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> N
         AuditEntityType.SCAN_STATION_DEVICE.value,
         AuditEntityType.ASSIGNED_ROUTE.value,
         AuditEntityType.HISTORY_ARCHIVE_RUN.value,
+        AuditEntityType.DELETION_REQUEST.value,
     }
 
 
@@ -1482,6 +1485,7 @@ def test_worker_sessions_migration_repeats_the_model_literals() -> None:
         AuditEntityType.SCAN_STATION_DEVICE.value,
         AuditEntityType.ASSIGNED_ROUTE.value,
         AuditEntityType.HISTORY_ARCHIVE_RUN.value,
+        AuditEntityType.DELETION_REQUEST.value,
     }
 
 
@@ -2552,6 +2556,7 @@ def test_planned_routes_migration_restores_the_0020_literal() -> None:
         AuditEntityType.SCAN_STATION_DEVICE.value,
         AuditEntityType.ASSIGNED_ROUTE.value,
         AuditEntityType.HISTORY_ARCHIVE_RUN.value,
+        AuditEntityType.DELETION_REQUEST.value,
     }
 
 
@@ -3716,16 +3721,21 @@ def test_users_roles_migration_repeats_the_model_literals() -> None:
     migration = _load_migration(_USERS_ROLES_MIGRATION_FILE)
     assert migration.revision == _USERS_ROLES_REVISION
     assert migration.down_revision == _RETENTION_PERIOD_REVISION
-    # 0040 (Phase 16) appends RUN_HISTORY_ARCHIVAL_AND_PURGE: the 0028
-    # vocabulary stays the enum's prefix.
+    # 0040 (Phase 16) appends RUN_HISTORY_ARCHIVAL_AND_PURGE and 0042 (its step 3)
+    # DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY: the 0028 vocabulary stays the
+    # enum's prefix.
     history_archive = _load_migration(_HISTORY_ARCHIVE_MIGRATION_FILE)
     assert history_archive._PREVIOUS_PERMISSIONS == migration._PERMISSIONS
     assert tuple(permission.value for permission in Permission) == (
         *migration._PERMISSIONS,
         Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE.value,
+        Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY.value,
     )
     assert history_archive._PREVIOUS_PERMISSION_SQL == migration._PERMISSION_SQL
-    assert history_archive._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
+    # 0042 appends its key to the literal 0040 wrote.
+    deletion_requests = _load_migration(_DELETION_REQUESTS_MIGRATION_FILE)
+    assert history_archive._PERMISSION_SQL == deletion_requests._PREVIOUS_PERMISSION_SQL
+    assert deletion_requests._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
     assert migration._LOGIN_NAME_SQL == models.USER_LOGIN_NAME_SQL
     assert migration._THEME_SQL == models.USER_THEME_PREFERENCE_SQL
     assert set(re.findall(r"'([^']*)'", models.USER_THEME_PREFERENCE_SQL)) == {
@@ -3757,10 +3767,11 @@ def test_users_roles_migration_repeats_the_model_literals() -> None:
         and constraint.name == "ck_audit_events_entity_type"
     ]
     # 0030 (Phase 14 slice 4) appends ScanStationDevice to this literal,
-    # 0032 (Phase 14 slice 6) AssignedRoute, 0040 (Phase 16) HistoryArchiveRun.
+    # 0032 (Phase 14 slice 6) AssignedRoute, 0040 (Phase 16) HistoryArchiveRun,
+    # 0042 (Phase 16, history archival step 3) DeletionRequest.
     assert entity_checks == [
         migration._USER_ROLE_ENTITY_TYPES[:-1]
-        + ", 'ScanStationDevice', 'AssignedRoute', 'HistoryArchiveRun')"
+        + ", 'ScanStationDevice', 'AssignedRoute', 'HistoryArchiveRun', 'DeletionRequest')"
     ]
     planned_routes = _load_migration(_PLANNED_ROUTES_MIGRATION_FILE)
     assert migration._PREVIOUS_ENTITY_TYPES == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES

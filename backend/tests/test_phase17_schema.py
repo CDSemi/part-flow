@@ -7,15 +7,16 @@ Phase 17 item 3; PROJECT_PROFILE §20) and `0034_phase17_unique_names`
 (item 4; PROJECT_PROFILE §8.4, §8.8) do:
 
 - the earlier cases run against their own revision; the head boundary
-  and the models parity moved to `tests/test_history_purge_schema.py`
-  with `0041_phase16_history_purge`;
+  and the models parity moved to `tests/test_deletion_requests_schema.py`
+  with `0042_phase16_deletion_requests`;
 - 0033: the migration's permission literal is exactly the 0028
   vocabulary;
 - a fresh install seeds `Super User` with every key of
   `app.domain.enums.Permission`, and still at head: a later revision that
   adds a key must grant it to every role that holds every other key, and
   this case fails until it does; the seed has no audit row, and a later
-  revision records its grant as one `Role` `UPDATED` row per role (0040);
+  revision records its grant as one `Role` `UPDATED` row per role (0040,
+  0042);
 - a role already named Super User in any letter case is completed, not
   duplicated: one role, same id and name, every key 0033 knew, one `Role`
   `UPDATED` audit row without an actor and with the migration's
@@ -68,10 +69,16 @@ _TEMPLATE_DATABASE = "partflow_test_phase17_template"
 _SUPER_USER_TEMPLATE_DATABASE = "partflow_test_phase17_super_user_template"
 _ROLE_NAME = "Super User"
 _EVERY_KEY = {permission.value for permission in Permission}
-# Migration 0040 (Phase 16, history archival) adds RUN_HISTORY_ARCHIVAL_AND_PURGE: the
-# 0033 cases expect the keys 0033 knew.
+# Migration 0040 (Phase 16, history archival) adds RUN_HISTORY_ARCHIVAL_AND_PURGE and 0042
+# (its step 3) DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY: the 0033 cases expect the
+# keys 0033 knew.
 _HISTORY_ARCHIVE_REVISION = "0040_phase16_history_archive"
-_LATER_KEYS = {Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE.value}
+_DELETION_REQUESTS_REVISION = "0042_phase16_deletion_requests"
+_KEY_REVISIONS = {
+    _HISTORY_ARCHIVE_REVISION: Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE.value,
+    _DELETION_REQUESTS_REVISION: Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY.value,
+}
+_LATER_KEYS = set(_KEY_REVISIONS.values())
 _KEYS_0033 = _EVERY_KEY - _LATER_KEYS
 _METADATA = {"source": "migration", "revision": _SUPER_USER_REVISION}
 
@@ -246,13 +253,19 @@ def test_a_fresh_install_seeds_super_user_with_every_key(head_engine: Engine) ->
         assert set(grants) == {"Administrator", "Manager", "Operator", _ROLE_NAME}
         assert grants[_ROLE_NAME] == _EVERY_KEY
         # The seed has no audit row; a later revision's new key is recorded as
-        # a role change (0040 adds one key to Super User and Administrator).
+        # a role change (0040 adds one key to Super User and Administrator,
+        # 0042 one to Super User alone).
         audits = _role_audit(connection)
-        assert [row["after_data"]["name"] for row in audits] == ["Administrator", _ROLE_NAME]
+        assert [(row["after_data"]["name"], row["metadata"]["revision"]) for row in audits] == [
+            ("Administrator", _HISTORY_ARCHIVE_REVISION),
+            (_ROLE_NAME, _HISTORY_ARCHIVE_REVISION),
+            (_ROLE_NAME, _DELETION_REQUESTS_REVISION),
+        ]
         for row in audits:
-            assert row["metadata"] == {"source": "migration", "revision": _HISTORY_ARCHIVE_REVISION}
+            revision = row["metadata"]["revision"]
+            assert row["metadata"] == {"source": "migration", "revision": revision}
             added = set(row["after_data"]["permissions"]) - set(row["before_data"]["permissions"])
-            assert added == _LATER_KEYS
+            assert added == {_KEY_REVISIONS[revision]}
 
 
 # ---------------------------------------------------------------------------

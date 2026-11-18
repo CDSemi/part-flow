@@ -32,8 +32,9 @@ x-app-database-environment: &app-database-environment
     DATABASE_PASSWORD_FILE: /run/secrets/partflow_app_password
     SITE_TIMEZONE: ${PARTFLOW_SITE_TIMEZONE:?Set PARTFLOW_SITE_TIMEZONE in .env.production}
 
-# The history-archive host job (`maintenance`) connects as the maintenance database role, which may read the history
-# and write archive records but never delete (P16-S4 role; history archival design §7.1, §8.3).
+# The history-archive host job (`maintenance`) connects as the maintenance database role, which reads the history,
+# writes the archive records and deletes only what row guards admit: the archived Movements of a run in PURGING and the
+# stored rows of a RUNNING permanent deletion request (P16-S4 role; history archival design §7.1, §8.2, §8.3).
 x-maintenance-database-environment: &maintenance-database-environment
     DATABASE_HOST: db
     DATABASE_PORT: "5432"
@@ -267,11 +268,12 @@ services:
                     cpus: "${PARTFLOW_OPS_CPUS:-1.0}"
         logging: *logging
 
-    # One-shot history-archive job (Movement-history archival, build step 1: it exports and never deletes):
-    # `run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance settings|recover|next|export --run N|verify --run N|
-    # copy --run N|status` (deploy/production/archive.sh; check.sh runs `status`). The archive folder is mounted here
-    # only, owned by the account that runs archive.sh (mode 0700); without PARTFLOW_ARCHIVE_DIR the mount names a path
-    # that does not exist, so a run fails instead of writing anywhere else. The optional off-host copy folder
+    # One-shot history-archive job (Movement-history archival and permanent deletion requests; it purges or deletes only
+    # after the pre-purge backup that archive.sh takes): `run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance
+    # settings|recover|next|export --run N|verify --run N|copy --run N|purge --run N|start-deletion --request N|
+    # delete --request N|status` (deploy/production/archive.sh; check.sh runs `status`). The archive folder is mounted
+    # here only, owned by the account that runs archive.sh (mode 0700); without PARTFLOW_ARCHIVE_DIR the mount names a
+    # path that does not exist, so a run fails instead of writing anywhere else. The optional off-host copy folder
     # (PARTFLOW_ARCHIVE_COPY_DIR): when it is set, the job is told to copy into /archive-copy, and archive.sh and
     # check.sh mount it there (a long-syntax bind that never creates the host path, in a generated override file;
     # never `-v`) only while it exists on a file system that is neither the archive folder's nor `/`; otherwise the job

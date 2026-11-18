@@ -16,6 +16,10 @@ import {
   SAVE_DEMAND_FIRST,
 } from '../../components/allocation-adjustment';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import {
+  DeletePermanentlyDialog,
+  DeletePermanentlyZone,
+} from '../../components/DeletePermanentlyDialog';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
 import { TypeChip } from '../../components/indicators';
 import { ModalDialog } from '../../components/ModalDialog';
@@ -123,6 +127,13 @@ const LINE_DUE_DATES_KEPT =
  * `Adjust WO Allocation` dialog, GUI_DESIGN §11.6) — never while the
  * demand draft has unsaved changes: allocation works on the saved
  * demand.
+ *
+ * Permanent deletion (Phase 16, archival design D17): a holder of Delete
+ * Work Orders and Part Numbers permanently finds `Delete permanently…` at
+ * the end of the dialog of a Work Order with a Work Order Number (an
+ * internal one has no number to name). It opens the shared dialog, which
+ * requests the deletion; the server carries it out. Once the request
+ * deleted the Work Order, the dialog says so and returns to the list.
  */
 export function WorkOrderDetailPanel({
   workOrderId,
@@ -145,13 +156,25 @@ export function WorkOrderDetailPanel({
   // What the user may change, fixed when the dialog opens: an open
   // editor never changes under a later change of the sign-in.
   const { can } = useSession();
-  const [{ canEditHeader, canEditDemand, canAdjustAllocation, pnReadOnly }] =
-    useState(() => ({
-      canEditHeader: can('MANAGE_WORK_ORDERS'),
-      canEditDemand: can('EDIT_WORK_ORDER_DEMAND'),
-      canAdjustAllocation: can('EDIT_WORK_ORDER_ALLOCATION'),
-      pnReadOnly: !can('MANAGE_PART_NUMBER_MASTER'),
-    }));
+  const [
+    {
+      canEditHeader,
+      canEditDemand,
+      canAdjustAllocation,
+      pnReadOnly,
+      canDeletePermanently,
+    },
+  ] = useState(() => ({
+    canEditHeader: can('MANAGE_WORK_ORDERS'),
+    canEditDemand: can('EDIT_WORK_ORDER_DEMAND'),
+    canAdjustAllocation: can('EDIT_WORK_ORDER_ALLOCATION'),
+    pnReadOnly: !can('MANAGE_PART_NUMBER_MASTER'),
+    canDeletePermanently: can(
+      'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+    ),
+  }));
+  // Delete permanently… of this Work Order (GUI_DESIGN §11.2).
+  const [deletePermanentlyOpen, setDeletePermanentlyOpen] = useState(false);
   // The dialog owns its detail load so a committed save can adopt the
   // PATCH response as the fresh server state (never a simulated local
   // success).
@@ -1275,6 +1298,16 @@ export function WorkOrderDetailPanel({
             )}
           </span>
         </div>
+        {canDeletePermanently && detail.workOrderNumber !== null ? (
+          <DeletePermanentlyZone
+            disabled={writeBlocked || busy}
+            onOpen={() => setDeletePermanentlyOpen(true)}
+          >
+            This removes Work Order <b>{detail.workOrderNumber}</b> and all its
+            data from the database, as if it had never been entered, after a
+            pre-purge backup.
+          </DeletePermanentlyZone>
+        ) : null}
       </ModalDialog>
 
       {/* Stacked dialogs render as siblings of the details dialog, so
@@ -1373,6 +1406,27 @@ export function WorkOrderDetailPanel({
             reloadAfterCommit();
             onChanged();
             showNotice(notice);
+          }}
+        />
+      ) : null}
+
+      {deletePermanentlyOpen && detail.workOrderNumber !== null ? (
+        <DeletePermanentlyDialog
+          record={{
+            kind: 'work-order',
+            workOrderNumber: detail.workOrderNumber,
+          }}
+          writeBlocked={writeBlocked}
+          onClose={() => setDeletePermanentlyOpen(false)}
+          onDeleted={(request) => {
+            // The Work Order no longer exists: back to the list, which
+            // reloads without it.
+            setDeletePermanentlyOpen(false);
+            onChanged();
+            showNotice(
+              `✓ Work Order ${detail.workOrderNumber ?? '—'} was deleted permanently (deletion request ${request.id}).`,
+            );
+            onClose();
           }}
         />
       ) : null}

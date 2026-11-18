@@ -17,10 +17,13 @@
 # Its rotation keeps the scheduled backups and the newest `keep_pre_purge` pre-purge backups of that policy; a policy
 # without `keep_pre_purge` (an image from before the purge) leaves every pre-purge backup alone.
 #
-# A pre-purge backup (`--kind pre-purge --label <archive name>`, history archival design §7.4) is taken by archive.sh
-# before the purge of an archival run: it is published and verified like every backup, never rotates by itself, and its
-# BACKUP line adds the dump start from its backup-verify report, which the purge records. archive.sh passes
-# `--lock-wait-minutes N`, so that a backup that holds the backup lock is waited for instead of refusing at once.
+# A pre-purge backup (`--kind pre-purge --label <label>`, history archival design §7.4 and §6.3) is taken by archive.sh
+# before the purge of an archival run (the label is the run's archive name, run-<id>-<YYYYMMDDTHHMMSSZ>) and before
+# the deletion of a permanent deletion request (the label is the request's, deletion-<id>-<YYYYMMDDTHHMMSSZ>): it is
+# published and verified like every backup, never rotates by itself, and its BACKUP line adds the dump start from its
+# backup-verify report, which the purge or the deletion records. archive.sh passes `--lock-wait-minutes N`, so that a
+# backup that holds the backup lock is waited for instead of refusing at once. The rotation of the scheduled backups
+# keeps the newest pre-purge backups of both labels together.
 #
 # stdout: exactly one line on success, `BACKUP <NAME> <absolute path>` (pre-purge: `BACKUP <NAME> <absolute path>
 # <dump start, YYYY-MM-DDTHH:MM:SSZ>`), or `NOT_DUE <NAME>` for a scheduled run with no backup due. stderr: progress,
@@ -33,8 +36,9 @@ set -eu
 
 NAME_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
-# The label of a pre-purge backup: the archive name of its archival run (backups.PRE_PURGE_LABEL_PATTERN).
-ARCHIVE_NAME_PATTERN='^run-[0-9]+-[0-9]{8}T[0-9]{6}Z$'
+# The label of a pre-purge backup (backups.PRE_PURGE_LABEL_PATTERN): the archive name of its archival run, or the label
+# of its permanent deletion request.
+PRE_PURGE_LABEL_PATTERN='^(run|deletion)-[0-9]+-[0-9]{8}T[0-9]{6}Z$'
 UTC_PATTERN='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 REVISION_PATTERN='^[A-Za-z0-9_]{1,32}$'
 # --lock-wait-minutes: how often the backup lock is checked again while another backup holds it.
@@ -46,7 +50,7 @@ unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_
 usage() {
     cat <<'EOF'
 Usage: deploy/production/backup.sh --kind scheduled|manual|pre-release|pre-purge --operator NAME
-           [--reason TEXT] [--label TAG|ARCHIVE] [--tools-release TAG] [--env-file .env.production]
+           [--reason TEXT] [--label TAG|LABEL] [--tools-release TAG] [--env-file .env.production]
            [--environment NAME] [--no-rotate] [--reserve-mib N] [--lock-wait-minutes N]
            [--lock-held-by-release RECORD_DIR] [--rehearsal --project NAME]
 
@@ -55,13 +59,15 @@ Run from the repository root of a release checkout. Writes one backup directory 
   --kind scheduled|manual|pre-release|pre-purge
                                    scheduled: the host task that runs every hour; Administration → Backups sets how
                                    often a backup is due and how many scheduled and pre-purge backups are kept;
-                                   pre-purge: taken by archive.sh before the purge of an archival run (it never
-                                   rotates; the scheduled rotation keeps the newest pre-purge backups)
+                                   pre-purge: taken by archive.sh before the purge of an archival run or the
+                                   deletion of a permanent deletion request (it never rotates; the scheduled rotation
+                                   keeps the newest pre-purge backups of runs and deletion requests together)
   --no-rotate                      scheduled only: keep every scheduled and pre-purge backup this run
   --reason TEXT                    required for manual (default: scheduled backup / pre-release backup for TAG /
-                                   pre-purge backup for ARCHIVE)
-  --label TAG|ARCHIVE              pre-release: the target release tag; pre-purge: the archive name of the run,
-                                   run-<id>-<YYYYMMDDTHHMMSSZ>; required for these two kinds, refused otherwise
+                                   pre-purge backup for <archive name> / pre-purge backup for deletion request <id>)
+  --label TAG|LABEL                pre-release: the target release tag; pre-purge: the archive name of the run,
+                                   run-<id>-<YYYYMMDDTHHMMSSZ>, or the label of the deletion request,
+                                   deletion-<id>-<YYYYMMDDTHHMMSSZ>; required for these two kinds, refused otherwise
   --tools-release TAG              the image that writes and verifies the manifest (default: PARTFLOW_RELEASE)
   --reserve-mib N                  free space kept beyond 2 x the newest dump (default 1024)
   --lock-wait-minutes N            while another backup holds the backup lock, wait up to N minutes for it, checking
@@ -194,10 +200,15 @@ case "$KIND" in
         ;;
     pre-purge)
         [ -n "$LABEL" ] \
-            || usage_error "--kind pre-purge needs --label ARCHIVE (the archive name of the archival run, run-<id>-<YYYYMMDDTHHMMSSZ>)."
-        { printf '%s' "$LABEL" | grep -Eq "$ARCHIVE_NAME_PATTERN" && printf '%s' "$LABEL" | grep -Eq "$RELEASE_PATTERN"; } \
-            || usage_error "--label must be the archive name of an archival run, run-<id>-<YYYYMMDDTHHMMSSZ>, for --kind pre-purge."
-        [ -n "$REASON" ] || REASON="pre-purge backup for $LABEL"
+            || usage_error "--kind pre-purge needs --label LABEL (the archive name of the archival run, run-<id>-<YYYYMMDDTHHMMSSZ>, or the label of the deletion request, deletion-<id>-<YYYYMMDDTHHMMSSZ>)."
+        { printf '%s' "$LABEL" | grep -Eq "$PRE_PURGE_LABEL_PATTERN" && printf '%s' "$LABEL" | grep -Eq "$RELEASE_PATTERN"; } \
+            || usage_error "--label must be the archive name of an archival run, run-<id>-<YYYYMMDDTHHMMSSZ>, or the label of a deletion request, deletion-<id>-<YYYYMMDDTHHMMSSZ>, for --kind pre-purge."
+        if [ -z "$REASON" ]; then
+            case "$LABEL" in
+                deletion-*) REASON="pre-purge backup for deletion request $(printf '%s' "$LABEL" | cut -d - -f 2)" ;;
+                *) REASON="pre-purge backup for $LABEL" ;;
+            esac
+        fi
         ;;
 esac
 if [ "$KIND" != scheduled ] && [ -n "$NO_ROTATE" ]; then
@@ -599,10 +610,11 @@ if [ "$rc" -ne 0 ]; then
 fi
 DUMP_STARTED=
 if [ "$KIND" = pre-purge ]; then
-    # The purge records the dump start of its pre-purge backup, as backup-verify read it from the manifest.
+    # The purge or the deletion records the dump start of its pre-purge backup, as backup-verify read it from the
+    # manifest.
     DUMP_STARTED=$(json_field "$WORK/verify.json" dump_started_at)
     if ! printf '%s' "$DUMP_STARTED" | grep -Eq "$UTC_PATTERN"; then
-        echo "backup: $NAME is verified, but its backup-verify report names no dump start (dump_started_at), so no purge can use it. It stays as a pre-purge backup until the rotation of the scheduled backups removes it." >&2
+        echo "backup: $NAME is verified, but its backup-verify report names no dump start (dump_started_at), so no purge or deletion can use it. It stays as a pre-purge backup until the rotation of the scheduled backups removes it." >&2
         exit 3
     fi
 fi

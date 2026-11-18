@@ -1101,6 +1101,9 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
     "backups": ["MAX_TEXT_LENGTH", "detail"],
     "common": ["label"],
     "database_roles": ["', '.join(codes)", "name"],
+    # Permanent deletion requests (history archival step 3): request ids and
+    # states from the database.
+    "deletion_requests": ["request.id", "request.state", "request_id"],
     "direct_processing": ["_ACTION", "context.area.name", "context.flow.id"],
     "environment": [
         "_ASSET_TAG_DIGITS_MAX",
@@ -1205,11 +1208,16 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
     ],
     "migration": ["MAX_TEXT_LENGTH", "after", "report.expected_revision"],
     "part_numbers": ["_DETAIL_LABELS[field]", "canonical"],
+    # History archival step 3: the job's failure reasons name request ids,
+    # counts, table and constraint names, and the plan's difference (row keys
+    # and refusal texts read from the database), never request input.
     "permanent_deletion": [
-        "deleted",
-        "len(ids)",
+        "_constraint_name(exc)",
+        "deleted[table]",
+        "difference",
+        "request_id",
         "row.who",
-        "sorted(r.tgname for r in disabled)",
+        "stored_counts[table]",
         "table",
     ],
     # The stored retention period (history archival settings).

@@ -31,7 +31,10 @@ The kinds: ``scheduled`` (the host's hourly task), ``daily`` (the scheduled
 kind of earlier releases), ``manual``, ``pre-release`` (labelled with the
 target release tag) and ``pre-purge`` (history archival design B §7.4:
 taken by ``deploy/production/archive.sh`` before the purge of an archival
-run, labelled with the run's archive name ``run-<id>-<YYYYMMDDTHHMMSSZ>``).
+run, labelled with the run's archive name ``run-<id>-<YYYYMMDDTHHMMSSZ>``, and
+— design §6.3, build step 3 — before the deletion of a permanent deletion
+request, labelled ``deletion-<id>-<YYYYMMDDTHHMMSSZ>``, the second the request
+started).
 - ``check_due`` (``backup-due``): whether the host's hourly task takes a
   scheduled backup now — none was published yet, or the newest started at
   least the interval ago (less a ten-minute tolerance for the task's own
@@ -81,8 +84,9 @@ NAME_PATTERN: Final = re.compile(
 )
 RELEASE_TAG_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 #: The label of a ``pre-purge`` backup: the archive name of its archival run
-#: (``app.application.history_archive_job.NAME_PATTERN``).
-PRE_PURGE_LABEL_PATTERN: Final = re.compile(r"run-[0-9]+-[0-9]{8}T[0-9]{6}Z")
+#: (``app.application.history_archive_job.NAME_PATTERN``), or the label of its
+#: permanent deletion request (``deletion_requests.backup_label``).
+PRE_PURGE_LABEL_PATTERN: Final = re.compile(r"(?:run|deletion)-[0-9]+-[0-9]{8}T[0-9]{6}Z")
 REVISION_PATTERN: Final = re.compile(r"[A-Za-z0-9_]{1,32}")
 COMMIT_PATTERN: Final = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_PATTERN: Final = re.compile(r"sha256:[0-9a-f]{64}")
@@ -103,7 +107,8 @@ BackupKind = Literal["scheduled", "daily", "manual", "pre-release", "pre-purge"]
 #: host's hourly task (Phase 16, Administration → Backups); ``daily`` is the
 #: scheduled kind of earlier releases, still read, verified, restored and
 #: rotated, never written again; ``pre-purge`` is the backup before the
-#: purge of a history archival run (design B step 2).
+#: purge of a history archival run (design B step 2) or the deletion of a
+#: permanent deletion request (step 3).
 BACKUP_KINDS: Final = ("scheduled", "daily", "manual", "pre-release", "pre-purge")
 #: The kinds the retention of the scheduled backups applies to.
 ROTATED_KINDS: Final = ("scheduled", "daily")
@@ -138,8 +143,9 @@ def parse_name(value: str) -> BackupName | None:
     """The parsed backup name, or None when ``value`` is not one.
 
     ``label`` is required for ``pre-release`` (a release tag) and
-    ``pre-purge`` (an archive name ``run-<id>-<YYYYMMDDTHHMMSSZ>``) and
-    forbidden otherwise.
+    ``pre-purge`` (an archive name ``run-<id>-<YYYYMMDDTHHMMSSZ>`` or a deletion
+    request's label ``deletion-<id>-<YYYYMMDDTHHMMSSZ>``) and forbidden
+    otherwise.
     """
     match = NAME_PATTERN.fullmatch(value)
     if match is None:

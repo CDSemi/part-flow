@@ -1,7 +1,10 @@
 """P16-S6: deploy/production/monitor_report.py, the stdlib helper that turns a `status`, `history-archive status` or
 `reconcile` JSON report into check lines (P16-S6 SPEC section 6.3, cases MR-1..MR-9; Movement-history archival adds
-MR-10 (step 1) and MR-11..MR-14 (step 2: the purge states and results, receipt_not_copied, the incident record of a
-reconcile after a purge, a pre-purge backup as the newest backup)). The helper runs as a subprocess of this interpreter
+MR-10 (step 1), MR-11..MR-14 (step 2: the purge states and results, receipt_not_copied, the incident record of a
+reconcile after a purge, a pre-purge backup as the newest backup) and MR-15..MR-17 (step 3: the open and the last
+finished permanent deletion request, deletion_request_waiting and --deletion-wait-minutes, the incident record of a
+reconcile after a deletion, the waiting request while archival is not set up)). The helper runs as a subprocess of this
+interpreter
 on temporary report files; nothing touches Docker or a database.
 
 Run with the other production tests:
@@ -228,8 +231,9 @@ class Status(Helper):
         self.assertIn("line one?line two", lines[2])
 
 
-def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None, receipts=()):
-    """A `python -m app.cli history-archive status` report (Movement-history archival steps 1 and 2)."""
+def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None, receipts=(), deletion=None):
+    """A `python -m app.cli history-archive status` report (Movement-history archival steps 1 and 2; DELETION, a pair of
+    the open and the last finished deletion request, adds the keys of step 3)."""
     document = {
         "report_version": 1, "command": "history-archive status", "result": "finding" if findings else "ok",
         "exit_code": exit_code, "started_at": "2026-10-08T10:00:00Z", "finished_at": "2026-10-08T10:00:01Z",
@@ -239,6 +243,35 @@ def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error
         "copy_dir": None, "receipts_not_copied": list(receipts), "max_wait_days": 7, "findings": list(findings),
         "error": {"code": error[0], "message": error[1]} if error else None,
     }
+    if deletion is not None:
+        document["request_id"] = None
+        document["open_deletion_request"], document["last_finished_deletion_request"] = deletion
+    return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
+
+
+def deletion_summary(request_id, state, age_seconds=None, failure=None):
+    """A deletion request summary of `history-archive status` (contract B3 §3)."""
+    document = {"id": request_id, "state": state, "scope": {"work_order_numbers": ["WO-1"], "part_numbers": []},
+                "requested_at": "2026-10-08T09:40:00Z", "requested_by_user_id": None,
+                "requested_by_operator": "ops", "rows": {"work_orders": 1}, "started_at": None, "backup_label": None,
+                "pre_purge_backup_name": None, "finished_at": None, "failure_reason": failure}
+    if age_seconds is not None:
+        document["age_seconds"] = age_seconds
+    return document
+
+
+def settings_doc(request=None, exit_code=0, error=None, started_at="2026-10-08T10:00:00.250000Z"):
+    """The cheap check of archive.sh, a `history-archive settings` report (contract B3 §3; the backend writes times with
+    microseconds), which check.sh reads while archival is not set up."""
+    document = {
+        "report_version": 1, "command": "history-archive settings", "result": "failed" if error else "read",
+        "exit_code": exit_code, "started_at": started_at, "finished_at": "2026-10-08T10:00:00.350000Z",
+        "duration_ms": 100, "run_id": None, "request_id": None, "state": None,
+        "error": {"code": error[0], "message": error[1]} if error else None,
+    }
+    if not error:
+        document.update({"start_minute": 20, "archive_dir": None, "copy_dir": None, "site_timezone": "UTC",
+                         "deletion_pending": request is not None, "deletion_request": request})
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
 
 
@@ -346,6 +379,142 @@ class Archive(Helper):
         self.assertTrue(lines[0].startswith("FAIL archival_proposal reconcile_after_purge: the incident record"), lines)
         for arguments in (("archive", clean, 0, "--purge-reconcile"), ("archive", clean, 0, "--purge-reconcile", "a",
                                                                         "--purge-reconcile", "b")):
+            with self.subTest(arguments=arguments):
+                rc, lines = self.run_helper(*arguments)
+                self.assertEqual((rc, lines), (2, []))
+
+    # MR-15 (archival step 3): the open and the last finished deletion request in the terms of archive.sh's DELETION
+    # line; an open request, APPROVED or RUNNING, requested longer ago than --deletion-wait-minutes (default 15) fails as
+    # deletion_request_waiting, after the incident and before the job's findings; a FAILED last request never fails the
+    # line.
+    def test_mr15_deletion_requests(self):
+        cases = (
+            ((deletion_summary(7, "APPROVED", 120), None), (), 0,
+             "PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB free; deletion request 7"
+             " APPROVED for 2 min"),
+            ((deletion_summary(7, "RUNNING", 120), deletion_summary(6, "FAILED", failure="The data changed.")), (), 0,
+             "PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB free; deletion request 7"
+             " RUNNING for 2 min; last deletion request 6 FAILED"),
+            ((None, deletion_summary(6, "COMPLETED")), (), 0,
+             "PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB free; last deletion request 6"
+             " COMPLETED"),
+            ((deletion_summary(7, "APPROVED", 16 * 60), None), (), 1,
+             "FAIL archival_proposal deletion_request_waiting: deletion request 7 APPROVED has waited 16 min (limit 15"
+             " min), and the history archive task has not carried it out: is the task enabled? (SYNOLOGY_NAS §11.8)"),
+            ((deletion_summary(7, "APPROVED", 16 * 60), None), ("--deletion-wait-minutes", "20"), 0,
+             "PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB free; deletion request 7"
+             " APPROVED for 16 min"),
+            ((deletion_summary(7, "APPROVED", 61), None), ("--deletion-wait-minutes", "1"), 1,
+             "FAIL archival_proposal deletion_request_waiting: deletion request 7 APPROVED has waited 1 min (limit 1"
+             " min), and the history archive task has not carried it out: is the task enabled? (SYNOLOGY_NAS §11.8)"),
+        )
+        for deletion, options, code, text in cases:
+            with self.subTest(text=text):
+                document = self.write("a.json", archive_status_doc(deletion=deletion))
+                rc, lines = self.run_helper("archive", document, 0, *options)
+                self.assertEqual((rc, lines), (code, [text]))
+        # Review finding 3: a request stuck RUNNING (the job stopped and the task is disabled, so no start fails it)
+        # fails the line; an APPROVED request behind a run that is RUNNING or PURGING names that run.
+        cases = (
+            (None, deletion_summary(7, "RUNNING", 3600),
+             "deletion request 7 RUNNING has been open for 60 min (limit 15 min), and the history archive task has not"
+             " finished it: is the task enabled? (SYNOLOGY_NAS §11.8)"),
+            (run_summary(4, "RUNNING"), deletion_summary(7, "APPROVED", 16 * 60),
+             "deletion request 7 APPROVED has waited 16 min (limit 15 min) behind run 4 RUNNING: the history archive"
+             " task carries it out once that run's work in progress ends; is the task enabled? (SYNOLOGY_NAS §11.8)"),
+            (run_summary(4, "PURGING", purged=(40, 90, 1200)), deletion_summary(7, "APPROVED", 50 * 60),
+             "deletion request 7 APPROVED has waited 50 min (limit 15 min) behind run 4 PURGING: the history archive"
+             " task carries it out once that run's work in progress ends; is the task enabled? (SYNOLOGY_NAS §11.8)"),
+            (run_summary(4, "WAITING_FOR_COPY"), deletion_summary(7, "APPROVED", 16 * 60),
+             "deletion request 7 APPROVED has waited 16 min (limit 15 min), and the history archive task has not"
+             " carried it out: is the task enabled? (SYNOLOGY_NAS §11.8)"),
+        )
+        for open_run, request, text in cases:
+            with self.subTest(text=text):
+                document = self.write("r.json", archive_status_doc(open_run=open_run, deletion=(request, None)))
+                rc, lines = self.run_helper("archive", document, 0)
+                self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal deletion_request_waiting: {text}"]))
+        incident = self.write("incident", "result=mismatch\nexit_code=1\nrun=3\n")
+        document = self.write("w.json", archive_status_doc(1, ["last_run_failed"], last={"id": 3, "state": "FAILED"},
+                                                           deletion=(deletion_summary(7, "APPROVED", 3600), None)))
+        rc, lines = self.run_helper("archive", document, 1, "--purge-reconcile", incident)
+        self.assertEqual(rc, 1)
+        # The incident first, the waiting request next, then the job's findings (the line is cut at 300 characters).
+        self.assertTrue(lines[0].startswith("FAIL archival_proposal reconcile_after_purge: the reconcile after the purge"
+                                            " of run 3 found a mismatch: an incident"), lines)
+        self.assertIn("(Reconcile finding after a purge); deletion_request_waiting: deletion request 7 APPROVED has"
+                      " waited 60 min (limit 15 min)", lines[0])
+        rc, lines = self.run_helper("archive", document, 1)
+        self.assertEqual(rc, 1)
+        self.assertTrue(lines[0].startswith("FAIL archival_proposal deletion_request_waiting: deletion request 7"
+                                            " APPROVED has waited 60 min"), lines)
+        self.assertTrue(lines[0].endswith("; last_run_failed: run 3 FAILED: no reason recorded"), lines)
+        for value in ("0", "1441", "x", "-5"):
+            with self.subTest(value=value):
+                rc, lines = self.run_helper("archive", document, 1, "--deletion-wait-minutes", value)
+                self.assertEqual((rc, lines), (2, []))
+                self.assertIn("--deletion-wait-minutes must be a whole number from 1 to 1440", self.result.stderr)
+
+    # MR-16 (archival step 3): archive.sh's incident record after a deletion names the request, not a run.
+    def test_mr16_incident_after_a_deletion(self):
+        incident = self.write("incident", "result=mismatch\nexit_code=1\nrun=\narchive_name=\nrequest=7\n"
+                                          "pre_purge_backup=x\nfailing_checks=c\nfinished_at=2026-10-08T10:21:00Z\n"
+                                          "report=/r/reconcile.json\n")
+        clean = self.write("a.json", archive_status_doc())
+        rc, lines = self.run_helper("archive", clean, 0, "--purge-reconcile", incident)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal reconcile_after_purge: the reconcile after the deletion"
+                                           " of request 7 found a mismatch in checks c at 2026-10-08T10:21:00Z: an"
+                                           " incident, OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion);"
+                                           " report /r/reconcile.json"]))
+        incident = self.write("i2", "result=interrupted\nexit_code=2\nrun=\nrequest=7\nfailing_checks=\n")
+        rc, lines = self.run_helper("archive", clean, 0, "--purge-reconcile", incident)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal reconcile_after_purge: the reconcile after the deletion"
+                                           " of request 7 did not end (archive.sh was interrupted): an incident,"
+                                           " OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion)"]))
+
+    # MR-17 (archival step 3, review finding 2): while archival is not set up, `settings` reads the cheap check. An open
+    # request, APPROVED or RUNNING, requested longer ago than --deletion-wait-minutes (the report's started_at minus the
+    # request's requested_at) fails the line, since nothing carries it out; otherwise the line is SKIP with the reason
+    # it is given, and with why when the report cannot tell.
+    def test_mr17_settings_without_archival(self):
+        skip = "archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in .env.production (DEPLOYMENT §3.1)"
+        approved = {**deletion_summary(7, "APPROVED"), "requested_at": "2026-10-08T09:40:00.000000Z"}
+        running = {**deletion_summary(7, "RUNNING"), "requested_at": "2026-10-08T09:40:00.500000Z"}
+        young = {**deletion_summary(7, "APPROVED"), "requested_at": "2026-10-08T09:57:00.000000Z"}
+        cases = (
+            (settings_doc(), 0, (), 0, f"SKIP archival_proposal {skip}"),
+            (settings_doc(young), 0, (), 0, f"SKIP archival_proposal {skip}"),
+            (settings_doc(approved), 0, ("--deletion-wait-minutes", "30"), 0, f"SKIP archival_proposal {skip}"),
+            (settings_doc(approved), 0, (), 1,
+             "FAIL archival_proposal deletion_request_waiting: deletion request 7 APPROVED has waited 20 min (limit 15"
+             " min), but history archival is not set up (PARTFLOW_ARCHIVE_DIR is empty), so nothing carries it out: set"
+             " up the history archive task (SYNOLOGY_NAS §11.8) or cancel the request in PartFlow"),
+            (settings_doc(running, started_at="2026-10-08T10:00:00Z"), 0, (), 1,
+             "FAIL archival_proposal deletion_request_waiting: deletion request 7 RUNNING has been open for 19 min"
+             " (limit 15 min), but history archival is not set up (PARTFLOW_ARCHIVE_DIR is empty), so nothing finishes"
+             " it: set up the history archive task (SYNOLOGY_NAS §11.8), whose next start makes it FAILED"),
+            ("", 1, (), 0,
+             f"SKIP archival_proposal {skip}; the deletion request check (history-archive settings in the backend"
+             " container) could not run (exit 1); see archive-settings.err"),
+            (settings_doc(exit_code=0), 2, (), 0,
+             f"SKIP archival_proposal {skip}; the deletion request check (history-archive settings in the backend"
+             " container) could not run (exit 2); see archive-settings.err"),
+            (settings_doc(exit_code=2, error=("database_unavailable", "PartFlow could not reach its database. Nothing"
+                                                                      " was changed.")), 2, (), 0,
+             f"SKIP archival_proposal {skip}; the deletion request check failed: PartFlow could not reach its database."
+             " Nothing was changed."),
+            (settings_doc({**approved, "requested_at": "yesterday"}), 0, (), 0,
+             f"SKIP archival_proposal {skip}; the deletion request check could not tell how long deletion request 7"
+             " APPROVED has been open"),
+        )
+        for text, rc, options, code, expected in cases:
+            with self.subTest(expected=expected):
+                rc_out, lines = self.run_helper("settings", self.write("s.json", text), rc, "--skip-reason", skip,
+                                                *options)
+                self.assertEqual((rc_out, lines), (code, [expected]))
+        document = self.write("s.json", settings_doc())
+        for arguments in (("settings", document, 0), ("settings", document, 0, "--skip-reason", ""),
+                          ("settings", document, 0, "--skip-reason", "x", "--deletion-wait-minutes", "0")):
             with self.subTest(arguments=arguments):
                 rc, lines = self.run_helper(*arguments)
                 self.assertEqual((rc, lines), (2, []))

@@ -21,8 +21,8 @@ Runs the real Alembic chain against isolated, temporary PostgreSQL databases
   purged in step 1, never deleted);
 - the database roles (temporary roles granted by ``apply-grants``): the
   application role may not make the job's changes or write records; the
-  maintenance role makes them, appends only ``HistoryArchiveRun`` audit rows,
-  reads no audit row and deletes nothing;
+  maintenance role makes them and appends ``HistoryArchiveRun`` audit rows
+  (it reads the audit rows and deletes since later steps);
 - the downgrade restores 0039 (revoking the key with an audit row per role)
   and refuses while archival data or a changed setting exists.
 """
@@ -63,6 +63,7 @@ _HEAD_REVISION = "0040_phase16_history_archive"
 _CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _VERSIONS / "20261117_0040_phase16_history_archive.py"
 _PURGE_MIGRATION_FILE = _VERSIONS / "20261118_0041_phase16_history_purge.py"
+_DELETION_MIGRATION_FILE = _VERSIONS / "20261118_0042_phase16_deletion_requests.py"
 _USERS_ROLES_FILE = _VERSIONS / "20261006_0028_phase13_users_roles.py"
 _ROUTE_ADJUSTED_FILE = _VERSIONS / "20261007_0032_phase14_route_adjusted.py"
 _RETENTION_FILE = _VERSIONS / "20261006_0027_phase13_retention_period.py"
@@ -301,14 +302,19 @@ def test_the_migration_literals_match_the_model() -> None:
     retention = _load(_RETENTION_FILE, "retention_migration")
     assert (migration.revision, migration.down_revision) == (_HEAD_REVISION, _PREVIOUS_REVISION)
     assert migration._PREVIOUS_PERMISSIONS == users_roles._PERMISSIONS
-    assert tuple(permission.value for permission in Permission) == migration._PERMISSIONS
+    # 0042 (step 3) appends its key and DeletionRequest to the literals this
+    # revision wrote, and repeats them as its previous ones.
+    deletion = _load(_DELETION_MIGRATION_FILE, "deletion_requests_migration_for_0040")
+    assert tuple(permission.value for permission in Permission) == (
+        *migration._PERMISSIONS,
+        Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY.value,
+    )
+    assert migration._PERMISSIONS == deletion._PREVIOUS_PERMISSIONS
     assert migration._KEY == _KEY
-    assert migration._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
+    assert migration._PERMISSION_SQL == deletion._PREVIOUS_PERMISSION_SQL
     assert migration._PREVIOUS_PERMISSION_SQL == users_roles._PERMISSION_SQL
     assert migration._PREVIOUS_ENTITY_TYPES == route_adjusted._ROUTE_ENTITY_TYPES
-    assert (
-        _model_checks(models.AuditEvent)["ck_audit_events_entity_type"] == migration._ENTITY_TYPES
-    )
+    assert migration._ENTITY_TYPES == deletion._PREVIOUS_ENTITY_TYPES
     assert migration._PREVIOUS_RETENTION_SQL == retention._RETENTION_SQL
     assert migration._RETENTION_SQL == models.POLICY_RETENTION_PERIOD_SQL
     # Step 1's settings; step 2 (0041) adds the purge batch limits after them.
@@ -407,7 +413,8 @@ def test_a_fresh_install_holds_the_defaults_and_the_key(head: Engine) -> None:
         assert _KEY in grants["Administrator"] and _KEY in grants["Super User"]
         assert _KEY not in grants["Manager"] and _KEY not in grants["Operator"]
         assert grants["Super User"] == {permission.value for permission in Permission}
-        roles = _audits(connection, "Role")
+        # This revision's rows (0042 adds its own row for Super User).
+        roles = [row for row in _audits(connection, "Role") if row["metadata"] == _METADATA]
         assert [row["after_data"]["name"] for row in roles] == ["Administrator", "Super User"]
         for row in roles:
             assert set(row["after_data"]["permissions"]) - set(
@@ -490,7 +497,9 @@ def _insert_role(connection: Connection, name: str, keys: list[str]) -> int:
 
 def test_the_key_goes_to_administrator_and_every_full_role_only(previous_database: URL) -> None:
     engine = create_engine(previous_database)
-    every = [permission.value for permission in Permission if permission.value != _KEY]
+    # The vocabulary before this revision (0042's key comes later still).
+    later = {_KEY, Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY.value}
+    every = [permission.value for permission in Permission if permission.value not in later]
     try:
         with engine.begin() as connection:
             connection.execute(
@@ -844,8 +853,18 @@ def test_the_record_guard(head: Engine) -> None:
     )
     for statement in ("DELETE FROM history_archived_flows", "TRUNCATE history_archived_flows"):
         _refused(head, [marked, (statement, {})], "never deleted")
-    # The record keeps its flow row.
+    # The record keeps its flow row: the row guard of 0042 refuses the delete
+    # first, and beneath it the record's foreign key refuses it too (the guard
+    # is disabled only inside this rolled-back transaction).
+    with (
+        pytest.raises(DBAPIError, match="may be deleted only by the host job"),
+        head.begin() as connection,
+    ):
+        connection.execute(sa.text("DELETE FROM quantity_flows WHERE id = :flow"), key)
     with pytest.raises(IntegrityError), head.begin() as connection:
+        connection.execute(
+            sa.text("ALTER TABLE quantity_flows DISABLE TRIGGER trg_quantity_flows_guard_delete")
+        )
         connection.execute(sa.text("DELETE FROM quantity_flows WHERE id = :flow"), key)
 
 
@@ -992,7 +1011,8 @@ def test_the_roles_split_the_runs_between_the_application_and_the_job(
     assert _as(head, roles.maintenance, [*waiting, copied, complete]) == "P0001"
     assert _as(head, roles.maintenance, [(_AUDIT_ROW, {"type": "HistoryArchiveRun"})]) is None
     assert _as(head, roles.maintenance, [(_AUDIT_ROW, {"type": "ApplicationPolicy"})]) == "P0001"
-    assert _as(head, roles.maintenance, [("SELECT 1 FROM audit_events LIMIT 1", {})]) == "42501"
+    # Since step 3 it reads the audit rows (the plan of a permanent deletion does).
+    assert _as(head, roles.maintenance, [("SELECT 1 FROM audit_events LIMIT 1", {})]) is None
     # Since step 2 it may delete Movements, as the purge's row guard allows (none here).
     assert _as(head, roles.maintenance, [("DELETE FROM part_movements WHERE false", {})]) is None
     assert _as(
@@ -1019,7 +1039,12 @@ def test_the_downgrade_restores_the_previous_schema(head_database: URL, head: En
     with head.connect() as connection:
         assert _version(connection) == _PREVIOUS_REVISION
         assert all(_KEY not in keys for keys in _grants(connection).values())
-        revoked = [row for row in _audits(connection, "Role") if row["metadata"].get("downgrade")]
+        # This revision's revocations (0042's downgrade revokes its own key first).
+        revoked = [
+            row
+            for row in _audits(connection, "Role")
+            if row["metadata"].get("downgrade") and row["metadata"]["revision"] == _HEAD_REVISION
+        ]
         assert len(revoked) == 2
         assert _section_previous(connection) == 24
     tables = set(inspect(head).get_table_names())

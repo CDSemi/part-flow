@@ -83,6 +83,22 @@ test('a role converts to the application shape; an unknown key fails loudly', as
   ]);
   answer = [{ ...ROLE_WIRE, applies_at_scan_stations: true }];
   expect((await listRoles())[0].appliesAtScanStations).toBe(true);
+  // Super User after migration 0042: every key, the permanent deletion
+  // key included, decodes.
+  answer = [
+    {
+      ...ROLE_WIRE,
+      name: 'Super User',
+      permissions: [
+        'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+        'RUN_HISTORY_ARCHIVAL_AND_PURGE',
+      ],
+    },
+  ];
+  expect((await listRoles())[0].permissions).toEqual([
+    'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+    'RUN_HISTORY_ARCHIVAL_AND_PURGE',
+  ]);
   answer = [{ ...ROLE_WIRE, permissions: ['NOPE'] }];
   await expect(listRoles()).rejects.toThrow(/NOPE/);
   // The Scan Station flag is part of the contract: a role without it

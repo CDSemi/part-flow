@@ -1,6 +1,6 @@
 # Cài đặt PartFlow trên Synology NAS
 
-> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi
+> **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `d094f5e` cộng các thay đổi
 > chưa commit ngày 2026-11-18. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -267,8 +267,10 @@ tiên thất bại; các bước bên dưới cho thấy nó làm gì.
 
 Database bắt đầu rỗng, trong volume mới `partflow-production_postgres_data`. Để bắt đầu từ một bản sao lưu có sẵn, ví dụ
 khi chuyển PartFlow từ máy chủ khác sang, hãy làm theo runbook §6 (New-instance restore) thay cho bước 3, và chỉ tạo
-tác vụ lưu trữ lịch sử (§11.8) sau khi bạn đã kiểm tra các lần lưu trữ trong Administration → History archival &
-purge: một lần lưu trữ ở `PURGING` được khôi phục sẽ được tiếp tục purge ở lần khởi động đầu tiên của tác vụ.
+tác vụ lưu trữ lịch sử (§11.8) sau khi bạn đã kiểm tra các lần lưu trữ và các yêu cầu xóa vĩnh viễn trong
+Administration → History archival & purge: một lần lưu trữ ở `PURGING` được khôi phục sẽ được tiếp tục purge, và một
+yêu cầu xóa ở `APPROVED` được khôi phục sẽ được thực hiện, ở lần khởi động đầu tiên của tác vụ (hãy hủy một yêu cầu như
+vậy trừ khi việc xóa vẫn còn cần).
 
 ## 8. Khởi động PartFlow và kiểm tra trên NAS
 
@@ -423,7 +425,7 @@ PartFlow giờ đã chạy production. Hãy đưa mọi người địa chỉ `h
 
 Các tác vụ này được khuyến nghị và không bao giờ chặn việc sử dụng. Cho đến khi tác vụ sao lưu chạy, các bản sao
 lưu duy nhất là những bản mà `release.sh` tạo trước mỗi bản phát hành. Hãy làm theo thứ tự này; §11.8, tác vụ lưu
-trữ lịch sử, chỉ cần có trước lần lưu trữ đầu tiên.
+trữ lịch sử, chỉ cần có trước lần lưu trữ đầu tiên hoặc lần xóa vĩnh viễn dữ liệu thử nghiệm đầu tiên.
 
 ### 11.1 Thông báo qua email
 
@@ -453,12 +455,14 @@ email**. Chỉ tiếp tục khi email thử đã đến.
 
 Tác vụ chạy mỗi giờ, và **Administration → Backups** trong PartFlow quyết định tần suất nó tạo một bản sao lưu (ban đầu
 mỗi giờ) và số bản nó giữ (ban đầu 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần, và 3 bản sao lưu trước purge
-mới nhất mà tác vụ lưu trữ lịch sử của §11.8 tạo ra). Một lần chạy không có bản sao
-lưu nào đến hạn kết thúc mà không ghi gì. Với một bản sao lưu mỗi giờ, tối đa mất một giờ công việc. Hãy bắt đầu các bản
-phát hành sau giờ tròn vài phút: một bản sao lưu đang chạy sẽ làm bản phát hành dừng trước khi thay đổi bất cứ điều gì
-(hãy chạy lại bản phát hành khi bản sao lưu đã xong), và một bản sao lưu bắt đầu trong lúc đang phát hành bị từ chối
-(bạn nhận email báo thất bại của nó; bản sao lưu của giờ tiếp theo chạy bình thường). Các bản sao lưu được giải thích
-trong runbook §3.
+mới nhất mà tác vụ lưu trữ lịch sử của §11.8 tạo ra trước một lần purge hoặc một lần xóa vĩnh viễn; hai loại dùng chung
+con số đó, nên hãy tăng **Pre-purge backups kept** trước một đợt xóa dữ liệu thử nghiệm khi bản sao lưu trước purge của
+một lần purge trước đó vẫn còn quan trọng, runbook §3). Một lần chạy không có bản sao lưu nào đến hạn kết thúc mà không
+ghi gì. Với một bản sao lưu mỗi giờ, tối đa mất một giờ công việc. Hãy bắt
+đầu các bản phát hành sau giờ tròn vài phút: một bản sao lưu đang chạy sẽ làm bản phát hành dừng trước khi thay đổi bất
+cứ điều gì (hãy chạy lại bản phát hành khi bản sao lưu đã xong), và một bản sao lưu bắt đầu trong lúc đang phát hành bị
+từ chối (bạn nhận email báo thất bại của nó; bản sao lưu của giờ tiếp theo chạy bình thường). Các bản sao lưu được giải
+thích trong runbook §3.
 
 Một tác vụ của bản phát hành trước với `--kind daily` nay thất bại kèm thông báo nêu tên lệnh này: hãy đổi lịch và lệnh
 của nó như trên.
@@ -515,7 +519,8 @@ chỉnh lệnh check theo phương án HTTPS của bạn:
 
 Thử tác vụ check: chọn nó, bấm **Run**, rồi đọc kết quả trên NAS. Dòng đầu hiển thị thời gian và mã thoát
 (`exit 0`); mọi dòng khác bắt đầu bằng `PASS`, hoặc `SKIP` với một kiểm tra không áp dụng (các dòng `disk_archive` và
-`archival_proposal` là `SKIP` cho đến khi làm xong §11.8):
+`archival_proposal` là `SKIP` cho đến khi làm xong §11.8; trước đó, `archival_proposal` chỉ thất bại với một yêu cầu xóa
+vĩnh viễn đã chờ lâu hơn 15 phút, vì không có gì thực hiện nó):
 
 ```sh
 cat /root/partflow-monitoring/last-check.txt
@@ -561,9 +566,15 @@ quy tắc của profile đang dùng:
 
 PartFlow có thể chuyển lịch sử Movement cũ vào các tệp lưu trữ rồi xóa nó khỏi database (History archival & purge
 trong Administration; runbook §11). **Một lần lưu trữ xóa lịch sử:** khi bản lưu trữ của nó đã được sao chép ra ngoài
-NAS, job tạo một bản sao lưu trước purge rồi purge (xóa hẳn) các Movement đã lưu trữ khỏi database. Job lưu trữ lịch
-sử cần một thư mục lưu trữ trên NAS, tùy chọn một thư mục sao chép trên thiết bị khác, và một tác vụ khởi động nó mỗi
-5 phút. Hãy làm việc này trước khi lần lưu trữ đầu tiên được yêu cầu trong Administration.
+NAS, job tạo một bản sao lưu trước purge rồi purge (xóa hẳn) các Movement đã lưu trữ khỏi database. **Một yêu cầu xóa
+vĩnh viễn cũng xóa:** cùng job đó thực hiện việc xóa các Work Order và Part Number chỉ nhập để thử nghiệm, được yêu cầu
+trong PartFlow (**Delete permanently…**) hoặc bằng `pf delete-permanently` (runbook §10), trong vòng 5 phút sau yêu cầu:
+nó tạo một bản sao lưu trước purge rồi xóa chúng khỏi database. Job lưu trữ lịch sử cần một thư mục lưu trữ trên NAS,
+tùy chọn một thư mục sao chép trên thiết bị khác, và một tác vụ khởi động nó mỗi 5 phút. Hãy làm việc này trước khi lần
+lưu trữ đầu tiên được yêu cầu trong Administration và trước khi lần xóa đầu tiên được yêu cầu: **không có tác vụ này,
+một yêu cầu xóa không bao giờ được thực hiện**, `pf delete-permanently --confirm` từ chối khi thư mục lưu trữ chưa
+được đặt, và `check.sh` báo một yêu cầu được tạo trong PartFlow trong lúc đó là `FAIL archival_proposal
+deletion_request_waiting` khi nó đã chờ 15 phút (hãy hủy nó trong PartFlow, hoặc làm xong mục này).
 
 1. **Tạo thư mục lưu trữ**, thuộc sở hữu của `root` (tài khoản chạy tác vụ) và chỉ `root` đọc được:
 
@@ -619,19 +630,24 @@ sử cần một thư mục lưu trữ trên NAS, tùy chọn một thư mục s
      cd /volume1/docker/partflow/repo && HOME=/root deploy/production/archive.sh --scheduled
      ```
 
-   Hầu hết các lần khởi động kết thúc trong vài giây. Mỗi giờ một lần, ở lần khởi động đầu tiên vào hoặc sau **Start
-   minute** đặt trong Administration → History archival & purge (ban đầu là 20), tác vụ làm phần việc hằng giờ: nó
-   xuất, kiểm tra và sao chép một lần lưu trữ đã được yêu cầu, tạo bản sao lưu trước purge của lần đó trong thư mục sao
-   lưu, purge lịch sử Movement đã lưu trữ khỏi database và chạy đối soát sau đó. Lần khởi động đầu tiên chỉ ghi lại giờ
-   hiện tại, nên phần việc hằng giờ đầu tiên đến vào Start minute kế tiếp. Một lần từ chối hoặc thất bại gửi một email
-   cho giờ của nó; mã thoát 4 là một sự cố (đối soát sau một lần purge chưa kết thúc sạch: runbook §8), và cho đến khi
-   sự cố được đóng, mọi lần khởi động hằng giờ đều từ chối với mã thoát 1 và không làm việc với lần lưu trữ nào. Hãy
-   để Start minute tránh xa phút 0: bản sao lưu trước purge chờ bản sao lưu mỗi giờ khi bản đó đang chạy (tối đa 60
-   phút), và một bản phát hành bị từ chối khi tác vụ đang làm việc.
+   Mỗi lần khởi động trước hết kiểm tra, trong vài giây, xem có yêu cầu xóa vĩnh viễn nào đang mở không, và thực hiện
+   nó ngay: bản sao lưu trước purge trong thư mục sao lưu, việc xóa, và đối soát sau đó. Hầu hết các lần khởi động sau
+   đó kết thúc. Mỗi giờ một lần, ở lần khởi động đầu tiên vào hoặc sau **Start minute** đặt trong Administration →
+   History archival & purge (ban đầu là 20), tác vụ làm phần việc hằng giờ: nó xuất, kiểm tra và sao chép một lần lưu
+   trữ đã được yêu cầu, tạo bản sao lưu trước purge của lần đó trong thư mục sao lưu, purge lịch sử Movement đã lưu trữ
+   khỏi database và chạy đối soát sau đó. Một lần khởi động đã thực hiện một lần xóa để phần việc hằng giờ cho lần khởi
+   động kế tiếp. Lần khởi động đầu tiên chỉ ghi lại giờ hiện tại, nên phần việc hằng giờ đầu tiên đến vào Start minute
+   kế tiếp. Một lần từ chối hoặc thất bại gửi một email cho giờ của nó, trừ khi một yêu cầu xóa đang mở: khi đó mỗi lần
+   khởi động không thực hiện được nó gửi một email; mã thoát 4 là một sự cố (đối soát sau một lần purge hoặc một lần
+   xóa chưa kết thúc sạch: runbook §8), và cho đến khi sự cố được đóng, mọi lần khởi động hằng giờ đều từ chối với mã
+   thoát 1, không làm việc với lần lưu trữ nào và không thực hiện yêu cầu xóa nào. Hãy để Start minute tránh xa phút 0:
+   một bản sao lưu trước purge chờ bản sao lưu mỗi giờ khi bản đó đang chạy (tối đa 60 phút), và một bản phát hành bị
+   từ chối khi tác vụ đang làm việc.
 
 5. **Thử nó.** Chọn tác vụ và bấm **Run**. Sau đó kiểm tra rằng job đến được thư mục của nó và database; lệnh đầu in
-   các dòng của phần việc hằng giờ và kết thúc bằng một dòng bắt đầu bằng `ARCHIVE` (`ARCHIVE none - -` khi chưa có lần
-   lưu trữ nào được yêu cầu: khi đó không có gì được xuất hay bị xóa):
+   các dòng của phần việc và kết thúc bằng một dòng bắt đầu bằng `ARCHIVE` (`ARCHIVE none - -` khi chưa có lần lưu trữ
+   hay lần xóa nào được yêu cầu: khi đó không có gì được xuất hay bị xóa; một lần khởi động đã thực hiện một yêu cầu
+   xóa kết thúc bằng một dòng bắt đầu bằng `DELETION`):
 
    ```sh
    deploy/production/pf archive
@@ -644,12 +660,14 @@ sử cần một thư mục lưu trữ trên NAS, tùy chọn một thư mục s
 6. Thêm thư mục lưu trữ vào tác vụ Hyper Backup (§11.3, bước 3), nếu bạn chưa làm.
 
 **Trước mọi lần khôi phục database** (một lần quay lui, một lần khôi phục sau sự cố, một lần chuyển sang NAS mới:
-runbook §6 và §8), hãy bỏ chọn **Enabled** của tác vụ này, và chỉ chọn lại sau khi bạn đã kiểm tra các lần lưu trữ trong
-Administration → History archival & purge. Một bản sao lưu được khôi phục mà giữ một lần lưu trữ ở `PURGING` (ví dụ bản
-sao lưu mỗi giờ được tạo trong lúc một lần purge chạy) sẽ tiếp tục purge đó ở lần khởi động kế tiếp của tác vụ, trừ khi
-tác vụ bị tắt hoặc bản ghi sự cố của runbook §8 còn tồn tại. Để hoàn tác một lần purge, hãy khôi phục bản sao lưu trước
-purge của lần lưu trữ đó: trong đó lần lưu trữ ở `RUNNING`, lần khởi động kế tiếp chuyển nó sang thất bại, và không có
-gì bị purge lại.
+runbook §6 và §8), hãy bỏ chọn **Enabled** của tác vụ này, và chỉ chọn lại sau khi bạn đã kiểm tra các lần lưu trữ và
+các yêu cầu xóa vĩnh viễn trong Administration → History archival & purge. Một bản sao lưu được khôi phục mà giữ một
+lần lưu trữ ở `PURGING` (ví dụ bản sao lưu mỗi giờ được tạo trong lúc một lần purge chạy) sẽ tiếp tục purge đó ở lần
+khởi động kế tiếp của tác vụ, trừ khi tác vụ bị tắt hoặc bản ghi sự cố của runbook §8 còn tồn tại. Một bản sao lưu được
+khôi phục mà giữ một yêu cầu xóa ở `APPROVED` (được tạo giữa lúc yêu cầu và lúc xóa) sẽ khiến yêu cầu đó được thực hiện
+ở lần khởi động kế tiếp của tác vụ: hãy hủy nó trong PartFlow trước, trừ khi việc xóa vẫn còn cần. Để hoàn tác một lần
+purge hoặc một lần xóa, hãy khôi phục bản sao lưu trước purge của nó: trong đó lần lưu trữ hoặc yêu cầu ở `RUNNING`,
+lần khởi động kế tiếp chuyển nó sang thất bại, và không có gì bị purge hay xóa lại.
 
 ## 12. Cài một bản phát hành mới
 
@@ -657,8 +675,9 @@ Mọi bản phát hành sau này được cài bằng `deploy/production/release
 image mới mà không động đến các image đang chạy, migrate database, chuyển PartFlow sang bản phát hành mới và kiểm tra nó.
 Hãy chọn thời điểm không có việc nhập Work Order nào đang chạy, sau giờ tròn vài phút, khi bản sao lưu mỗi giờ đã xong,
 và khá lâu trước Start minute của tác vụ lưu trữ lịch sử: một bản phát hành bị từ chối khi tác vụ đó đang làm phần việc
-hằng giờ (hãy chạy lại khi phần việc đã xong), và tác vụ từ chối khi một bản phát hành đang chạy. Việc purge của một lần
-lưu trữ, và một lần lưu trữ lớn đầu tiên, có thể giữ tác vụ bận khá lâu.
+hằng giờ hoặc đang thực hiện một yêu cầu xóa vĩnh viễn (hãy chạy lại khi phần việc đã xong; một lần xóa mất vài phút
+cho bản sao lưu trước purge và đối soát của nó), và tác vụ từ chối khi một bản phát hành đang chạy. Việc purge của một
+lần lưu trữ, và một lần lưu trữ lớn đầu tiên, có thể giữ tác vụ bận khá lâu.
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -680,7 +699,8 @@ deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --appr
   theo lịch không cần thay đổi, vì chúng chạy trong cùng thư mục.
 - Giữ các image của bản phát hành trước (không bao giờ dùng `docker image prune -a`) cho đến khi bạn chắc chắn sẽ không
   quay lui (rollback) (runbook §6). Trước một lần quay lui có khôi phục một bản sao lưu, hãy tắt tác vụ lưu trữ lịch sử
-  (§11.8).
+  (§11.8), kiểm tra các lần lưu trữ và các yêu cầu xóa vĩnh viễn sau khi khôi phục, và hủy trong PartFlow mọi yêu cầu
+  xóa ở `APPROVED` không còn cần nữa trước khi bật lại tác vụ.
 
 ## 13. Dung lượng và giới hạn tài nguyên
 
@@ -707,17 +727,19 @@ sao lưu; một buổi diễn tập khôi phục cần năm lần bản sao lưu
 của `check.sh` thất bại khi dung lượng trống dưới 15 %: `disk_data` cho volume database, `disk_backup` cho thư mục sao
 lưu, `disk_docker` cho vùng lưu trữ của Docker (image và log của container) và `disk_archive` cho thư mục lưu trữ
 (§11.8). Thư mục lưu trữ lớn dần theo mỗi lần lưu trữ; không có gì tự động xóa các bản lưu trữ. Thư mục sao lưu cũng
-chứa các bản sao lưu trước purge của History archival & purge (mặc định 3 bản mới nhất, mỗi bản một bản dump). Một lần
-purge giải phóng chỗ bên trong database cho các Movement mới, nên database ngừng lớn lên, nhưng các tệp của nó chỉ nhỏ
-đi bằng `VACUUM FULL` (runbook §11).
-`/root/partflow-monitoring/growth.tsv` ghi kích thước database mỗi ngày một lần.
+chứa các bản sao lưu trước purge mà tác vụ lưu trữ lịch sử tạo trước mỗi lần purge và mỗi lần xóa vĩnh viễn (mặc định 3
+bản mới nhất, mỗi bản một bản dump, hai loại gộp chung: một loạt lần xóa có thể xoay vòng mất bản sao lưu trước purge
+của một lần purge trước đó). Một lần purge giải phóng chỗ bên trong database cho các Movement mới, nên database ngừng
+lớn lên, nhưng các tệp của nó chỉ nhỏ đi bằng `VACUUM FULL` (runbook §11). `/root/partflow-monitoring/growth.tsv` ghi
+kích thước database mỗi ngày một lần.
 
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §7, §11.8 và §12: tắt tác vụ lưu trữ lịch sử trước mọi lần khôi phục và kiểm tra các lần lưu trữ trước khi bật lại, vì một lần lưu trữ `PURGING` được khôi phục sẽ tiếp tục purge. |
-| 2026-11-18 | uncommitted | §11.8: một lần lưu trữ purge lịch sử Movement đã lưu trữ của nó sau bản sao ngoài máy chủ và một bản sao lưu trước purge, rồi đối soát, và một sự cố dừng việc của tác vụ cho đến khi nó được đóng; Start minute tránh xa bản sao lưu mỗi giờ; §11.2, §11.3, §12 và §13: các bản sao lưu trước purge trong thư mục sao lưu và trong Hyper Backup, bản lưu trữ là bản duy nhất sau một lần purge, một lần purge dài trước một bản phát hành, và `VACUUM FULL`. |
+| 2026-11-18 | uncommitted | §11.8: tác vụ lưu trữ lịch sử cũng thực hiện các yêu cầu xóa vĩnh viễn trong vòng 5 phút, sau một bản sao lưu trước purge, và một lần xóa cần nó; §7, §11.8 và §12: sau một lần khôi phục, kiểm tra cả các yêu cầu xóa và hủy các yêu cầu `APPROVED` không còn cần, vì một yêu cầu `APPROVED` được khôi phục sẽ được thực hiện; §8: `check.sh` báo một yêu cầu xóa đang chờ, kể cả khi việc lưu trữ chưa được thiết lập; §11, §11.2, §12 và §13: các bản sao lưu trước purge của các lần xóa, dùng chung Pre-purge backups kept với các lần purge, và các bản phát hành bị từ chối trong lúc xóa. |
+| 2026-11-18 | `d094f5e` | §7, §11.8 và §12: tắt tác vụ lưu trữ lịch sử trước mọi lần khôi phục và kiểm tra các lần lưu trữ trước khi bật lại, vì một lần lưu trữ `PURGING` được khôi phục sẽ tiếp tục purge. |
+| 2026-11-18 | `d094f5e` | §11.8: một lần lưu trữ purge lịch sử Movement đã lưu trữ của nó sau bản sao ngoài máy chủ và một bản sao lưu trước purge, rồi đối soát, và một sự cố dừng việc của tác vụ cho đến khi nó được đóng; Start minute tránh xa bản sao lưu mỗi giờ; §11.2, §11.3, §12 và §13: các bản sao lưu trước purge trong thư mục sao lưu và trong Hyper Backup, bản lưu trữ là bản duy nhất sau một lần purge, một lần purge dài trước một bản phát hành, và `VACUUM FULL`. |
 | 2026-11-17 | `2f12d33` | §11.8: thư mục lưu trữ, thư mục sao chép tùy chọn và tác vụ lưu trữ lịch sử mỗi 5 phút, chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì; §4, §11.3, §11.5, §12 và §13 cho thư mục lưu trữ. |
 | 2026-11-16 | `5708664` | §7, §12: `deploy/production/pf install` và `pf update` chạy các bước này. |
 | 2026-11-16 | `c1f042b` | §1, §11.2: tác vụ sao lưu chạy mỗi giờ với `--kind scheduled`, và Administration → Backups đặt khoảng thời gian và số bản sao lưu được giữ; §11.3, §11.5, §12: các giờ quanh bản sao lưu mỗi giờ. |

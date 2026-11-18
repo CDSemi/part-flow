@@ -52,7 +52,10 @@ allocation whose unchanged suggestion went stale ``suggestion_changed``
 (409), so the station ends an unknown outcome without parsing the message.
 Since slice 6 an AssignedRoute adjustment whose future steps changed
 since the editor read them carries ``route_changed`` (409), so the
-dialog offers to reload the route.
+dialog offers to reload the route. A permanent deletion request whose
+plan refuses (Phase 16, history archival D17) carries ``deletion_refused``
+and every refusal (``refusals``: ``code`` and ``message``), so the dialog
+names each link without parsing the message.
 
 Request-validation refusals (422) keep FastAPI's ``detail`` list but
 only each error's ``type``, ``loc`` and ``msg``: the default body also
@@ -83,6 +86,7 @@ from app.application.errors import (
     AssignedRouteChangedError,
     AuthenticationRequiredError,
     ConflictError,
+    DeletionRefusedError,
     EnrollmentCodeInvalidError,
     HotDemandRemovalConfirmationRequiredError,
     HotListChangedError,
@@ -266,6 +270,22 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     _add_handler(app, HotListChangedError, hot_list_changed_handler, "hot_list_changed")
+
+    async def deletion_refused_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Phase 16 (history archival D17): the plan of a permanent deletion
+        # refuses — nothing was requested; the body carries every refusal the
+        # dialog names, exactly as the preview lists them.
+        error = cast(DeletionRefusedError, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": error.message,
+                "deletion_refused": True,
+                "refusals": error.refusals,
+            },
+        )
+
+    _add_handler(app, DeletionRefusedError, deletion_refused_handler, "deletion_refused")
 
     async def hot_demand_removal_handler(request: Request, exc: Exception) -> JSONResponse:
         # Phase 12 follow-up (OD3): the demand line is on the Hot list and

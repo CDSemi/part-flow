@@ -18,6 +18,12 @@ Cases:
                recover, a step that makes no progress, and the starts that fail closed while the incident record
                exists (manual, through `pf archive`, scheduled)
   AR-40..AR-42 check.sh: receipt_not_copied, the incident record, a PURGING and a COMPLETED_WITH_SKIPS run
+  AR-43..AR-56 step 3, permanent deletion requests: the cheap check at every scheduled start (a request open or not,
+               the check without an answer), the deletion order and its final line, the slot left to the next start,
+               every exit of start-deletion, the pre-purge backup and delete (interrupted, an unknown outcome resolved by
+               status both ways, failed, refused), the reconcile after a deletion and its incident record, a request
+               that waits while a run is RUNNING, a request failed by recover, an interruption during the deletion,
+               the lock while a deletion runs, and check.sh's deletion_request_waiting and the deletion incident
 Nothing touches a Docker daemon, a database or the network.
 
 Run with the other production tests:
@@ -50,6 +56,8 @@ MAINTENANCE_PS = (r"^ps -q --filter label=com\.docker\.compose\.project=partflow
                   r" --filter label=com\.docker\.compose\.service=maintenance$")
 # The reconcile after a purge: a one-off backend container (the application role), as release.sh runs it.
 RECONCILE = r" run --rm --no-deps -T backend python -m app\.cli reconcile --max-findings 10000$"
+# The cheap check of every scheduled start (step 3): history-archive settings through `exec` in the running backend.
+CHEAP = r" exec -T backend python -m app\.cli history-archive settings$"
 # 2026-10-08T12:00:00Z, a whole hour (the fake clock is UTC, so the local minute is the UTC minute).
 BASE = calendar.timegm((2026, 10, 8, 12, 0, 0))
 RUN = 3
@@ -62,11 +70,23 @@ PURGE_WITH_BACKUP = f"purge --run {RUN} --backup {BACKUP} --backup-started-at {D
 BACKUP_ARGUMENTS = ["--kind", "pre-purge", "--label", ARCHIVE_NAME, "--operator", "archive.sh", "--reason",
                     f"pre-purge backup for {ARCHIVE_NAME}", "--env-file", ".env.production", "--lock-wait-minutes"]
 REQUEST_NEW = "Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+REQUEST_AGAIN = "Request the deletion again in PartFlow, or with pf delete-permanently (OPERATIONS_RUNBOOK §10)."
 # The refusal of a start while the incident record of a reconcile after a purge exists (after the record's path).
-INCIDENT_REFUSAL = (f" of a reconcile after a purge exists (run {RUN}, result mismatch): no run is worked on while it"
-                    " exists, no export, verification, copy, pre-purge backup or purge, not even the resumed purge of a"
-                    " run left PURGING. Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); once the"
-                    " investigation is done and the reconciliation is clean, remove the record (rm ")
+INCIDENT_REFUSAL = (f" of a reconcile after a purge exists (run {RUN}, result mismatch): no run or deletion request is"
+                    " worked on while it exists, no export, verification, copy, pre-purge backup, purge or deletion, not"
+                    " even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after"
+                    " a purge); once the investigation is done and the reconciliation is clean, remove the record (rm ")
+# Step 3: permanent deletion request 7, its pre-purge backup and the deletion.
+REQ = 7
+DEL_LABEL = "deletion-7-20261008T122031Z"
+DEL_BACKUP = f"20261008T122032Z-pre-purge-{DEL_LABEL}"
+DEL_DUMP = "2026-10-08T12:20:33Z"
+DELETE_WITH_BACKUP = f"delete --request {REQ} --backup {DEL_BACKUP} --backup-started-at {DEL_DUMP}"
+DEL_BACKUP_ARGUMENTS = ["--kind", "pre-purge", "--label", DEL_LABEL, "--operator", "archive.sh", "--reason",
+                        f"pre-purge backup for deletion request {REQ}", "--env-file", ".env.production",
+                        "--lock-wait-minutes", "60"]
+DELETION_ORDER = ["recover", "next", f"start-deletion --request {REQ}", "next", "backup.sh", DELETE_WITH_BACKUP,
+                  "reconcile", "status"]
 
 
 def fake_proc(root, processes=(), boot=BOOT):
@@ -97,19 +117,21 @@ def epoch_minute(hour, minute):
     return calendar.timegm((2026, 10, 8, hour, minute, 0)) // 60
 
 
-def job_doc(step, result, rc=0, run_id=None, state=None, error=None, **fields):
-    """A `python -m app.cli history-archive <step>` report (contract §2.3 key order)."""
+def job_doc(step, result, rc=0, run_id=None, state=None, error=None, request_id=None, **fields):
+    """A `python -m app.cli history-archive <step>` report (contract B1 §2.3 key order; step 3 adds the common key
+    request_id right after run_id)."""
     document = {"report_version": 1, "command": f"history-archive {step.split()[0]}", "result": result,
                 "exit_code": rc, "started_at": "2026-10-08T12:20:00Z", "finished_at": "2026-10-08T12:20:01Z",
-                "duration_ms": 1000, "run_id": run_id, "state": state, **fields,
+                "duration_ms": 1000, "run_id": run_id, "request_id": request_id, "state": state, **fields,
                 "error": None if error is None else {"code": error[0], "message": error[1]}}
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
 
-def job_out(step, result, rc=0, run_id=None, state=None, error=None, **fields):
+def job_out(step, result, rc=0, run_id=None, state=None, error=None, request_id=None, **fields):
     run = f" run {run_id}" if run_id is not None else ""
+    run += f" deletion request {request_id}" if request_id is not None else ""
     summary = f"history-archive {step.split()[0]}:{run} {result}" + (f" ({state})" if state else "") + "\n"
-    return out(job_doc(step, result, rc, run_id, state, error, **fields), rc=rc, stderr=summary)
+    return out(job_doc(step, result, rc, run_id, state, error, request_id, **fields), rc=rc, stderr=summary)
 
 
 def run_object(state, **fields):
@@ -123,12 +145,13 @@ def run_object(state, **fields):
     return document
 
 
-def next_out(action, state=None, rc=0, error=None):
+def next_out(action, state=None, rc=0, error=None, request=None):
     """A `history-archive next` answer: ACTION for run 3 in STATE (`none`: no open run); with `backup`, the pre-purge
-    backup's kind and label; exit 3: the requester re-check failed the run."""
+    backup's kind and label; exit 3: the requester re-check failed the run. REQUEST: an APPROVED deletion request that
+    waits while the run is RUNNING (step 3; `request_id` stays null)."""
     if action == "none":
-        return job_out("next", "none", run=None)
-    fields = {"run": run_object(state)}
+        return job_out("next", "none", run=None, request=request)
+    fields = {"run": run_object(state), "request": request}
     if action == "backup":
         fields["backup"] = {"kind": "pre-purge", "label": ARCHIVE_NAME}
     return job_out("next", "failed" if rc == 3 else action, rc=rc, run_id=RUN, state=state, error=error, **fields)
@@ -164,10 +187,76 @@ def backup_line(name=BACKUP, started=DUMP_STARTED):
 HAPPY = (("export", "APPROVED"), ("verify", "RUNNING"), ("copy", "RUNNING"), ("backup", "RUNNING"))
 
 
+def request_object(state, request_id=REQ, **fields):
+    """The deletion request summary of `settings`, `next`, `start-deletion`, `delete` and `status` (contract B3 §3)."""
+    started = state not in ("APPROVED", "CANCELLED")
+    document = {"id": request_id, "state": state,
+                "scope": {"work_order_numbers": ["WO-TEST-1"], "part_numbers": []},
+                "requested_at": "2026-10-08T12:17:00Z", "requested_by_user_id": 1, "requested_by_operator": None,
+                "rows": {"audit_events": 4, "part_movements": 12, "quantity_flow_lineage": 0, "quantity_flows": 2,
+                         "assigned_route_steps": 6, "assigned_routes": 2, "work_order_allocations": 0,
+                         "work_order_demands": 1, "work_orders": 1, "part_numbers": 0},
+                "started_at": "2026-10-08T12:20:31Z" if started else None,
+                "backup_label": DEL_LABEL if started else None,
+                "pre_purge_backup_name": DEL_BACKUP if state == "COMPLETED" else None,
+                "finished_at": "2026-10-08T12:20:40Z" if state in ("COMPLETED", "FAILED", "CANCELLED") else None,
+                "failure_reason": None}
+    document.update(fields)
+    return document
+
+
+def settings_out(pending=False, request_state="APPROVED", start_minute=20, request=None):
+    """The cheap check: `history-archive settings` through `exec` in the backend container (contract B3 §3); REQUEST:
+    the open request's summary (pending)."""
+    if request is not None:
+        pending = True
+    elif pending:
+        request = request_object(request_state)
+    return job_out("settings", "read", start_minute=start_minute, archive_dir=None, copy_dir=None,
+                   site_timezone="UTC", deletion_pending=pending, deletion_request=request)
+
+
+def next_deletion_out(action, state):
+    """A `next` answer that hands out deletion work for request 7 (`run` null)."""
+    fields = {"run": None, "request": request_object(state)}
+    if action == "deletion_backup":
+        fields["backup"] = {"kind": "pre-purge", "label": DEL_LABEL}
+    return job_out("next", action, request_id=REQ, state=state, **fields)
+
+
+def start_deletion_out(result="started", rc=0, error=None):
+    state = "RUNNING" if rc == 0 else ("FAILED" if rc == 3 else "APPROVED")
+    fields = {"request": request_object(state)}
+    if rc == 0:
+        fields["backup"] = {"kind": "pre-purge", "label": DEL_LABEL}
+    return job_out("start-deletion", result, rc=rc, request_id=REQ, state=state, error=error, **fields)
+
+
+def delete_out(result="deleted", rc=0, state="COMPLETED", error=None):
+    fields = {"backup": {"name": DEL_BACKUP, "dump_started_at": DEL_DUMP}}
+    if rc == 0:
+        fields.update({"request": request_object("COMPLETED"),
+                       "deleted": {"audit_events": 4, "part_movements": 12, "quantity_flow_lineage": 0,
+                                   "quantity_flows": 2, "assigned_route_steps": 6, "assigned_routes": 2,
+                                   "work_order_allocations": 0, "work_order_demands": 1, "work_orders": 1,
+                                   "part_numbers": 0},
+                       "audit_rows": [{"id": 90, "entity_type": "WorkOrder", "entity_id": "41"}]})
+    return job_out("delete", result, rc=rc, request_id=REQ, state=state, error=error, **fields)
+
+
+def deletion_status(open_request=None, last_request=None, rc=0):
+    """`history-archive status` with the deletion keys of step 3."""
+    return job_out("status", "ok", rc=rc, open_run=None, last_finished_run=None,
+                   archive_dir={"path": "/archive", "usable": True, "free_bytes": 1, "total_bytes": 2, "partial": []},
+                   copy_dir=None, receipts_not_copied=[], open_deletion_request=open_request,
+                   last_finished_deletion_request=last_request, max_wait_days=7, findings=[])
+
+
 def default_jobs(*nexts):
     """One approved run in one start (contract §3.1): export, verify, copy into the copy folder, the pre-purge backup,
     the purge and the reconcile after it. NEXTS: the successive answers of `next`, as (action, state)."""
     return [
+        rule(CHEAP, settings_out()),
         rule(MAINT + "settings$", job_out("settings", "read", start_minute=20, archive_dir="/archive", copy_dir=None,
                                           site_timezone="UTC")),
         rule(MAINT + "recover$", job_out("recover", "nothing_to_recover", failed_run_ids=[], removed_partial=[],
@@ -305,6 +394,11 @@ class ArchiveHarness(ScriptHarness):
         calls = self.state / "calls.jsonl"
         if calls.exists():
             calls.unlink()
+
+    def cheap_only(self):
+        """The start ran the cheap check and no other Docker command."""
+        labels = self.docker()
+        return len(labels) == 1 and re.search(CHEAP, " " + labels[0]) is not None
 
     def write_lock(self, host="bs-host", pid="4242", owner=True, boot=None, start=None):
         self.lock.mkdir(parents=True)
@@ -666,22 +760,24 @@ class Scheduled(ArchiveHarness):
         self.archive("--scheduled")
         self.assertExit(0)
         self.assertEqual(self.result.stdout, "NOT_DUE\n")
-        self.assertEqual(self.steps(), ["settings"])
+        # The cheap check gives the Start minute too: no maintenance container, no lock.
+        self.assertEqual(self.steps(), [])
+        self.assertEqual(len(self.docker_entries(CHEAP)), 1)
+        self.assertIsNone(self.docker_entries(CHEAP)[0]["watch"][str(self.lock / "owner")])
         self.assertEqual(self.stamp_value(), epoch_minute(11, 20))
         self.assertFalse(self.lock.exists())
-        self.assertIsNone(self.lock_during("settings"))
-        # 12:15: within the hour of the 11:20 slot: no Docker at all.
+        # 12:15: within the hour of the 11:20 slot: the cheap check only, no maintenance container.
         self.reset_calls()
         self.at(12, 15)
         self.archive("--scheduled")
         self.assertEqual(self.result.stdout, "NOT_DUE\n")
-        self.assertEqual(self.calls("docker"), [])
+        self.assertEqual(self.cheap_only(), True)
         # 12:20: the first start at or after the Start minute does the hourly work.
         self.reset_calls()
         self.at(12, 20)
         self.archive("--scheduled")
         self.assertExit(0)
-        self.assertEqual(self.order(), ["settings", "recover", "next", f"export --run {RUN}", "next",
+        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next",
                                         f"verify --run {RUN}", "next", f"copy --run {RUN}", "next", "backup.sh",
                                         PURGE_WITH_BACKUP, "reconcile", "status"])
         self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
@@ -691,31 +787,44 @@ class Scheduled(ArchiveHarness):
             self.at(hour, minute)
             self.archive("--scheduled")
             self.assertEqual(self.result.stdout, "NOT_DUE\n")
-            self.assertEqual(self.calls("docker"), [])
+            self.assertTrue(self.cheap_only())
 
     # AR-14: a late Start minute (58) is served by the first start of the next hour; a changed minute applies at once.
     def test_ar14_start_minute_from_the_settings(self):
-        settings = MAINT + "settings$"
-        self.rules["docker"] = [r for r in self.rules["docker"] if r["match"] != settings]
-        self.prepend("docker", rule(settings, job_out("settings", "read", start_minute=58)))
+        self.set_rule(CHEAP, settings_out(start_minute=58))
         self.write_stamp(epoch_minute(11, 58))
         self.at(12, 55)
         self.archive("--scheduled")
-        self.assertEqual((self.result.stdout, self.calls("docker")), ("NOT_DUE\n", []))
+        self.assertEqual(self.result.stdout, "NOT_DUE\n")
+        self.assertTrue(self.cheap_only())
         self.at(13, 0)
         self.archive("--scheduled")
         self.assertExit(0)
         self.assertIn("recover", self.steps())
+        self.assertNotIn("settings", self.steps())
         self.assertEqual(self.stamp_value(), epoch_minute(12, 58))
         # The Start minute moved from 20 to 50 after the 12:20 slot: the 12:50 slot is due at the 13:20 start.
         self.reset()
-        self.prepend("docker", rule(MAINT + "settings$", job_out("settings", "read", start_minute=50)))
+        self.set_rule(CHEAP, settings_out(start_minute=50))
         self.write_stamp(epoch_minute(12, 20))
         self.at(13, 20)
         self.archive("--scheduled")
         self.assertExit(0)
         self.assertEqual(self.stamp_value(), epoch_minute(12, 50))
         self.assertIn("recover", self.steps())
+        # Without an answer of the cheap check (the backend is down), the maintenance service reads the Start minute.
+        self.reset()
+        self.set_rule(CHEAP, out("service \"backend\" is not running\n", rc=1))
+        self.prepend("docker", rule(MAINT + "settings$", job_out("settings", "read", start_minute=50)))
+        self.write_stamp(epoch_minute(12, 20))
+        self.at(13, 20)
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.steps()[:2], ["settings", "recover"])
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 50))
+        self.assertIn("the deletion check (history-archive settings in the running backend container) gave no answer"
+                      " (exit 1): an open deletion request waits for a later start; the hourly work goes on.",
+                      self.result.stderr)
 
     # AR-15: a missed slot (the host was down at 11:20) is caught up once by the next start; 12:20 runs as usual.
     def test_ar15_missed_slot(self):
@@ -728,7 +837,8 @@ class Scheduled(ArchiveHarness):
         self.reset_calls()
         self.at(12, 15)
         self.archive("--scheduled")
-        self.assertEqual((self.result.stdout, self.calls("docker")), ("NOT_DUE\n", []))
+        self.assertEqual(self.result.stdout, "NOT_DUE\n")
+        self.assertTrue(self.cheap_only())
         self.at(12, 20)
         self.archive("--scheduled")
         self.assertIn("recover", self.steps())
@@ -737,6 +847,7 @@ class Scheduled(ArchiveHarness):
     # AR-16: a failure is reported once per hour: the stamp is written, the next start within the hour runs nothing.
     def test_ar16_failures_are_reported_once_per_hour(self):
         self.write_stamp(epoch_minute(11, 20))
+        self.set_rule(CHEAP, out("", rc=2, stderr="could not reach the database\n"))
         self.set_job("settings", out("", rc=2, stderr="could not reach the database\n"))
         self.at(12, 20)
         self.archive("--scheduled")
@@ -746,7 +857,8 @@ class Scheduled(ArchiveHarness):
         self.reset_calls()
         self.at(12, 25)
         self.archive("--scheduled")
-        self.assertEqual((self.result.returncode, self.calls("docker")), (0, []))
+        self.assertEqual((self.result.returncode, self.result.stdout, self.result.stderr), (0, "NOT_DUE\n", ""))
+        self.assertTrue(self.cheap_only())
         # A failed run: exit 3 once; the stamp holds the slot.
         self.reset()
         self.write_stamp(epoch_minute(11, 20))
@@ -798,7 +910,7 @@ class Locks(ArchiveHarness):
         self.archive("--scheduled")
         self.assertExit(0)
         self.assertEqual(self.result.stdout, "DEFERRED archive_running\n")
-        self.assertEqual(self.steps(), ["settings"])
+        self.assertEqual(self.steps(), [])
         self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
         self.assertEqual(self.record_dirs(), [])
         self.assertEqual(self.backup_calls(), [])
@@ -816,7 +928,7 @@ class Locks(ArchiveHarness):
         self.archive("--scheduled")
         self.assertExit(0)
         self.assertEqual(self.result.stdout, "DEFERRED archive_running\n")
-        self.assertEqual(self.steps(), ["settings"])
+        self.assertEqual(self.steps(), [])
         self.assertTrue((self.lock / "owner").is_file())
 
     # AR-20: a lock whose pid is alive without a job container, or that cannot be checked, is refused, never removed.
@@ -990,7 +1102,8 @@ class PfArchive(PfHarness):
         self.assertExit(2)
         self.assertIn("pf archive takes no argument extra.", self.result.stderr)
         help_text = self.pf("--help").stdout
-        self.assertIn("take its pre-purge backup and PURGE its", help_text)
+        self.assertIn("backup and PURGE its archived Movement history", help_text)
+        self.assertIn("carry out an open\n                            permanent deletion request", help_text)
         self.assertNotIn("never deletes", help_text)
 
 
@@ -999,14 +1112,16 @@ class PfArchive(PfHarness):
 # ---------------------------------------------------------------------------
 
 
-def archive_status(findings=(), rc=None, open_run=None, last=None, copy=False, receipts=()):
+def archive_status(findings=(), rc=None, open_run=None, last=None, copy=False, receipts=(), open_deletion=None,
+                   last_deletion=None):
     rc = (1 if findings else 0) if rc is None else rc
     return job_doc("status", "finding" if findings else "ok", rc=rc, open_run=open_run, last_finished_run=last,
                    archive_dir={"path": "/archive", "usable": "archive_dir_unusable" not in findings,
                                 "free_bytes": 5 * 1073741824, "total_bytes": 10 * 1073741824, "partial": []},
                    copy_dir=({"path": "/archive-copy", "usable": True, "free_bytes": 1073741824,
                               "total_bytes": 2 * 1073741824, "partial": []} if copy else None),
-                   receipts_not_copied=list(receipts), max_wait_days=7, findings=list(findings))
+                   receipts_not_copied=list(receipts), open_deletion_request=open_deletion,
+                   last_finished_deletion_request=last_deletion, max_wait_days=7, findings=list(findings))
 
 
 ARCHIVE_STATUS_RUN = (r"--profile ops run --rm --no-deps -T --user 1000:1000 --name"
@@ -1165,6 +1280,110 @@ class CheckArchival(CheckHarness):
                                " far); last finished run 3 COMPLETED_WITH_SKIPS (PURGED: 118 components, 305 flows, 4190"
                                " Movements purged; 2 components, 5 flows skipped); archive folder 5.0 GiB free")
 
+    # AR-55 (step 3): an open deletion request, APPROVED or RUNNING, requested longer ago than --deletion-wait-minutes
+    # (default 15) fails the line: the history archive task has not carried it out, or has not finished it (review
+    # finding 3: a request stuck RUNNING); an APPROVED request behind a run that is RUNNING or PURGING names that run. A
+    # younger request and a FAILED last request pass, and the PASS line names them as archive.sh's DELETION line does.
+    def test_ar55_deletion_request_waiting(self):
+        waiting = {**request_object("APPROVED"), "age_seconds": 16 * 60}
+        text = self.archival(archive_status(open_deletion=waiting), 0)
+        self.assertEqual(text, "FAIL archival_proposal deletion_request_waiting: deletion request 7 APPROVED has waited"
+                               " 16 min (limit 15 min), and the history archive task has not carried it out: is the task"
+                               " enabled? (SYNOLOGY_NAS §11.8)")
+        self.assertExit(1)
+        self.reset()
+        self.prepend("docker", rule(ARCHIVE_STATUS_RUN, out(archive_status(open_deletion=waiting), rc=0)))
+        self.check("--deletion-wait-minutes", "30")
+        self.assertEqual(self.line("archival_proposal"), "PASS archival_proposal no open run; no finished run; archive"
+                                                         " folder 5.0 GiB free; deletion request 7 APPROVED for 16 min")
+        self.reset()
+        running = {**request_object("RUNNING"), "age_seconds": 2 * 60}
+        failed = request_object("FAILED", request_id=6, failure_reason="The data changed after the request.")
+        text = self.archival(archive_status(open_deletion=running, last_deletion=failed), 0)
+        self.assertEqual(text, "PASS archival_proposal no open run; no finished run; archive folder 5.0 GiB free;"
+                               " deletion request 7 RUNNING for 2 min; last deletion request 6 FAILED")
+        self.assertExit(0)
+        with self.subTest(case="a request stuck RUNNING"):
+            self.reset()
+            stuck = {**request_object("RUNNING"), "age_seconds": 40 * 60}
+            text = self.archival(archive_status(open_deletion=stuck, last_deletion=failed), 0)
+            self.assertEqual(text, "FAIL archival_proposal deletion_request_waiting: deletion request 7 RUNNING has been"
+                                   " open for 40 min (limit 15 min), and the history archive task has not finished it:"
+                                   " is the task enabled? (SYNOLOGY_NAS §11.8)")
+            self.assertExit(1)
+        with self.subTest(case="an APPROVED request behind a RUNNING run"):
+            self.reset()
+            run = {**run_object("RUNNING"), "id": 4, "age_seconds": 50 * 60}
+            text = self.archival(archive_status(open_run=run, open_deletion=waiting), 0)
+            self.assertEqual(text, "FAIL archival_proposal deletion_request_waiting: deletion request 7 APPROVED has"
+                                   " waited 16 min (limit 15 min) behind run 4 RUNNING: the history archive task carries"
+                                   " it out once that run's work in progress ends; is the task enabled? (SYNOLOGY_NAS"
+                                   " §11.8)")
+            self.assertExit(1)
+        for value in ("0", "1441", "x"):
+            with self.subTest(value=value):
+                self.check("--deletion-wait-minutes", value)
+                self.assertExit(2)
+                self.assertIn("--deletion-wait-minutes must be", self.result.stdout + self.result.stderr)
+
+    # AR-56 (step 3): archive.sh's incident record after a deletion names the request and its runbook entry.
+    def test_ar56_incident_after_a_deletion(self):
+        incident = self.records_dir / "archive" / "reconcile-after-purge"
+        incident.parent.mkdir(parents=True)
+        incident.write_text(f"result=mismatch\nexit_code=1\nrun=\narchive_name=\nrequest={REQ}\n"
+                            f"pre_purge_backup={DEL_BACKUP}\nfailing_checks=c\nfinished_at=2026-10-08T12:21:00Z\n"
+                            "report=/root/partflow-deployments/archive/20261008T122030Z/reconcile.json\n",
+                            encoding="utf-8", newline="\n")
+        text = self.archival(archive_status(), 0)
+        self.assertEqual(text, "FAIL archival_proposal reconcile_after_purge: the reconcile after the deletion of request"
+                               " 7 found a mismatch in checks c at 2026-10-08T12:21:00Z: an incident, OPERATIONS_RUNBOOK"
+                               " §8 (Reconcile finding after a deletion); report"
+                               " /root/partflow-deployments/archive/20261008T122030Z/reconcile.json")
+
+    # AR-57 (step 3, review finding 2): while archival is not set up, PartFlow still records deletion requests and
+    # nothing carries them out. check.sh runs the cheap check (exec in the running backend container, bounded by 30 s,
+    # its report kept in the state folder): a request requested longer ago than --deletion-wait-minutes fails the line;
+    # a younger request, a failed read and no answer keep the SKIP, with the reason.
+    def test_ar57_waiting_request_without_archival(self):
+        skip = ("SKIP archival_proposal archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in .env.production"
+                " (DEPLOYMENT §3.1)")
+        # The report started at 2026-10-08T12:20:00Z (job_doc): requested 20 minutes before it.
+        old = request_object("APPROVED", requested_at="2026-10-08T12:00:00.000000Z")
+        settings = re.escape("exec -T backend python -m app.cli history-archive settings") + "$"
+        cases = (
+            ("waiting", settings_out(request=old), (), 1,
+             "FAIL archival_proposal deletion_request_waiting: deletion request 7 APPROVED has waited 20 min (limit 15"
+             " min), but history archival is not set up (PARTFLOW_ARCHIVE_DIR is empty), so nothing carries it out: set"
+             " up the history archive task (SYNOLOGY_NAS §11.8) or cancel the request in PartFlow"),
+            ("a longer limit", settings_out(request=old), ("--deletion-wait-minutes", "30"), 0, skip),
+            ("no request", settings_out(), (), 0, skip),
+            ("failed read", out("", rc=1, stderr='service "backend" is not running\n'), (), 0,
+             f"{skip}; the deletion request check (history-archive settings in the backend container) could not run"
+             " (exit 1); see archive-settings.err"),
+        )
+        for name, answer, options, code, expected in cases:
+            with self.subTest(case=name):
+                self.reset()
+                self.write_env(self.env_lines)
+                self.prepend("docker", rule(settings, answer))
+                self.check(*options)
+                self.assertEqual(self.line("archival_proposal"), expected)
+                self.assertExit(code)
+                self.assertEqual(self.archive_runs(), [])
+                self.assertTrue((self.monitoring / "archive-settings.json").is_file())
+                bounded = [argv[0] for argv in self.timeout_calls() if argv[-3:] == ["app.cli", "history-archive",
+                                                                                      "settings"]]
+                self.assertEqual(bounded, ["30"])
+        with self.subTest(case="no answer within 30 s"):
+            self.reset()
+            self.write_env(self.env_lines)
+            self.prepend("timeout", rule(r"^30 docker compose .* " + settings, out(rc=124)))
+            self.check()
+            self.assertEqual(self.line("archival_proposal"), f"{skip}; the deletion request check (history-archive"
+                                                             " settings in the backend container) gave no answer within"
+                                                             " 30 s")
+            self.assertExit(0)
+
 
 # ---------------------------------------------------------------------------
 # AR-29..AR-39: build step 2, the pre-purge backup, the purge and the reconcile after it
@@ -1247,19 +1466,19 @@ class Purge(ArchiveHarness):
         self.assertEqual(self.order()[-3:], [PURGE_WITH_BACKUP, "reconcile", "status"])
         record = self.record_dirs()[0]
         self.assertIn(f"archive: INCIDENT — the reconcile after the purge of run {RUN} found a mismatch (checks c g):"
-                      f" {record.as_posix()}/reconcile.json. Stop requesting runs and follow OPERATIONS_RUNBOOK §8"
-                      f" (Reconcile finding after a purge): the purge receipt is"
+                      f" {record.as_posix()}/reconcile.json. Stop requesting runs and deletions and follow"
+                      f" OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge): the purge receipt is"
                       f" {sh_path(self.archive_dir)}/{ARCHIVE_NAME}.purged.json and the pre-purge backup {BACKUP}",
                       self.result.stderr.replace(sh_path(record), record.as_posix()))
         values = self.incident_values()
-        self.assertEqual({k: values[k] for k in ("result", "exit_code", "run", "archive_name", "pre_purge_backup",
-                                                 "failing_checks")},
+        self.assertEqual({k: values[k] for k in ("result", "exit_code", "run", "archive_name", "request",
+                                                 "pre_purge_backup", "failing_checks")},
                          {"result": "mismatch", "exit_code": "1", "run": "3", "archive_name": ARCHIVE_NAME,
-                          "pre_purge_backup": BACKUP, "failing_checks": "c g"})
+                          "request": "", "pre_purge_backup": BACKUP, "failing_checks": "c g"})
         self.assertRegex(values["finished_at"], r"^2026-10-08T12:20:30Z$")
         self.assertTrue(values["report"].endswith("/reconcile.json"), values["report"])
-        self.assertIn("records the incident, and no start works on a run until you remove it after the investigation.",
-                      self.result.stderr)
+        self.assertIn("records the incident, and no start works on a run or a deletion request until you remove it after"
+                      " the investigation.", self.result.stderr)
         # The next start, with another run to work on, runs recover and status only; the record stays.
         self.rules["docker"] = default_jobs()
         self.reset_calls()
@@ -1467,17 +1686,402 @@ class Purge(ArchiveHarness):
         self.at(12, 20)
         self.archive("--scheduled")
         self.assertExit(1)
-        self.assertEqual(self.order(), ["settings", "recover", "status"])
+        self.assertEqual(self.order(), ["recover", "status"])
         self.assertIn(INCIDENT_REFUSAL, self.result.stderr)
         self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
         self.assertTrue(self.incident.exists())
-        # The next 5-minute start of that hour ends at once, without Docker: the refusal is reported once per hour.
+        # The next 5-minute start of that hour ends at once, without Docker (no deletion is carried out while the
+        # record exists, so the cheap check does not run either): the refusal is reported once per hour.
         self.reset_calls()
         self.at(12, 25)
         self.archive("--scheduled")
         self.assertExit(0)
         self.assertEqual(self.result.stdout, "NOT_DUE\n")
         self.assertEqual(self.calls("docker"), [])
+
+
+# ---------------------------------------------------------------------------
+# AR-43..AR-54: build step 3, permanent deletion requests
+# ---------------------------------------------------------------------------
+
+
+class Deletion(ArchiveHarness):
+    def set_deletion(self, *nexts):
+        """An open deletion request 7: the cheap check finds it, `next` hands out its start and then its pre-purge
+        backup (a run waiting behind it is never asked for), start-deletion starts it, backup.sh takes its backup and
+        delete deletes it."""
+        self.set_rule(CHEAP, settings_out(pending=True))
+        answers = [next_deletion_out(*answer) for answer in (nexts or (("start_deletion", "APPROVED"),
+                                                                      ("deletion_backup", "RUNNING")))]
+        self.set_rule(MAINT + "next$", *answers, next_out("export", "APPROVED"))
+        self.set_job(f"start-deletion --request {REQ}", start_deletion_out())
+        self.set_rule(MAINT + f"delete --request {REQ} .*$", delete_out())
+        self.rules["backup.sh"] = [rule(r".*", backup_line(name=DEL_BACKUP, started=DEL_DUMP))]
+
+    def set_delete(self, answer):
+        self.set_rule(MAINT + f"delete --request {REQ} .*$", answer)
+
+    # AR-43: the cheap check at a start within the hour of its last slot. No request open: NOT_DUE after the check
+    # alone. A request open: this start carries it out at once and prints the DELETION line. No answer (the backend is
+    # down): NOT_DUE, quietly; the request waits for a later start.
+    def test_ar43_cheap_check_within_the_hour(self):
+        self.write_stamp(epoch_minute(12, 20))
+        self.at(12, 35)
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.result.stdout, "NOT_DUE\n")
+        self.assertTrue(self.cheap_only())
+        self.assertEqual(self.record_dirs(), [])
+        self.reset_calls()
+        self.set_deletion()
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), DELETION_ORDER)
+        self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
+        self.assertIn(f"deletion request {REQ} (APPROVED) is open: this start carries it out now and does no run work.",
+                      self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        self.assertEqual(self.backup_calls(), [DEL_BACKUP_ARGUMENTS])
+        with self.subTest(case="the check gives no answer"):
+            self.reset()
+            self.write_stamp(epoch_minute(12, 20))
+            self.at(12, 35)
+            self.set_deletion()
+            self.set_rule(CHEAP, out("", rc=1, stderr='service "backend" is not running\n'))
+            self.archive("--scheduled")
+            self.assertEqual((self.result.returncode, self.result.stdout, self.result.stderr), (0, "NOT_DUE\n", ""))
+            self.assertTrue(self.cheap_only())
+        with self.subTest(case="a release runs, or archival is not set up: quiet, before the check"):
+            for case in ("release", "archive dir"):
+                self.reset()
+                self.write_stamp(epoch_minute(12, 20))
+                self.at(12, 35)
+                self.set_deletion()
+                if case == "release":
+                    (self.records / ".release.lock").mkdir(parents=True)
+                else:
+                    self.write_env([line for line in self.env_lines if not line.startswith("PARTFLOW_ARCHIVE_DIR=")])
+                self.archive("--scheduled")
+                self.assertEqual((self.result.returncode, self.result.stdout, self.result.stderr), (0, "NOT_DUE\n", ""))
+                self.assertEqual(self.calls("docker"), [])
+
+    # AR-44: a request found at the Start minute is carried out first: recover → next → start-deletion → pre-purge
+    # backup → delete → reconcile → status, under the archive lock, with no run work, and the slot is left to the next
+    # start, which does the hourly work. A manual start (pf archive) runs no cheap check and works on the request first
+    # too.
+    def test_ar44_deletion_order_and_the_slot(self):
+        self.write_stamp(epoch_minute(11, 20))
+        self.at(12, 20)
+        self.set_deletion()
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), DELETION_ORDER)
+        self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
+        self.assertEqual(self.stamp_value(), epoch_minute(11, 20))
+        owner = self.lock_during("recover")
+        for held in (self.lock_during(f"start-deletion --request {REQ}"), self.lock_at("backup.sh"),
+                     self.lock_during(DELETE_WITH_BACKUP), self.lock_at("docker", RECONCILE)):
+            self.assertEqual(held, owner)
+        self.assertIsNone(self.docker_entries(CHEAP)[0]["watch"][str(self.lock / "owner")])
+        self.assertFalse(self.lock.exists())
+        record = self.record_dirs()[0]
+        for name in ("check.json", "recover.json", "next.json", "start-deletion.json", "next-2.json", "backup.out",
+                     "delete.json", "reconcile.json", "status.json", "messages.log"):
+            self.assertTrue((record / name).is_file(), name)
+        self.assertIn(f"deletion request {REQ}: the pre-purge backup {DEL_BACKUP} is published and verified (its dump"
+                      f" started at {DEL_DUMP}).", self.result.stderr)
+        self.assertIn(f"deletion request {REQ}: deleted (audit_events 4, part_movements 12, quantity_flows 2,"
+                      " assigned_route_steps 6, assigned_routes 2, work_order_demands 1, work_orders 1) in one"
+                      f" transaction, after its pre-purge backup {DEL_BACKUP}.", self.result.stderr)
+        self.assertIn(f"the reconcile after the deletion of request {REQ} is clean", self.result.stderr)
+        self.assertFalse(self.incident.exists())
+        # 12:25: the request is done; the 12:20 slot is still due, so this start does the hourly work.
+        self.rules["docker"] = default_jobs()
+        self.rules["backup.sh"] = [rule(r".*", backup_line())]
+        self.reset_calls()
+        (self.state / "counts.json").unlink()
+        self.at(12, 25)
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}", "next",
+                                        f"copy --run {RUN}", "next", "backup.sh", PURGE_WITH_BACKUP, "reconcile",
+                                        "status"])
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="a manual start"):
+            self.reset()
+            self.set_deletion()
+            self.archive()
+            self.assertExit(0)
+            self.assertEqual(self.order(), DELETION_ORDER)
+            self.assertEqual(self.docker_entries(CHEAP), [])
+            self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
+            self.assertIsNone(self.stamp_value())
+
+    # AR-45: start-deletion fails the request (the requester re-check, exit 3), is refused (exit 1) or gives no valid
+    # report (exit 2; also a report of another request): no backup, no deletion, no reconcile, no DELETION line.
+    def test_ar45_start_deletion_exits(self):
+        reason = ("The User who requested deletion request 7, Ann (user 1), is no longer active, so nothing was deleted."
+                  " A holder of Delete Work Orders and Part Numbers permanently may request the deletion again.")
+        refused = "Deletion request 7 is CANCELLED; only an APPROVED request can be started. Nothing was changed."
+        for name, answer, code, text in (
+            ("requester", start_deletion_out("failed", 3, ("run_failed", reason)), 3,
+             f"archive: deletion request {REQ} FAILED: {reason}"),
+            ("refused", start_deletion_out("refused", 1, ("wrong_state", refused)), 1,
+             f"history-archive start-deletion refused: {refused}"),
+            ("no report", out("", rc=137), 2,
+             f"the outcome of the start of deletion request {REQ} is unknown. Nothing was deleted: the next start makes"
+             " the request FAILED if it was started (recover), or starts it again."),
+            # A report that names another request is no valid report of this step.
+            ("another request", job_out("start-deletion", "started", request_id=8, state="RUNNING",
+                                        request=request_object("RUNNING", request_id=8)), 2,
+             "history-archive start-deletion gave no valid report (exit 0;"),
+        ):
+            with self.subTest(case=name):
+                self.reset()
+                self.set_deletion()
+                self.set_job(f"start-deletion --request {REQ}", answer)
+                self.archive()
+                self.assertExit(code)
+                self.assertEqual(self.order(), ["recover", "next", f"start-deletion --request {REQ}", "status"])
+                self.assertIn(text, self.result.stderr)
+                self.assertEqual((self.result.stdout, self.backup_calls()), ("", []))
+                self.assertFalse(self.incident.exists())
+
+    # AR-46: the deletion's pre-purge backup fails (or names another backup): nothing is deleted, exit 2, and the
+    # request stays RUNNING for the next start's recover.
+    def test_ar46_deletion_backup_failure(self):
+        for name, answer, why in (
+            ("dump failed", out("", rc=3, stderr="backup: pg_dump failed (exit 1). No backup was published.\n"),
+             "the pre-purge backup failed (backup.sh exit 3;"),
+            ("another label", backup_line(name=f"20261008T122032Z-pre-purge-{ARCHIVE_NAME}", started=DEL_DUMP),
+             "backup.sh did not name the pre-purge backup with its dump start"),
+        ):
+            with self.subTest(case=name):
+                self.reset()
+                self.set_deletion()
+                self.rules["backup.sh"] = [rule(r".*", answer)]
+                self.archive()
+                self.assertExit(2)
+                self.assertEqual(self.order(), ["recover", "next", f"start-deletion --request {REQ}", "next", "backup.sh",
+                                                "status"])
+                self.assertIn(f"archive: deletion request {REQ}: {why}", self.result.stderr)
+                self.assertIn("Nothing was deleted. The request stays RUNNING, and the next start makes it FAILED"
+                              f" (recover). {REQUEST_AGAIN}", self.result.stderr)
+                self.assertEqual(self.result.stdout, "")
+                self.assertFalse(self.incident.exists())
+
+    # AR-47: every exit of delete. Exit 3: FAILED, nothing deleted, no reconcile. Exit 1: refused. Every exit 2
+    # (`interrupted`, `outcome_unknown`, any other) and a missing report: status tells (review finding 6: even an
+    # `interrupted` report could follow a COMMIT that succeeded). COMPLETED → the reconcile runs and the start ends as
+    # deleted; still RUNNING → nothing deleted, no reconcile, exit 2; FAILED → nothing deleted, exit 3; status without
+    # an answer → the reconcile runs anyway.
+    def test_ar47_delete_exits(self):
+        changed = ("The data changed after the request; nothing was deleted. Request it again. Changed rows:"
+                   " part_movements +1 (13).")
+        interrupted = ("Deletion request 7 stopped on a database error that does not last (OperationalError). It stays"
+                       " RUNNING: its one transaction was rolled back, so nothing was deleted, and the next start of the"
+                       " job makes it FAILED. Request the deletion again.")
+        unknown = ("The database connection failed while committing deletion request 7: it is COMPLETED (deleted) or"
+                   " still RUNNING (nothing deleted; the next start makes it FAILED). Run history-archive status to see"
+                   " it.")
+        invalid = "The backup is not the pre-purge backup of deletion request 7. Nothing was changed."
+        unavailable = "PartFlow could not reach its database. Nothing was changed."
+        completed = request_object("COMPLETED")
+        running = {**request_object("RUNNING"), "age_seconds": 30}
+        failed = request_object("FAILED", failure_reason="The deletion deleted 2 rows of work_orders, but the request"
+                                                         " stored 1; nothing was deleted. Request it again.")
+        still_running = (f"status shows deletion request {REQ} still RUNNING: its deletion did not commit, so nothing"
+                         " was deleted, and the next start makes it FAILED (recover).")
+        cases = (
+            ("failed", delete_out("failed", 3, "FAILED", ("run_failed", changed)), None, 3,
+             [f"archive: deletion request {REQ} FAILED: {changed} Nothing was deleted: the deletion is one"
+              f" transaction. {REQUEST_AGAIN}"], False, ""),
+            ("interrupted, RUNNING", delete_out("interrupted", 2, "RUNNING", ("deletion_interrupted", interrupted)),
+             deletion_status(open_request=running), 2,
+             [f"history-archive delete ended with exit 2 (deletion_interrupted): {interrupted}", still_running], False,
+             ""),
+            ("interrupted, COMPLETED", delete_out("interrupted", 2, "RUNNING", ("deletion_interrupted", interrupted)),
+             deletion_status(last_request=completed), 0,
+             [f"status shows deletion request {REQ} COMPLETED: its deletion committed", "is clean"], True,
+             f"DELETION deleted {REQ} COMPLETED\n"),
+            ("could not run, RUNNING", delete_out("could_not_run", 2, "RUNNING", ("database_unavailable", unavailable)),
+             deletion_status(open_request=running), 2,
+             [f"history-archive delete ended with exit 2 (database_unavailable): {unavailable}", still_running], False,
+             ""),
+            ("no report, FAILED", out("", rc=137), deletion_status(last_request=failed), 3,
+             [f"status shows deletion request {REQ} FAILED: The deletion deleted 2 rows of work_orders, but the request"
+              " stored 1; nothing was deleted. Request it again. Nothing was deleted: the deletion is one transaction."],
+             False, ""),
+            ("refused", delete_out("refused", 1, "RUNNING", ("backup_invalid", invalid)), None, 1,
+             [f"history-archive delete refused: {invalid}", f"Nothing was deleted. Deletion request {REQ} stays RUNNING,"
+              " and the next start makes it FAILED (recover)."], False, ""),
+            ("unknown, COMPLETED", delete_out("could_not_run", 2, None, ("outcome_unknown", unknown)),
+             deletion_status(last_request=completed), 0,
+             [f"status shows deletion request {REQ} COMPLETED: its deletion committed, after its pre-purge backup"
+              f" {DEL_BACKUP}.", f"the reconcile after the deletion of request {REQ} is clean"], True,
+             f"DELETION deleted {REQ} COMPLETED\n"),
+            ("unknown, RUNNING", delete_out("could_not_run", 2, None, ("outcome_unknown", unknown)),
+             deletion_status(open_request=running), 2,
+             [f"status shows deletion request {REQ} still RUNNING: its deletion did not commit, so nothing was deleted,"
+              " and the next start makes it FAILED (recover)."], False, ""),
+            ("no report, no status", out("", rc=137), out("", rc=2), 2,
+             [f"history-archive status does not tell whether the deletion of request {REQ} committed: the reconcile"
+              " runs now, as after a deletion."], True, ""),
+        )
+        for name, answer, status, code, texts, reconciled, stdout in cases:
+            with self.subTest(case=name):
+                self.reset()
+                self.set_deletion()
+                self.set_delete(answer)
+                if status is not None:
+                    self.set_job("status", status, status_ok())
+                self.archive()
+                self.assertExit(code)
+                for text in texts:
+                    self.assertIn(text, self.result.stderr)
+                expected = ["recover", "next", f"start-deletion --request {REQ}", "next", "backup.sh", DELETE_WITH_BACKUP]
+                expected += (["status"] if status is not None else []) + (["reconcile"] if reconciled else []) + ["status"]
+                self.assertEqual(self.order(), expected)
+                self.assertEqual(self.result.stdout, stdout)
+                self.assertFalse(self.incident.exists())
+
+    # AR-48: a reconcile finding after a deletion is the incident of a reconcile after a purge: exit 4, the same record
+    # file with the request and its pre-purge backup; while it exists no start carries out a deletion (manual: recover
+    # and status only; scheduled within the hour: NOT_DUE without Docker).
+    def test_ar48_reconcile_finding_after_a_deletion(self):
+        self.set_deletion()
+        self.set_rule(RECONCILE, out(reconcile_doc(1, failing=("c",)), rc=1))
+        self.archive()
+        self.assertExit(4)
+        self.assertEqual(self.result.stdout, "")
+        record = self.record_dirs()[0]
+        self.assertIn(f"archive: INCIDENT — the reconcile after the deletion of request {REQ} found a mismatch (checks c):"
+                      f" {record.as_posix()}/reconcile.json. Stop requesting runs and deletions and follow"
+                      " OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion): the pre-purge backup of the deletion"
+                      f" is {DEL_BACKUP};", self.result.stderr.replace(sh_path(record), record.as_posix()))
+        values = self.incident_values()
+        self.assertEqual({k: values[k] for k in ("result", "exit_code", "run", "archive_name", "request",
+                                                 "pre_purge_backup", "failing_checks")},
+                         {"result": "mismatch", "exit_code": "1", "run": "", "archive_name": "", "request": str(REQ),
+                          "pre_purge_backup": DEL_BACKUP, "failing_checks": "c"})
+        # A later request: a manual start runs recover and status only.
+        self.reset_calls()
+        self.set_rule(RECONCILE, out(reconcile_doc(0)))
+        self.at(13, 20)
+        self.archive()
+        self.assertExit(1)
+        self.assertEqual(self.order(), ["recover", "status"])
+        self.assertIn(f" of a reconcile after a deletion exists (deletion request {REQ}, result mismatch): no run or"
+                      " deletion request is worked on while it exists", self.result.stderr)
+        self.assertIn("Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion);", self.result.stderr)
+        # A scheduled start within the hour does not even look for the request.
+        self.reset_calls()
+        self.write_stamp(epoch_minute(13, 20))
+        self.at(13, 35)
+        self.archive("--scheduled")
+        self.assertEqual((self.result.returncode, self.result.stdout), (0, "NOT_DUE\n"))
+        self.assertEqual(self.calls("docker"), [])
+        self.assertTrue(self.incident.exists())
+
+    # AR-49: an APPROVED request that arrives while this start's run is RUNNING waits (contract B3 §3): `next` answers
+    # the run's steps with the request named, and the run goes on to its purge; a later start takes the request.
+    def test_ar49_request_waits_while_a_run_is_running(self):
+        waiting = request_object("APPROVED")
+        self.set_next(("export", "APPROVED"), ("verify", "RUNNING", 0, None, waiting),
+                      ("copy", "RUNNING", 0, None, waiting), ("backup", "RUNNING", 0, None, waiting))
+        self.archive()
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}", "next",
+                                        f"copy --run {RUN}", "next", "backup.sh", PURGE_WITH_BACKUP, "reconcile",
+                                        "status"])
+        self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
+        message = f"deletion request {REQ} waits while run {RUN} is RUNNING in this start: a later start carries it out."
+        self.assertEqual(self.result.stderr.count(message), 1)
+
+    # AR-50: recover found a deletion request left RUNNING (an interrupted start, a failed pre-purge backup, a database
+    # restored from that backup): it is FAILED (exit 3), nothing was deleted, and the work goes on.
+    def test_ar50_recover_fails_a_request_left_running(self):
+        self.set_job("recover", job_out("recover", "recovered", failed_run_ids=[], failed_request_ids=[REQ],
+                                        removed_partial=[], kept_partial=[], copied_receipts=[], receipt_problems=[]))
+        self.set_next(("none",))
+        self.archive()
+        self.assertExit(3)
+        self.assertEqual(self.order(), ["recover", "next", "status"])
+        self.assertIn(f"deletion request(s) {REQ} stopped while RUNNING and are FAILED now (an interrupted job, a"
+                      " pre-purge backup that failed, a deletion that stopped on a database error, or a database restored"
+                      " from the pre-purge backup of a deletion). Nothing was deleted by them in this database."
+                      f" {REQUEST_AGAIN}", self.result.stderr)
+
+    # AR-51: an interruption during the deletion fails closed (its transaction may have committed without a
+    # reconcile: the incident record); one during its pre-purge backup deleted nothing.
+    def test_ar51_interrupted_deletion(self):
+        self.set_deletion()
+        self.set_delete({**delete_out(), "signal": "TERM"})
+        self.archive()
+        self.assertExit(2)
+        self.assertIn(f"interrupted during the deletion of request {REQ}: its one transaction either committed",
+                      self.result.stderr)
+        values = self.incident_values()
+        self.assertEqual((values["result"], values["request"], values["pre_purge_backup"]),
+                         ("interrupted", str(REQ), DEL_BACKUP))
+        self.assertFalse(self.lock.exists())
+        self.reset()
+        self.set_deletion()
+        self.rules["backup.sh"] = [rule(r".*", {**backup_line(name=DEL_BACKUP, started=DEL_DUMP), "signal": "TERM"})]
+        self.archive()
+        self.assertExit(2)
+        self.assertIn(f"interrupted during the pre-purge backup of deletion request {REQ}. Nothing was deleted",
+                      self.result.stderr)
+        self.assertFalse(self.incident.exists())
+
+    # AR-52: a scheduled start that finds a request while another archive.sh holds the lock defers it (exit 0), and a
+    # start taken for a request that is no longer open (cancelled meanwhile), or that waits for a run RUNNING in another
+    # history-archive command, works on no run when the hourly work is not due.
+    def test_ar52_lock_held_and_request_gone(self):
+        self.write_lock()
+        self.write_stamp(epoch_minute(12, 20))
+        self.at(12, 35)
+        self.set_deletion()
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.result.stdout, "DEFERRED archive_running\n")
+        self.assertIn("the open deletion request waits for a later start", self.result.stderr)
+        self.assertEqual(self.steps(), [])
+        self.reset()
+        self.write_stamp(epoch_minute(12, 20))
+        self.at(12, 35)
+        self.set_deletion()
+        self.set_next(("export", "APPROVED"))
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "next", "status"])
+        self.assertEqual(self.result.stdout, "NOT_DUE\n")
+        self.assertIn(f"deletion request {REQ} is no longer open (it was cancelled or finished meanwhile), and the hourly"
+                      " work is not due: this start ends.", self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="the request waits for a run RUNNING in another history-archive command"):
+            self.reset()
+            self.write_stamp(epoch_minute(12, 20))
+            self.at(12, 35)
+            self.set_deletion()
+            self.set_rule(MAINT + "next$", next_out("running", "RUNNING", request=request_object("APPROVED")))
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "next", "status"])
+            self.assertEqual(self.result.stdout, "NOT_DUE\n")
+            self.assertIn(f"deletion request {REQ} waits while run {RUN} is RUNNING in another history-archive command,"
+                          " and the hourly work is not due: this start ends.", self.result.stderr)
+            self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+
+    # AR-53: help names the deletion requests, the DELETION line and the exit codes of step 3.
+    def test_ar53_help(self):
+        result = self.archive("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in ("A permanent deletion request comes first", "DELETION <outcome> <request id> <state>",
+                     "3 a run or a deletion request failed", "the reconcile after a purge or a deletion"):
+            self.assertIn(text, result.stdout)
+        header = ARCHIVE_SH.read_text(encoding="utf-8").split("\nset -eu\n", 1)[0]
+        self.assertIn("`DELETION <outcome> <request id> <state>`", header)
 
 
 if __name__ == "__main__":

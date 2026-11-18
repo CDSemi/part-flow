@@ -266,8 +266,10 @@ the first one that fails; the steps below show what it does.
 
 The database starts empty, in the new volume `partflow-production_postgres_data`. To start from an existing backup
 instead, for example when moving PartFlow from another host, follow the runbook §6 (New-instance restore) in place
-of step 3, and create the history archive task (§11.8) only after you have checked the runs in Administration →
-History archival & purge: a restored run in `PURGING` resumes its purge at the task's first start.
+of step 3, and create the history archive task (§11.8) only after you have checked the runs and the permanent
+deletion requests in Administration → History archival & purge: a restored run in `PURGING` resumes its purge, and a
+restored deletion request in `APPROVED` is carried out, at the task's first start (cancel such a request unless the
+deletion is still wanted).
 
 ## 8. Start PartFlow and check it on the NAS
 
@@ -422,7 +424,7 @@ PartFlow is now in production. Give people the address `https://<HOSTNAME>`.
 
 These tasks are recommended and never block use. Until the backup task runs, the only backups are the ones that
 `release.sh` takes before each release. Do them in this order; §11.8, the history archive task, is needed only before
-the first archival run.
+the first archival run or the first permanent deletion of test data.
 
 ### 11.1 Email notifications
 
@@ -452,11 +454,13 @@ Email**, select **Enable email notifications**, enter the mail server (SMTP) set
 
 The task runs every hour, and **Administration → Backups** in PartFlow decides how often it takes a backup (initially
 every hour) and how many it keeps (initially 48 hourly, 30 daily and 52 weekly backups, and the newest 3 pre-purge
-backups that the history archive task of §11.8 takes). A run with no backup due ends
-without writing anything. With a backup every hour, at most one hour of work can be lost. Start releases a few minutes
-after the full hour: a running backup stops a release before it changes anything (start the release again once the
-backup has finished), and a backup that starts during a release is refused (you receive its failure email; the next
-hour's backup runs normally). Backups are explained in the runbook §3.
+backups that the history archive task of §11.8 takes before a purge or a permanent deletion; the two kinds share that
+number, so raise **Pre-purge backups kept** before a session of test-data deletions when the pre-purge backup of an
+earlier purge still matters, the runbook §3). A run with no backup due ends without writing anything. With a backup
+every hour, at most one hour of work can be lost. Start releases a few minutes after the full hour: a running backup
+stops a release before it changes anything (start the release again once the backup has finished), and a backup that
+starts during a release is refused (you receive its failure email; the next hour's backup runs normally). Backups are
+explained in the runbook §3.
 
 A task of an earlier release with `--kind daily` now fails with a message that names this command: change its
 schedule and command as above.
@@ -512,7 +516,8 @@ command to your HTTPS option:
 
 Test the check task: select it, click **Run**, then read its result on the NAS. The first line shows the time and the
 exit code (`exit 0`); every other line starts with `PASS`, or `SKIP` for a check that does not apply (the lines
-`disk_archive` and `archival_proposal` are `SKIP` until §11.8 is done):
+`disk_archive` and `archival_proposal` are `SKIP` until §11.8 is done; before that, `archival_proposal` fails only for a
+permanent deletion request that has waited longer than 15 minutes, since nothing carries it out):
 
 ```sh
 cat /root/partflow-monitoring/last-check.txt
@@ -559,9 +564,15 @@ and edit the rules of the active profile:
 
 PartFlow can move old Movement history into archive files and then delete it from the database (History archival &
 purge in Administration; the runbook §11). **A run deletes history:** once its archive is copied off the NAS, the job
-takes a pre-purge backup and purges the archived Movements from the database. The history archive job needs an archive
-folder on the NAS, optionally a copy folder on another device, and a task that starts it every 5 minutes. Do this
-before the first run is requested in Administration.
+takes a pre-purge backup and purges the archived Movements from the database. **A permanent deletion request deletes
+too:** the same job carries out the deletion of Work Orders and Part Numbers entered only for testing, requested in
+PartFlow (**Delete permanently…**) or with `pf delete-permanently` (the runbook §10), within 5 minutes of the request:
+it takes a pre-purge backup and deletes them from the database. The history archive job needs an archive folder on the
+NAS, optionally a copy folder on another device, and a task that starts it every 5 minutes. Do this before the first
+run is requested in Administration and before the first deletion is requested: **without this task, a deletion
+request is never carried out**, `pf delete-permanently --confirm` refuses while the archive folder is not set, and
+`check.sh` reports a request made in PartFlow meanwhile as `FAIL archival_proposal deletion_request_waiting` once it
+has waited 15 minutes (cancel it in PartFlow, or finish this section).
 
 1. **Create the archive folder**, owned by `root` (the account that runs the task) and readable by `root` only:
 
@@ -616,19 +627,23 @@ before the first run is requested in Administration.
      cd /volume1/docker/partflow/repo && HOME=/root deploy/production/archive.sh --scheduled
      ```
 
-   Most starts end within seconds. Once an hour, at the first start at or after the **Start minute** set in
-   Administration → History archival & purge (20 initially), the task does the hourly work: it exports, verifies and
-   copies a requested run, takes its pre-purge backup in the backup folder, purges the archived Movement history from
-   the database and runs the reconciliation after it. The very first start only records the current hour, so the
-   first hourly work comes at the next Start minute. A refusal or a failure sends one email for its hour; exit code 4
-   is an incident (the reconciliation after a purge did not end clean: the runbook §8), and until it is closed every
-   hourly start refuses with exit code 1 and works on no run. Keep the Start minute away from minute 0: the pre-purge
-   backup waits for the hourly backup while that one runs (up to 60 minutes), and a release is refused while the task
-   works.
+   Every start first checks, in a few seconds, whether a permanent deletion request is open, and carries it out at
+   once: the pre-purge backup in the backup folder, the deletion, and the reconciliation after it. Most starts then
+   end. Once an hour, at the first start at or after the **Start minute** set in Administration → History archival &
+   purge (20 initially), the task does the hourly work: it exports, verifies and copies a requested run, takes its
+   pre-purge backup in the backup folder, purges the archived Movement history from the database and runs the
+   reconciliation after it. A start that carried out a deletion leaves the hourly work to the next start. The very
+   first start only records the current hour, so the first hourly work comes at the next Start minute. A refusal or a
+   failure sends one email for its hour, except that while a deletion request is open, every start that cannot carry
+   it out sends one; exit code 4 is an incident (the reconciliation after a purge or a deletion did not end clean: the
+   runbook §8), and until it is closed every hourly start refuses with exit code 1, works on no run and carries out no
+   deletion request. Keep the Start minute away from minute 0: a pre-purge backup waits for the hourly backup while
+   that one runs (up to 60 minutes), and a release is refused while the task works.
 
 5. **Test it.** Select the task and click **Run**. Then check that the job can reach its folder and the database,
-   which prints the hourly work's lines and ends with a line that starts with `ARCHIVE` (`ARCHIVE none - -` while no
-   run is requested: then nothing is exported or deleted):
+   which prints the work's lines and ends with a line that starts with `ARCHIVE` (`ARCHIVE none - -` while no run and
+   no deletion is requested: then nothing is exported or deleted; a start that carried out a deletion request ends
+   with a line that starts with `DELETION`):
 
    ```sh
    deploy/production/pf archive
@@ -640,11 +655,13 @@ before the first run is requested in Administration.
 6. Add the archive folder to the Hyper Backup task (§11.3, step 3), if you have not done so yet.
 
 **Before any restore of the database** (a rollback, a restore after an incident, a move to a new NAS: the runbook §6
-and §8), untick **Enabled** for this task, and tick it again only after you have checked the runs in Administration →
-History archival & purge. A restored backup that holds a run in `PURGING` (for example the hourly backup taken while a
-purge ran) resumes that purge at the task's next start, unless the task is disabled or the incident record of the
-runbook §8 exists. To undo a purge, restore that run's pre-purge backup: the run is `RUNNING` in it, the next start
-fails it, and nothing is purged again.
+and §8), untick **Enabled** for this task, and tick it again only after you have checked the runs and the permanent
+deletion requests in Administration → History archival & purge. A restored backup that holds a run in `PURGING` (for
+example the hourly backup taken while a purge ran) resumes that purge at the task's next start, unless the task is
+disabled or the incident record of the runbook §8 exists. A restored backup that holds a deletion request in
+`APPROVED` (taken between the request and its deletion) has it carried out at the task's next start: cancel it in
+PartFlow first unless the deletion is still wanted. To undo a purge or a deletion, restore its pre-purge backup: the
+run or the request is `RUNNING` in it, the next start fails it, and nothing is purged or deleted again.
 
 ## 12. Installing a new release
 
@@ -652,7 +669,8 @@ Every later release is installed with `deploy/production/release.sh`. It takes a
 images without touching the running ones, migrates the database, switches PartFlow to the new release and checks it.
 Choose a time when no Work Order import runs, a few minutes after the full hour, once the hourly backup has finished
 and well before the Start minute of the history archive task: a release is refused while that task does its hourly
-work (start it again once the work has finished), and the task refuses while a release runs. A run's purge, and a
+work or carries out a permanent deletion request (start it again once the work has finished; a deletion takes a few
+minutes for its pre-purge backup and reconciliation), and the task refuses while a release runs. A run's purge, and a
 first large run, can keep the task busy for long.
 
 ```sh
@@ -673,7 +691,9 @@ deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --appr
 - `.env.production` is not tracked by git, so it stays in place; `release.sh` writes the new tag into it at the switch.
   The scheduled tasks need no change, because they run in the same folder.
 - Keep the previous release's images (never `docker image prune -a`) until you are sure you will not roll back
-  (runbook §6). Before a rollback that restores a backup, disable the history archive task (§11.8).
+  (runbook §6). Before a rollback that restores a backup, disable the history archive task (§11.8), check the runs
+  and the permanent deletion requests after the restore, and cancel in PartFlow every deletion request found `APPROVED`
+  that is no longer wanted before you enable the task again.
 
 ## 13. Capacity and resource limits
 
@@ -699,17 +719,19 @@ the local backups. A backup needs free space of twice the newest backup plus 1 G
 drill needs five times the backup plus 1 GiB on the Docker storage. The `check.sh` disk checks fail below 15 % free
 space: `disk_data` for the database volume, `disk_backup` for the backup folder and `disk_docker` for the Docker
 storage (images and container logs) and `disk_archive` for the archive folder (§11.8). The archive folder grows with
-every archival run; nothing removes archives automatically. The backup folder also holds the pre-purge backups of
-History archival & purge (the newest 3 by default, one dump each). A purge frees space inside the database for new
-Movements, so the database stops growing, but its files get smaller only with `VACUUM FULL` (the runbook §11).
-`/root/partflow-monitoring/growth.tsv` records the database size once a day.
+every archival run; nothing removes archives automatically. The backup folder also holds the pre-purge backups that
+the history archive task takes before each purge and each permanent deletion (the newest 3 by default, one dump each,
+both kinds together: a series of deletions can rotate out the pre-purge backup of an earlier purge). A purge frees
+space inside the database for new Movements, so the database stops growing, but its files get smaller only with
+`VACUUM FULL` (the runbook §11). `/root/partflow-monitoring/growth.tsv` records the database size once a day.
 
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §7, §11.8 and §12: disable the history archive task before any restore and check the runs before enabling it, because a restored `PURGING` run resumes its purge. |
-| 2026-11-18 | uncommitted | §11.8: a run purges its archived Movement history after the off-host copy and a pre-purge backup, then reconciles, and an incident stops the task's work until it is closed; the Start minute away from the hourly backup; §11.2, §11.3, §12 and §13: the pre-purge backups in the backup folder and in Hyper Backup, the archive as the only copy after a purge, a long purge before a release, and `VACUUM FULL`. |
+| 2026-11-18 | uncommitted | §11.8: the history archive task also carries out permanent deletion requests within 5 minutes, after a pre-purge backup, and a deletion needs it; §7, §11.8 and §12: after a restore, check the deletion requests too and cancel the `APPROVED` requests that are no longer wanted, because a restored `APPROVED` request is carried out; §8: `check.sh` reports a deletion request that waits, also while archival is not set up; §11, §11.2, §12 and §13: the pre-purge backups of deletions, which share Pre-purge backups kept with purges, and releases refused during a deletion. |
+| 2026-11-18 | `d094f5e` | §7, §11.8 and §12: disable the history archive task before any restore and check the runs before enabling it, because a restored `PURGING` run resumes its purge. |
+| 2026-11-18 | `d094f5e` | §11.8: a run purges its archived Movement history after the off-host copy and a pre-purge backup, then reconciles, and an incident stops the task's work until it is closed; the Start minute away from the hourly backup; §11.2, §11.3, §12 and §13: the pre-purge backups in the backup folder and in Hyper Backup, the archive as the only copy after a purge, a long purge before a release, and `VACUUM FULL`. |
 | 2026-11-17 | `2f12d33` | §11.8: the archive folder, the optional copy folder and the 5-minute history archive task, which exports and copies archives and never deletes anything; §4, §11.3, §11.5, §12 and §13 for the archive folder. |
 | 2026-11-16 | `5708664` | §7, §12: `deploy/production/pf install` and `pf update` run these steps. |
 | 2026-11-16 | `c1f042b` | §1, §11.2: the backup task runs every hour with `--kind scheduled`, and Administration → Backups sets the interval and how many backups are kept; §11.3, §11.5, §12: times around the hourly backup. |

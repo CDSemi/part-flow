@@ -9,6 +9,11 @@
 import type { ArchiveCounts, ArchiveRun } from '../../api/history-archive';
 import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
 
+/** The disclosure of a pre-purge backup in the runs and requests tables.
+ * Its hyphen is a non-breaking one (U+2011): a narrow column would
+ * otherwise break the word `Pre-purge` after it. */
+export const PRE_PURGE_BACKUP_LABEL = 'Pre‑purge backup';
+
 /** The plain words of a run's state. */
 export function runStateLabel(run: ArchiveRun): string {
   switch (run.state) {

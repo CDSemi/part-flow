@@ -15,6 +15,7 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { ArchivePreviewCard } from './ArchivePreviewCard';
 import { ArchiveRunsCard } from './ArchiveRunsCard';
+import { DeletionRequestsCard } from './DeletionRequestsCard';
 import { formatRetentionPeriod } from './retention-period';
 import {
   AdminField,
@@ -39,6 +40,11 @@ import { ADMIN_SECTIONS } from './sections';
 // settings and the runs, with one view-only line under the header when
 // the user may not change them. The server validates every value and
 // owns every rule: the section shows its answers as given.
+//
+// Below the runs, the Permanent deletion requests card (archival design
+// D17, build step 3) lists the requests of Delete permanently… with
+// Cancel; it is shown only to holders of Delete Work Orders and Part
+// Numbers permanently, whom every route of the requests needs.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'data-retention')?.subtitle ??
@@ -47,7 +53,11 @@ const SUBTITLE =
 const PERMISSION = 'RUN_HISTORY_ARCHIVAL_AND_PURGE';
 
 export function HistoryArchivalSection() {
-  const canWrite = useSession().can(PERMISSION);
+  const session = useSession();
+  const canWrite = session.can(PERMISSION);
+  const canDeletePermanently = session.can(
+    'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+  );
   const { status } = useConnectivity();
   const [editing, setEditing] = useState(false);
   const writeBlocked = status !== 'connected';
@@ -98,6 +108,9 @@ export function HistoryArchivalSection() {
           canWrite={canWrite}
           writeBlocked={writeBlocked}
         />
+        {canDeletePermanently ? (
+          <DeletionRequestsCard writeBlocked={writeBlocked} />
+        ) : null}
       </div>
     </>
   );

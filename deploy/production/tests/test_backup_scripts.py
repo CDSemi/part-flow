@@ -1,6 +1,7 @@
 """P16-S5: deploy/production/backup.sh and restore-test.sh against fake `docker`, `df`, `ps`, `uname`, `id`, `curl` and
 `sleep` executables (P16-S5 SPEC section 6.3: SB-1, SB-2, BS-1..BS-17, RT-1..RT-19;
-the P16-S5 audit adds BS-18 and RT-20; the purge of history archival adds BS-24..BS-31 and RT-21).
+the P16-S5 audit adds BS-18 and RT-20; the purge of history archival adds BS-24..BS-31 and RT-21; permanent deletion
+requests add BS-32 and RT-22).
 
 The harness of test_release_scripts.py is reused: a temporary fake repository root (a copy of compose.production.yaml,
 compose.production.build.yaml and an env file whose PARTFLOW_BACKUP_DIR is a temporary directory), a `bin` directory
@@ -46,8 +47,10 @@ IMAGE_DB = "sha256:" + "d" * 64
 REVISION = "0032_phase14_route_adjusted"
 COMPOSE_PREFIX = "compose -f compose.production.yaml --env-file .env.production "
 NAME_RE = r"[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release|pre-purge)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?"
-# Movement-history archival step 2: the label of a pre-purge backup is the archive name of its run.
+# Movement-history archival step 2: the label of a pre-purge backup is the archive name of its run; step 3: or the label
+# of a permanent deletion request.
 PRE_PURGE_LABEL = "run-3-20261008T012000Z"
+DELETION_LABEL = "deletion-7-20261008T012000Z"
 DUMP_STARTED = "2026-10-08T02:00:31Z"
 DB_SIZE = r"exec -T db sh -c psql .*pg_database_size"
 PG_STAT = r"exec -T db sh -c psql .*pg_stat_activity"
@@ -800,14 +803,18 @@ class PrePurge(BackupHarness):
             self.assertExit(0)
             self.assertIn("--reason by hand --release-tag", " ".join(self.docker_entries(r"backup-manifest ")[0]["argv"]))
 
-    # BS-25: the label is required for pre-purge and must be an archive name; --no-rotate is for scheduled only; the
-    # other kinds still refuse a label.
+    # BS-25: the label is required for pre-purge and must be an archive name or a deletion request's label; --no-rotate
+    # is for scheduled only; the other kinds still refuse a label.
     def test_bs25_pre_purge_arguments(self):
         for arguments, kind, message in (
-            ((), "pre-purge", "--kind pre-purge needs --label ARCHIVE (the archive name of the archival run"),
+            ((), "pre-purge", "--kind pre-purge needs --label LABEL (the archive name of the archival run"),
             (("--label", "v1.1.0"), "pre-purge", "--label must be the archive name of an archival run"),
             (("--label", "run-3-20261008"), "pre-purge", "--label must be the archive name of an archival run"),
             (("--label", f"{PRE_PURGE_LABEL} x"), "pre-purge", "--label must be the archive name of an archival run"),
+            (("--label", "deletion-x-20261008T012000Z"), "pre-purge",
+             "or the label of a deletion request, deletion-<id>-<YYYYMMDDTHHMMSSZ>, for --kind pre-purge."),
+            (("--label", "deletion-7-20261008"), "pre-purge", "--label must be the archive name of an archival run"),
+            (("--label", "request-7-20261008T012000Z"), "pre-purge", "--label must be the archive name of an archival run"),
             (("--label", PRE_PURGE_LABEL, "--no-rotate"), "pre-purge", "--no-rotate is only for --kind scheduled."),
             (("--label", PRE_PURGE_LABEL), "scheduled", "--label is only for --kind pre-release and --kind pre-purge."),
             (("--label", PRE_PURGE_LABEL, "--reason", "x"), "manual",
@@ -829,9 +836,39 @@ class PrePurge(BackupHarness):
         self.backup("--label", PRE_PURGE_LABEL, kind="pre-purge")
         self.assertExit(3)
         self.assertEqual(self.result.stdout, "")
-        self.assertIn("names no dump start (dump_started_at), so no purge can use it", self.result.stderr)
+        self.assertIn("names no dump start (dump_started_at), so no purge or deletion can use it", self.result.stderr)
         self.assertEqual(len(self.published()), 1)
         self.assertFalse(self.lock.exists())
+
+    # BS-32 (permanent deletion requests): the label of a deletion request, deletion-<id>-<UTC stamp>, names a
+    # pre-purge backup like an archive name: published and verified like every backup, with the default reason
+    # "pre-purge backup for deletion request <id>", never rotated by its own run, and a BACKUP line with its dump start.
+    def test_bs32_deletion_label(self):
+        self.prepend("docker", rule(TOOL_RUN + "backup-verify ", out(verify_report(kind="pre-purge"))))
+        self.backup("--label", DELETION_LABEL, kind="pre-purge")
+        self.assertExit(0)
+        match = re.fullmatch(rf"BACKUP ([0-9]{{8}}T[0-9]{{6}}Z-pre-purge-{DELETION_LABEL}) (\S+) (\S+)\n",
+                             self.result.stdout)
+        self.assertIsNotNone(match, self.result.stdout + self.result.stderr)
+        name, path, started = match.groups()
+        self.assertEqual((path, started), (f"{sh_path(self.backup_dir)}/{name}", DUMP_STARTED))
+        self.assertEqual(self.published(), [name])
+        manifest = " ".join(self.docker_entries(r"backup-manifest ")[0]["argv"])
+        self.assertIn(f"--name {name} --operator scheduler --reason pre-purge backup for deletion request 7"
+                      " --release-tag", manifest)
+        self.assertNoDocker(r"backup-policy", r"backup-due", r"backup-rotate")
+        with self.subTest(case="the reason archive.sh passes"):
+            self.reset()
+            self.prepend("docker", rule(TOOL_RUN + "backup-verify ", out(verify_report(kind="pre-purge"))))
+            self.backup("--label", DELETION_LABEL, "--reason", "pre-purge backup for deletion request 7",
+                        "--lock-wait-minutes", "60", kind="pre-purge")
+            self.assertExit(0)
+            self.assertIn("--reason pre-purge backup for deletion request 7 --release-tag",
+                          " ".join(self.docker_entries(r"backup-manifest ")[0]["argv"]))
+        with self.subTest(case="help"):
+            help_text = self.run_script(BACKUP_SH, "--help").stdout
+            self.assertIn("deletion-<id>-<YYYYMMDDTHHMMSSZ>", help_text)
+            self.assertIn("pre-purge backup for deletion request <id>", help_text)
 
     # BS-31: a backup policy without the key keep_pre_purge (an image from before the purge, whose backup-rotate has no
     # --keep-pre-purge) is not an error: the scheduled backup completes and its rotation leaves pre-purge backups alone.
@@ -1460,6 +1497,34 @@ class RestoreDrill(ScriptHarness):
             self.assertNotIn("PARTFLOW_ARCHIVE_DIR", entry["env"])
         for folder in (archive, copy):
             self.assertEqual(sorted(p.name for p in folder.iterdir()), ["keep.txt"])
+        self.assertNotIn(" maintenance ", " ".join(self.docker()) + " ")
+
+    # RT-22 (permanent deletion requests): the pre-purge backup of a deletion request restores like any other kind,
+    # and the drill never names the production archive folder.
+    def test_rt22_deletion_pre_purge_backup(self):
+        name = f"20261008T030000Z-pre-purge-{DELETION_LABEL}"
+        backup = self.backup_dir / name
+        backup.mkdir()
+        (backup / "partflow.dump").write_bytes(b"PGDMP deletion drill dump")
+        shutil.copyfile(self.backup_dir / BACKUP_NAME / "manifest.json", backup / "manifest.json")
+        archive = self.tmp / "archive"
+        archive.mkdir()
+        (archive / "keep.txt").write_text("untouched\n", encoding="utf-8")
+        self.write_env([*self.env_lines, f"PARTFLOW_ARCHIVE_DIR={sh_path(archive)}"])
+        self.drill(backup=name)
+        self.assertExit(0)
+        found = sorted(self.records.glob(f"*-restore-test-{name}"))
+        self.assertEqual(len(found), 1, f"{self.result.stdout}\n{self.result.stderr}")
+        evidence = json.loads((found[0] / "evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual((evidence["outcome"], evidence["backup"]["name"]), ("passed", name))
+        self.assertEqual(self.docker_entries(r"pg_restore")[0]["stdin"]["bytes"], len(b"PGDMP deletion drill dump"))
+        env = dict(line.split("=", 1) for line in (found[0] / "work" / "restore-test.env").read_text(
+            encoding="utf-8").splitlines())
+        self.assertEqual(env["PARTFLOW_ARCHIVE_DIR"], "")
+        for entry in self.calls("docker"):
+            for path in (sh_path(archive), archive.as_posix(), str(archive)):
+                self.assertNotIn(path, " ".join(entry["argv"]))
+        self.assertEqual(sorted(p.name for p in archive.iterdir()), ["keep.txt"])
         self.assertNotIn(" maintenance ", " ".join(self.docker()) + " ")
 
 

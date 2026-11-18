@@ -53,15 +53,19 @@ postgres_password, partflow_app_password and partflow_maintenance_password; the 
 (`--profile ops run --rm -T db-roles`) before its migrate, and backend connects as partflow_app. SM-17a/b use an empty
 partflow_app_password (backend no longer mounts postgres_password); new cases:
 - SM-17c: an empty postgres_password stops migrate and db-roles with configuration_invalid (exit 2, one JSON document).
-- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (37 tables).
+- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (39 tables).
 - SM-31: every partflow-api session in pg_stat_activity is partflow_app.
 - SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables, the
-  two tables of Movement-history archival included, and (archival step 2) the row guard trg_part_movements_guard_delete
-  refusing partflow_maintenance's DELETE of a Movement outside a purge.
+  two tables of Movement-history archival and the two of permanent deletion requests included; (archival step 2) the
+  row guard trg_part_movements_guard_delete refusing partflow_maintenance's DELETE of a Movement outside a purge; and
+  (archival step 3) the row guards of the tables a permanent deletion deletes from refusing partflow_maintenance's
+  DELETE of a row of work_orders, work_order_demands and audit_events outside a RUNNING deletion request.
 - SM-33: reconcile through backend: check (h) pass, connected as partflow_app (not a superuser).
 - SM-34: restore convergence: a --no-privileges dump restored into partflow_restore_s4, apply-grants, then (h) pass.
 - SM-35: the write flows through web (SM-6, SM-7..SM-9, SM-21, SM-36) pass as partflow_app.
 - SM-36: application-password rotation in a short write freeze (stop backend, db-roles, force-recreate backend).
+- SM-37 (archival step 3): the cheap check of archive.sh, `history-archive settings` through `exec` in the running
+  backend container, answers deletion_pending false as partflow_app (no deletion request is open).
 SM-17c gives migrate a backup option so that its configuration is read (without one, migrate is an argparse usage
 error before any configuration is read, SM-27).
 """
@@ -110,12 +114,14 @@ FILE_TOO_LARGE_MESSAGE = "The file is larger than 1 MB. Split it into smaller fi
 EMPTY_PASSWORD_FILE_MESSAGE = "DATABASE_PASSWORD_FILE /run/secrets/partflow_app_password is empty."
 APP_ROLE = "partflow_app"
 ROLE_SECRETS = ("partflow_app_password", "partflow_maintenance_password")
-# SM-32: the guarded tables (P16-S4 SPEC section 3.2, and the two tables of Movement-history archival) and the cells the
-# application database role may run (its classes: worker_sessions and history_archive_runs guarded update,
-# assigned_route_steps no update, history_archived_flows read only).
+# SM-32: the guarded tables (P16-S4 SPEC section 3.2, the two tables of Movement-history archival and the two of
+# permanent deletion requests) and the cells the application database role may run (its classes: worker_sessions,
+# history_archive_runs and deletion_requests guarded update, assigned_route_steps no update, history_archived_flows read
+# only, deletion_request_rows append-only).
 GUARDED_TABLES = (
     "part_movements", "audit_events", "machine_lifecycle_events", "quantity_flow_lineage", "work_order_allocations",
-    "worker_sessions", "assigned_route_steps", "history_archive_runs", "history_archived_flows",
+    "worker_sessions", "assigned_route_steps", "history_archive_runs", "history_archived_flows", "deletion_requests",
+    "deletion_request_rows",
 )
 PROBE_STATEMENTS = {
     "UPDATE": "UPDATE {table} SET {column} = {column} WHERE false",
@@ -123,12 +129,14 @@ PROBE_STATEMENTS = {
     "TRUNCATE": "TRUNCATE {table}",
 }
 # The column the UPDATE probe assigns to itself. It must exist, because PostgreSQL resolves the columns before it checks
-# the privilege; history_archived_flows has no id (its key is run_id, flow_id).
-PROBE_UPDATE_COLUMNS = {"history_archived_flows": "run_id"}
+# the privilege; history_archived_flows has no id (its key is run_id, flow_id), deletion_request_rows neither (its key
+# is request_id, table_name, row_key).
+PROBE_UPDATE_COLUMNS = {"history_archived_flows": "run_id", "deletion_request_rows": "request_id"}
 PROBE_ALLOWED = {
     ("worker_sessions", "UPDATE"): "UPDATE 0",
     ("assigned_route_steps", "DELETE"): "DELETE 0",
     ("history_archive_runs", "UPDATE"): "UPDATE 0",
+    ("deletion_requests", "UPDATE"): "UPDATE 0",
 }
 # SM-32, archival step 2 (contract §1.5, §1.7): partflow_maintenance holds DELETE on part_movements, and the row guard
 # trg_part_movements_guard_delete refuses every Movement outside the purge of a PURGING run, for every role. A row
@@ -146,8 +154,14 @@ ROW_GUARD_STATEMENTS = (
     "SET LOCAL ROLE partflow_maintenance",
     f"DELETE FROM part_movements WHERE device_event_id = '{ROW_GUARD_EVENT}'",
 )
+# SM-32, archival step 3 (contract B3 §1.4, §1.5): partflow_maintenance holds DELETE on the ten tables a permanent
+# deletion deletes from, and their row guards refuse every row outside the stored rows of the RUNNING deletion request
+# that partflow.deletion_request_id names. The probe deletes one existing row of each table below (the smoke's own
+# Work Orders of SM-21 and their audit rows) as partflow_maintenance, without the marker, and rolls back.
+DELETION_GUARD_TABLES = ("work_orders", "work_order_demands", "audit_events")
+DELETION_GUARD_MESSAGE = "may be deleted only by the host job carrying out a permanent deletion request that lists it"
 RESTORE_DATABASE = "partflow_restore_s4"
-CLASSIFIED_TABLES = 37
+CLASSIFIED_TABLES = 39
 MULTI_WORKER_STOP = "failed to start, stopping the parent process"
 TOKEN_PATTERN = re.compile(r"Setup token: ([A-Z2-7]{4}(?:-[A-Z2-7]{4})+)")
 IMPORT_HEADER = "Work Order Number,Part Number,Requested Quantity,Job Number,Due Date\r\n"
@@ -968,6 +982,19 @@ class Smoke:
                 "expected": "refused by trg_part_movements_guard_delete", "verdict": verdict,
                 "probe_row_inserted": inserted, "psql_rc": result.returncode, "stderr": result.stderr.strip()[-300:],
             }
+            # The row guards of a permanent deletion outside a RUNNING request: the maintenance role passes the privilege
+            # check, and the guard refuses the row (archival step 3).
+            for table in DELETION_GUARD_TABLES:
+                script = ('psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN'
+                          ' -c "SET LOCAL ROLE partflow_maintenance"'
+                          f' -c "DELETE FROM {table} WHERE id = (SELECT min(id) FROM {table})" -c ROLLBACK')
+                result = self.compose("exec", "-T", "db", "sh", "-c", script, check_rc=False, timeout=120)
+                refused = f"{table} row " in result.stderr and DELETION_GUARD_MESSAGE in result.stderr
+                cells[f"{table} DELETE as partflow_maintenance outside a deletion request"] = {
+                    "expected": f"refused by trg_{table}_guard_delete", "verdict": "refused" if refused else "wrong",
+                    "no_row_to_probe": "DELETE 0" in result.stdout, "psql_rc": result.returncode,
+                    "stderr": result.stderr.strip()[-300:],
+                }
             observed["cells"] = cells
             wrong = [cell for cell, value in cells.items() if value["verdict"] == "wrong"]
             check(not wrong, f"cells not as expected: {wrong}")
@@ -986,6 +1013,27 @@ class Smoke:
             check(h.get("status") == "pass", f"check (h) is {h.get('status')}")
             check(database.get("connected_role") == APP_ROLE, "reconcile is not connected as partflow_app")
             check(database.get("connected_role_superuser") is False, "reconcile is connected as a superuser")
+
+    def sm37(self):
+        """The cheap check of every scheduled archive.sh start (contract B3 §3.1): `history-archive settings` through
+        `exec` in the running backend container, as the application database role; it creates no container."""
+        with self.case("SM-37") as observed:
+            result = self.compose("exec", "-T", "backend", "python", "-m", "app.cli", "history-archive", "settings",
+                                  check_rc=False, timeout=120)
+            report = parse_report(result.stdout)
+            role = self.compose("exec", "-T", "backend", "python", "-c",
+                                "import os; print(os.environ.get('DATABASE_USER', ''))", check_rc=False, timeout=60)
+            observed.update({
+                "rc": result.returncode, "result": report.get("result"), "exit_code": report.get("exit_code"),
+                "deletion_pending": report.get("deletion_pending"), "deletion_request": report.get("deletion_request"),
+                "start_minute": report.get("start_minute"), "database_user": role.stdout.strip(),
+            })
+            check(result.returncode == 0 and report.get("exit_code") == 0 and report.get("result") == "read",
+                  f"history-archive settings through exec exited {result.returncode}")
+            check(report.get("deletion_pending") is False and report.get("deletion_request") is None,
+                  "the cheap check reports an open deletion request")
+            check(isinstance(report.get("start_minute"), int), "the cheap check reports no Start minute")
+            check(role.stdout.strip() == APP_ROLE, f"the backend container does not connect as {APP_ROLE}")
 
     def sm34(self):
         with self.case("SM-34") as observed:
@@ -1117,6 +1165,7 @@ class Smoke:
             self.sm21()
             self.sm16()
             self.sm29_to_sm33()
+            self.sm37()
             self.sm34()
             self.sm14()
             self.sm17()

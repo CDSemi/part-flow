@@ -54,6 +54,8 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   EDIT_WORK_ORDER_ALLOCATION: 'Edit Work Order Allocation',
   PERFORM_HISTORICAL_CORRECTIONS: 'Perform authorized historical corrections',
   RUN_HISTORY_ARCHIVAL_AND_PURGE: 'Run history archival and purge',
+  DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY:
+    'Delete Work Orders and Part Numbers permanently',
 };
 
 /** The four groups the Roles & permissions editor edits. */
@@ -73,6 +75,7 @@ export const ROLE_PERMISSION_GROUPS: readonly PermissionGroup[] = [
       'MANAGE_CORRECTION_PERMISSIONS',
       'CONFIGURE_SYSTEM_SETTINGS',
       'RUN_HISTORY_ARCHIVAL_AND_PURGE',
+      'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
     ],
   },
   {

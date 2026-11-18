@@ -2700,7 +2700,8 @@ dwell 1–300 s; defaults 3 and 6).
 ### Data & system
 
 - **Backups** (Configure system settings) is described under its own heading below.
-- **History archival & purge** (Run history archival and purge) is described under its own heading below.
+- **History archival & purge** (Run history archival and purge; its Permanent deletion requests card, Delete Work Orders
+  and Part Numbers permanently) is described under its own heading below.
 - **Settings** hosts two panels:
   - the **Due Soon warning** panel owns the configuration behind every derived due countdown (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) and **Maximum warning days** (0–365, never below
@@ -2853,6 +2854,11 @@ Routes and Part Numbers stay managed in Management by authorized production role
 - **History archival & purge** has a permission of its own, **Run history archival and purge**, initially granted to
   the Administrator role and to Super User (which holds every permission); Configure system settings does not guard it
   (PROJECT_PROFILE §20).
+- **Delete Work Orders and Part Numbers permanently** is a permission of its own as well, initially held by Super User
+  only (which holds every permission); the Administrator role does not hold it (PROJECT_PROFILE §20). Only its holders
+  see **Delete permanently…** in Work Order Details (§11.2) and in the Part Number dialog of Management → Part Numbers
+  (§14.2), and the **Permanent deletion requests** card of History archival & purge; the server requires it for every
+  preview, request, cancellation and list of permanent deletions.
 
 ### Scan Stations
 
@@ -2906,10 +2912,11 @@ entity (§4.12, PROJECT_PROFILE §8.13).
   lost device that may be in someone else's hands. Neither is offered on the signed-in user's own row.
 - **Roles & permissions** lists named roles (initially Administrator, Manager, Operator and Super User, with exactly the
   capabilities PROJECT_PROFILE §20 lists as initial grants) and edits each role's name and its permissions, grouped as
-  Administration, Production master data, Work Orders, priority and reports, and Scan Station. The four correction
-  permissions (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform authorized
-  historical corrections) are edited only in Production rules → **Correction permissions**, as a role × permission
-  table below the Undo reason switch.
+  Administration, Production master data, Work Orders, priority and reports, and Scan Station. The Administration group
+  ends with the two permissions of data maintenance, Run history archival and purge and then Delete Work Orders and Part
+  Numbers permanently. The four correction permissions (Undo recent eligible scans, Perform quantity corrections, Edit
+  Work Order Allocation, Perform authorized historical corrections) are edited only in Production rules → **Correction
+  permissions**, as a role × permission table below the Undo reason switch.
 
 ### History archival & purge
 
@@ -2919,10 +2926,12 @@ backup, a run deletes the archived Movements in batches of whole components. Tra
 `History archived in run N`, per archived flow (§7.2), and archived commands can no longer be undone (§4.5). Runs that
 finished before runs purged keep their result `Exported to files; nothing deleted.` Every signed-in user
 reads the settings and the runs. The preview, a request and every change need the **Run history archival and purge**
-permission; without it one `View only` line names that permission, the Preview card is not shown and no action is
-offered. The section follows the card rule, with at most two columns: the **Retention and schedule** and **Preview**
-cards side by side in two equal columns when two fit (each at least 25rem, the width at which its widest label and
-value stay on one line), otherwise one full-width column; then the **Runs** card at the full width of the page.
+permission; without it one `View only` line names that permission, the Preview card is not shown and no action on the
+settings or the runs is offered. The section follows the card rule, with at most two columns: the **Retention and
+schedule** and **Preview** cards side by side in two equal columns when two fit (each at least 25rem, the width at which
+its widest label and value stay on one line), otherwise one full-width column; then the **Runs** card at the full width
+of the page and, only for holders of **Delete Work Orders and Part Numbers permanently**, the **Permanent deletion
+requests** card below it, at the full width too.
 
 - **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
   its work, and how much it purges at a time.` The card shows the **Retention period** (initially `24 months (2
@@ -2983,7 +2992,9 @@ value stay on one line), otherwise one full-width column; then the **Runs** card
     disclosures that the keyboard opens: `Pre-purge backup` with the backup's name, and `Purge receipt` with the
     receipt's file name (`<archive folder name>.purged.json`, beside the archive folder) and its SHA-256.
 
-  Below 800 px the rows stack.
+  Text in the table wraps only between words, so a narrow window never breaks a word in two: a reason's column is
+  never narrower than 6.5rem, and only a word longer than that (a pasted link) wraps anywhere, like the archive folder
+  name, a backup name and the SHA-256. Below 800 px the rows stack.
   - `Cancel…` on a run that is requested or waiting for its off-host copy asks first (`Cancel run N?`, with `Cancel run`
     and `Keep run (Esc)`); the archive folder of a waiting run stays on the server. A run the job works on (`Running`,
     `Purging`) offers no `Cancel…`, and the server refuses to cancel it.
@@ -2995,6 +3006,34 @@ value stay on one line), otherwise one full-width column; then the **Runs** card
     takes the pre-purge backup and purges the archived history.
   - A refusal is shown in the dialog as the server words it. When a cancel or a confirmation gets no clear answer, the
     runs reload and the card says to check the run's state; both are safe to repeat.
+- **Permanent deletion requests** — `Each request deletes Work Orders or a Part Number with all their data from the
+  database, as if they had never been entered; the server carries it out after a pre-purge backup.` Only holders of
+  **Delete Work Orders and Part Numbers permanently** see the card, and only they make the requests, with **Delete
+  permanently…** (§11.2, §14.2); its footnote says so: `Delete permanently… in Work Order Details and in the Part Number
+  dialog of Management → Part Numbers requests a deletion.` A `Reload` button, then the requests, newest first, in a
+  table of the presentation of the runs, with six columns so that it stays inside its card down to a 1024 px window
+  beside the Administration sidebar:
+  - **Request**: the request number;
+  - **State**: the state as a status pill — `Waiting for the server`, `Deleting…`, `Deleted`, `Failed — nothing was
+    deleted` or `Cancelled` — with `Cancel…` under it while the request waits for the server;
+  - **Deletes**: the records the request names (`Work Order 007201`, `Part Number A-100`), with a line such as `Also 1
+    internal Work Order` when the deletion of a Part Number takes internal Work Orders with it, then every row it
+    deletes (`28 rows`), with the rows per table folded under `Rows per table`;
+  - **Requested by**: the User, or the operator on the server (`ops-anna (operator)`), with the reason;
+  - **Times**: `Requested` and the latest step (`Started` or `Finished`), the full timeline with `Backup started` folded
+    under `All times`;
+  - **Result**: `Deleted from the database.`, the failure reason exactly as the server gives it (nothing was deleted,
+    and the deletion may be requested again), or `Cancelled by <name>.`, with the name of the backup the server took
+    before the deletion folded under `Pre-purge backup`.
+
+  Text wraps as in the runs table, only between words: a Work Order Number or Part Number stays whole (one of more than
+  16 characters may wrap anywhere), and the result's column is never narrower than 6.5rem, so only a longer word — a
+  table or constraint name in a failure reason — wraps anywhere, like the backup name. Below 800 px the rows stack.
+  `Cancel…` (accessible name `Cancel deletion request N…`) asks first (`Cancel deletion request N?`, saying that nothing
+  is deleted and the records stay, with `Cancel request` and `Keep request (Esc)`); a request the server works on offers
+  no `Cancel…`, and the server refuses to cancel it. A refusal is shown in the dialog as the server words it. When a
+  cancellation gets no clear answer, the requests reload and the card says to check the request's state; cancelling
+  again is safe.
 
 ### Backups
 
@@ -3007,8 +3046,8 @@ Configure system settings.
   kept** (0–520, initially 52) are whole numbers, each with its own inline error. The rotation keeps the newest
   scheduled backup of each of that many hours, days and weeks (UTC).
 - **Pre-purge backups kept** (1–100, initially 3) is a whole number with its own inline error: of the pre-purge backups,
-  which the history archival job takes before each purge (§9 History archival & purge), the rotation keeps the newest
-  that many.
+  which the history archival job takes before each purge and before each permanent deletion (§9 History archival &
+  purge), the rotation keeps the newest that many.
 - A neutral line restates the retention and its upper bound, then the pre-purge backups kept, for example `Keeps one
   scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at
   most 130 scheduled backups. Keeps the newest 3 pre-purge backups.`
@@ -3270,6 +3309,49 @@ the approved audit surfaces (§3 rule 10).
   (retyping the committed quantity, removing a draft line again, clearing the external-number entry) returns the dialog
   to no unsaved changes, so the marker disappears, closing asks nothing, saved-line removal becomes available again,
   and **Release to production…** stops asking to settle the draft first (§11.4), all without a save or a reload.
+- **Delete permanently…** (PROJECT_PROFILE §28 Administrative Archival and Purge). For a holder of **Delete Work Orders
+  and Part Numbers permanently** (§9), the dialog of a Work Order with a Work Order Number ends, below its actions, with
+  a separate danger zone titled `Delete permanently`: `This removes Work Order {number} and all its data from the
+  database, as if it had never been entered, after a pre-purge backup.` and the `Delete permanently…` action, disabled
+  while disconnected or while a save is in flight. An internal Work Order (displayed `—`) has no Work Order Number to
+  name, so its dialog has no such zone; the permanent deletion of a Part Number takes with it every internal Work Order
+  whose lines are all of that Part Number (§14.2). The action opens the shared **Delete permanently** dialog in the
+  danger tone. PartFlow only records the request; the server carries it out. The dialog:
+  - is titled `Delete Work Order permanently`, shows the Work Order Number, and says `This removes Work Order {number}
+    and all its data from the database, as if it had never been entered. The server takes a pre-purge backup first.`;
+  - shows what the server answers for the deletion. Under `What is deleted`: the Work Orders (their number, or `—` with
+    `Internal Work Order`, and their demand lines with the Part Numbers), the Part Numbers (`With its saved details` or
+    `No saved details`), the rows per table (Work Orders, Demand lines, Allocations, Quantity Flows, Lineage links,
+    Movements, Assigned Routes, Assigned Route steps, Part Number details and Audit rows), and `Audit rows kept: N`, a
+    disclosure listing each kept audit row (its entity, event and time) with the reason the server gives (`Kept: also
+    concerns other records`), or `Audit rows kept: none.` When the deletion is refused, `This deletion is refused` lists
+    every refusal exactly as the server words it, and nothing can be requested. When another deletion request is open,
+    its number, state, records, time and requester are shown with `Nothing can be requested until it finishes or is
+    cancelled.` and `Check again`, which reads the preview again;
+  - otherwise asks for a **Reason** (required, at most 500 characters) and the Work Order Number typed again (`Type
+    {number} (Work Order Number) to confirm`). `Request deletion` is enabled once both hold text; both travel as
+    entered, and the server checks them. Every refusal — of the reason, of the typed confirmation, because another
+    request is open, or because the deletion is now refused, with each refusal listed — is shown exactly as the server
+    words it, with the entries kept;
+  - then shows the request, `Deletion request N`, with its state as a status pill: `Waiting for the server` with the
+    time of the request, the requester and `The server's history archive task carries it out, normally within 5
+    minutes.` (an installation whose task is not set up yet keeps the request waiting); `Deleting…` with the time it
+    started; `Deleted`; `Failed — nothing was deleted` with the reason exactly as the
+    server gives it and `You may request the deletion again.`; or `Cancelled`. While the dialog is open and the request
+    is waiting or deleting, the dialog reads its state again every few seconds. `Cancel request` cancels a request that
+    is waiting for the server; a request the server works on is refused with the server's message. After a failed or
+    cancelled request, `Preview again` reads what would be deleted again and offers a new request, with the reason kept
+    and the Work Order Number to be typed again;
+  - follows the same way an open request that names exactly this Work Order (one requested earlier, by another User or
+    by an operator on the server) instead of showing it as another request;
+  - when a request gets no clear answer, reads the preview again, which shows the request if the server recorded it;
+  - once the request is `Deleted`, says `Work Order {number} no longer exists.` with the pre-purge backup. `Back to Work
+    Orders` — or any other close request — closes the dialog and Work Order Details, returns to the Work Orders list (or
+    to the Completed Work Orders page), which reloads without it, and confirms the deletion in a notice;
+  - closes at once while nothing was entered, and asks first (`Discard this deletion request?`) when a reason or a
+    confirmation was entered. Closing it while the request is open leaves the request to the server, and the Permanent
+    deletion requests card of History archival & purge (§9) lists it. While disconnected, `Request deletion` and `Cancel
+    request` are disabled.
 
 ## 11.3 New Work Order — manual-first modal dialog and Add Part flow
 
@@ -4151,6 +4233,26 @@ values as text (`—` when absent), the image without its controls, `Barcode lab
     Movement history and allocations are never touched or cascaded into. Every screen keeps displaying the canonical PN
     with the master-derived fields absent (`—`, §7.1), and a record can be created again later for the same PN.
   - There is **no PN archive, no soft delete and no active/inactive lifecycle** (PROJECT_PROFILE §8.1).
+- **Delete permanently (Management → Part Numbers).** For a holder of **Delete Work Orders and Part Numbers
+  permanently** (§9), the dialog opened from the Part Numbers list — editable or read-only alike — ends with a second,
+  separate danger zone titled `Delete permanently`: `This removes Part Number {PN} with all its data, including its
+  production history, from the database, as if it had never been entered, after a pre-purge backup.` and the `Delete
+  permanently…` action, disabled while disconnected or while a save is in flight. Unlike `Delete details…`, which
+  removes the saved details only, it requests the permanent deletion of the Part Number with all its data
+  (PROJECT_PROFILE §28 Administrative Archival and Purge) through the shared dialog of §11.2, which differs only in
+  this:
+  - it is titled `Delete Part Number permanently` and says `This removes Part Number {PN} with all its data, including
+    its saved details and its production history, from the database, as if it had never been entered. The server takes
+    a pre-purge backup first.`;
+  - the confirmation is the Part Number typed again (`Type {PN} (Part Number) to confirm`), which the server compares in
+    its canonical form;
+  - the server refuses the deletion of a Part Number that a Work Order that stays still uses (PROJECT_PROFILE §28) and
+    names each such Work Order; those Work Orders are deleted first, each from its Work Order Details;
+  - once the request is `Deleted` (`Part Number {PN} and all its data no longer exist.`), `Back to Part Numbers` — or
+    any other close request — closes the dialog and the Part Number dialog, and the list reloads without it.
+
+  The dialog opened from a demand line (§11.2) or from New Work Order has no such zone: its writes concern the Part
+  Number details only.
 
 ## 14.3 Part Number barcode label
 
@@ -4242,7 +4344,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-18 | uncommitted | §4.5, §7.2, §7.3 and §9: an archival run purges the archived history after the off-host copy and a pre-purge backup, Tracking shows archived entries and archived route steps, archived commands can no longer be undone, and the purge batch limits and Pre-purge backups kept are settings. |
+| 2026-11-18 | uncommitted | §9, §11.2 and §14.2: the new permission Delete Work Orders and Part Numbers permanently offers Delete permanently… in Work Order Details and in the Part Number dialog, which requests the deletion and follows its state, and the Permanent deletion requests card of History archival & purge. |
+| 2026-11-18 | d094f5e | §4.5, §7.2, §7.3 and §9: an archival run purges the archived history after the off-host copy and a pre-purge backup, Tracking shows archived entries and archived route steps, archived commands can no longer be undone, and the purge batch limits and Pre-purge backups kept are settings. |
 | 2026-11-17 | 2f12d33 | §9: History archival & purge shows its settings, the preview, the request of a run and the runs with Cancel and Confirm off-host copy; a run exports history and deletes nothing, and the new Run history archival and purge permission guards the section. |
 | 2026-11-17 | 1490927 | §11: Add Part offers, previews and creates the canonical form of a new PN that the server derives from the entry. |
 | 2026-11-17 | 1a553f2 | §9: every Administration settings section shows each group of settings as its own card, as Security does. |

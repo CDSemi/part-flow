@@ -1,9 +1,11 @@
-"""Turn a `status`, `history-archive status` or `reconcile` JSON report into the check lines of the monitoring scripts
-(P16-S6; OPERATIONS_RUNBOOK §2, §7, §9, §11).
+"""Turn a `status`, `history-archive status`, `history-archive settings` or `reconcile` JSON report into the check lines
+of the monitoring scripts (P16-S6; OPERATIONS_RUNBOOK §2, §7, §9, §10, §11).
 
 Usage:
   python3 deploy/production/monitor_report.py status STATUS_JSON RC [--growth-file FILE]
   python3 deploy/production/monitor_report.py archive ARCHIVE_STATUS_JSON RC [--copy-reason TEXT] [--purge-reconcile FILE]
+      [--deletion-wait-minutes N]
+  python3 deploy/production/monitor_report.py settings SETTINGS_JSON RC --skip-reason TEXT [--deletion-wait-minutes N]
   python3 deploy/production/monitor_report.py reconcile REPORT RC
 
 `status` (deploy/production/check.sh): prints exactly four lines, `PASS|FAIL|SKIP <id> <reason>` for database, schema,
@@ -15,14 +17,28 @@ line from `archive` instead of this one. backup_age names the newest backup of a
 
 `archive` (deploy/production/check.sh): prints exactly one line, `PASS|FAIL archival_proposal <reason>`, from the report
 of `python -m app.cli history-archive status` (the `maintenance` service): FAIL naming each finding
-(copy_confirmation_overdue, last_run_failed, archive_dir_unusable, copy_dir_unusable, receipt_not_copied), FAIL when the
-report is not valid (report_version 1, command `history-archive status`, exit_code equal to RC) or carries an error,
-otherwise PASS with the open run (a PURGING run with what it purged so far), the last finished run (its result, what it
-purged and what it skipped) and the archive folder's free space; exit 0 PASS, 1 FAIL, 2 usage error only.
+(copy_confirmation_overdue, last_run_failed, archive_dir_unusable, copy_dir_unusable, receipt_not_copied), and
+deletion_request_waiting when the open permanent deletion request, APPROVED or RUNNING, was requested longer ago than
+--deletion-wait-minutes (1-1440, default 15: the history archive task has not carried it out, or has not finished it;
+an APPROVED request behind a run that is RUNNING or PURGING names that run); FAIL when the report is not valid
+(report_version 1, command `history-archive status`, exit_code equal to RC) or carries an error; otherwise PASS with
+the open run (a PURGING run with what it purged so far), the last finished run (its result, what it purged and what it
+skipped), the archive folder's free space, and the open and the last finished deletion request in the terms of
+archive.sh's DELETION line (`deletion request <id> <state>`). A FAILED deletion request is not a FAIL: its requester
+sees it in PartFlow. Exit 0 PASS, 1 FAIL, 2 usage error only.
 --copy-reason: why check.sh did not mount the copy folder; it explains copy_dir_unusable. --purge-reconcile: the
-incident record that archive.sh writes when the reconcile after a purge did not end clean
-(<records-dir>/archive/reconcile-after-purge, key=value lines); it makes the line FAIL with reconcile_after_purge first,
-whatever the report says.
+incident record that archive.sh writes when the reconcile after a purge or a deletion did not end clean
+(<records-dir>/archive/reconcile-after-purge, key=value lines; `request` names the deletion request of an incident after
+a deletion, `run` the run of one after a purge); it makes the line FAIL with reconcile_after_purge first, whatever the
+report says.
+
+`settings` (deploy/production/check.sh, while archival is not set up): prints exactly one line from the report of
+`python -m app.cli history-archive settings`, the cheap check of archive.sh read in the running `backend` container.
+PartFlow records permanent deletion requests without the history archive task, and then nothing carries them out:
+`FAIL archival_proposal deletion_request_waiting: ...` when the open request, APPROVED or RUNNING, was requested longer
+ago than --deletion-wait-minutes (the report's started_at minus the request's requested_at); otherwise
+`SKIP archival_proposal <--skip-reason>`, which also says why when the report is not valid (report_version 1, command
+`history-archive settings`, exit_code equal to RC) or carries an error. Exit 0 SKIP, 1 FAIL, 2 usage error only.
 
 `reconcile` (deploy/production/scheduled-reconcile.sh): `RECONCILE clean|mismatch|error <path> (<n> findings, <ms> ms)`
 and one `FAIL <check> <title>: ...` line per failing check; exit = the report's exit_code when it is valid, otherwise
@@ -39,6 +55,11 @@ import sys
 
 STATUS_IDS = ("database", "schema", "backup_age", "archival_proposal")
 MAX_REASON = 300
+# The default of --deletion-wait-minutes (archive, settings): how long after it was requested a permanent deletion
+# request may still be open (APPROVED or RUNNING).
+DELETION_WAIT_MINUTES = 15
+SETTINGS_COMMAND = "history-archive settings"
+UTC_TIME = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{1,6})?Z")
 GROWTH_HEADER = "date\tdatabase_bytes\tmovement_rows\tmovement_bytes\n"
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -295,11 +316,12 @@ def read_incident(path):
 
 
 def incident_text(path):
-    """reconcile_after_purge: the reconcile after a purge did not end clean (None when the record is gone)."""
+    """reconcile_after_purge: the reconcile after a purge or a deletion did not end clean (None when the record is gone).
+    The record of an incident after a deletion names its request (`request`), that of one after a purge its run."""
     values = read_incident(path)
     if values is None:
         return (f"reconcile_after_purge: the incident record {path} cannot be read (OPERATIONS_RUNBOOK §8, Reconcile"
-                " finding after a purge)")
+                " finding after a purge, or after a deletion)")
     if not values:
         return None
     result = values.get("result") or "unknown"
@@ -311,18 +333,74 @@ def incident_text(path):
     else:
         what = (f"did not complete ({result}, exit {values.get('exit_code') or '?'})"
                 + (f" in checks {checks}" if checks else ""))
-    text = f"reconcile_after_purge: the reconcile after the purge of run {values.get('run') or '?'} {what}"
+    if values.get("request"):
+        subject, entry = f"the deletion of request {values['request']}", "Reconcile finding after a deletion"
+    else:
+        subject, entry = f"the purge of run {values.get('run') or '?'}", "Reconcile finding after a purge"
+    text = f"reconcile_after_purge: the reconcile after {subject} {what}"
     if values.get("finished_at"):
         text += f" at {values['finished_at']}"
-    text += ": an incident, OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge)"
+    text += f": an incident, OPERATIONS_RUNBOOK §8 ({entry})"
     if values.get("report"):
         text += f"; report {values['report']}"
     return text
 
 
-def archive_line(document, rc, copy_reason=None, incident=None):
+def request_text(request):
+    """A permanent deletion request as archive.sh's DELETION line names it: "deletion request 7 COMPLETED"."""
+    return f"deletion request {request.get('id')} {request.get('state')}"
+
+
+def minutes(seconds):
+    return f"{seconds // 60} min" if is_int(seconds) else "? min"
+
+
+def waited_text(request, age, wait_minutes):
+    """How long an open request has been open: "deletion request 7 APPROVED has waited 16 min (limit 15 min)", or for a
+    RUNNING request "has been open for"."""
+    verb = "has waited" if request.get("state") == "APPROVED" else "has been open for"
+    return f"{request_text(request)} {verb} {minutes(age)} (limit {wait_minutes} min)"
+
+
+def deletion_waiting_text(document, wait_minutes):
+    """deletion_request_waiting: the open request, APPROVED or RUNNING, was requested longer ago than the limit (None
+    otherwise). An APPROVED request waits behind a run that is RUNNING or PURGING in a start of the job: the text names
+    that run. A RUNNING request that stays open has not been finished (a stopped job leaves it RUNNING until the next
+    start makes it FAILED)."""
+    request = section(document, "open_deletion_request")
+    age = request.get("age_seconds")
+    state = request.get("state")
+    if state not in ("APPROVED", "RUNNING") or not is_int(age) or age <= wait_minutes * 60:
+        return None
+    text = f"deletion_request_waiting: {waited_text(request, age, wait_minutes)}"
+    run = section(document, "open_run")
+    if state == "APPROVED" and run.get("state") in ("RUNNING", "PURGING"):
+        return (f"{text} behind {run_text(run)}: the history archive task carries it out once that run's work in"
+                " progress ends; is the task enabled? (SYNOLOGY_NAS §11.8)")
+    if state == "APPROVED":
+        return f"{text}, and the history archive task has not carried it out: is the task enabled? (SYNOLOGY_NAS §11.8)"
+    return f"{text}, and the history archive task has not finished it: is the task enabled? (SYNOLOGY_NAS §11.8)"
+
+
+def deletion_parts(document):
+    """The open and the last finished deletion request of a PASS line (nothing for a report without them)."""
+    parts = []
+    request = section(document, "open_deletion_request")
+    if request:
+        text = request_text(request)
+        if request.get("state") in ("APPROVED", "RUNNING") and is_int(request.get("age_seconds")):
+            text += f" for {minutes(request.get('age_seconds'))}"
+        parts.append(text)
+    last = section(document, "last_finished_deletion_request")
+    if last:
+        parts.append(f"last {request_text(last)}")
+    return parts
+
+
+def archive_line(document, rc, copy_reason=None, incident=None, wait_minutes=DELETION_WAIT_MINUTES):
     """The archival_proposal line of one `history-archive status` report (`document` None = unreadable); `incident`,
-    the reconcile_after_purge text of archive.sh's incident record, comes first and always fails the line."""
+    the reconcile_after_purge text of archive.sh's incident record, comes first and always fails the line, and a
+    deletion request that has waited APPROVED longer than `wait_minutes` comes next."""
     first = [incident] if incident else []
     if (
         document is None
@@ -342,8 +420,9 @@ def archive_line(document, rc, copy_reason=None, incident=None):
     archive_dir = section(document, "archive_dir")
     copy_dir = section(document, "copy_dir")
     findings = [str(f) for f in document.get("findings") or []]
-    if findings or first:
-        texts = list(first)
+    waiting = deletion_waiting_text(document, wait_minutes)
+    if findings or first or waiting:
+        texts = list(first) + ([waiting] if waiting else [])
         for code in findings:
             if code == "copy_confirmation_overdue":
                 texts.append(f"{code}: {run_text(open_run)} has waited {days(open_run.get('waiting_seconds'))} for its"
@@ -382,11 +461,12 @@ def archive_line(document, rc, copy_reason=None, incident=None):
     parts.append(f"archive folder {gib(archive_dir.get('free_bytes'))} free")
     if copy_dir:
         parts.append(f"copy folder {gib(copy_dir.get('free_bytes'))} free")
+    parts.extend(deletion_parts(document))
     return line("PASS", "archival_proposal", "; ".join(parts))
 
 
 def run_archive(arguments):
-    options = {"--copy-reason": None, "--purge-reconcile": None}
+    options = {"--copy-reason": None, "--purge-reconcile": None, "--deletion-wait-minutes": None}
     positional = []
     index = 0
     while index < len(arguments):
@@ -400,10 +480,92 @@ def run_archive(arguments):
         positional.append(name)
         index += 1
     if len(positional) != 2:
-        raise UsageError("archive needs ARCHIVE_STATUS_JSON RC [--copy-reason TEXT] [--purge-reconcile FILE]")
+        raise UsageError("archive needs ARCHIVE_STATUS_JSON RC [--copy-reason TEXT] [--purge-reconcile FILE]"
+                         " [--deletion-wait-minutes N]")
     rc = parse_rc(positional[1])
+    wait_minutes = parse_wait_minutes(options["--deletion-wait-minutes"])
     incident = None if options["--purge-reconcile"] is None else incident_text(options["--purge-reconcile"])
-    text = archive_line(load(positional[0]), rc, options["--copy-reason"], incident)
+    text = archive_line(load(positional[0]), rc, options["--copy-reason"], incident, wait_minutes)
+    print(text)
+    return 1 if text.startswith("FAIL ") else 0
+
+
+# ---------------------------------------------------------------------------
+# settings (archival not set up: a permanent deletion request that nothing carries out)
+# ---------------------------------------------------------------------------
+
+
+def utc_time(text):
+    """A report time ("2026-10-08T12:20:00.123456Z", the fraction optional) as an aware datetime, or None."""
+    match = UTC_TIME.fullmatch(text) if isinstance(text, str) else None
+    if match is None:
+        return None
+    try:
+        moment = datetime.datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    fraction = match.group(2)
+    if fraction:
+        moment = moment.replace(microsecond=int(fraction[1:].ljust(6, "0")))
+    return moment.replace(tzinfo=datetime.timezone.utc)
+
+
+def settings_line(document, rc, skip_reason, wait_minutes):
+    """The archival_proposal line while archival is not set up, from one `history-archive settings` report (`document`
+    None = unreadable): FAIL when the open deletion request was requested longer ago than `wait_minutes`, since
+    nothing carries it out; otherwise SKIP with `skip_reason`, and why when the report cannot tell."""
+    if (
+        document is None
+        or document.get("report_version") != 1
+        or document.get("command") != SETTINGS_COMMAND
+        or not is_int(document.get("exit_code"))
+        or document.get("exit_code") != rc
+    ):
+        return line("SKIP", "archival_proposal", f"{skip_reason}; the deletion request check (history-archive settings"
+                                                 f" in the backend container) could not run (exit {rc}); see"
+                                                 " archive-settings.err")
+    error = document.get("error") if isinstance(document.get("error"), dict) else None
+    if error is not None or document.get("result") != "read":
+        why = (error or {}).get("message") or (error or {}).get("code") or f"result {document.get('result')}"
+        return line("SKIP", "archival_proposal", f"{skip_reason}; the deletion request check failed: {why}")
+    request = section(document, "deletion_request")
+    if document.get("deletion_pending") is not True or request.get("state") not in ("APPROVED", "RUNNING"):
+        return line("SKIP", "archival_proposal", skip_reason)
+    started, requested = utc_time(document.get("started_at")), utc_time(request.get("requested_at"))
+    if started is None or requested is None:
+        return line("SKIP", "archival_proposal", f"{skip_reason}; the deletion request check could not tell how long"
+                                                 f" {request_text(request)} has been open")
+    age = int((started - requested).total_seconds())
+    if age <= wait_minutes * 60:
+        return line("SKIP", "archival_proposal", skip_reason)
+    text = (f"deletion_request_waiting: {waited_text(request, age, wait_minutes)}, but history archival is not set up"
+            " (PARTFLOW_ARCHIVE_DIR is empty), so nothing")
+    if request.get("state") == "APPROVED":
+        return line("FAIL", "archival_proposal", f"{text} carries it out: set up the history archive task (SYNOLOGY_NAS"
+                                                 " §11.8) or cancel the request in PartFlow")
+    return line("FAIL", "archival_proposal", f"{text} finishes it: set up the history archive task (SYNOLOGY_NAS §11.8),"
+                                             " whose next start makes it FAILED")
+
+
+def run_settings(arguments):
+    options = {"--skip-reason": None, "--deletion-wait-minutes": None}
+    positional = []
+    index = 0
+    while index < len(arguments):
+        name = arguments[index]
+        if name in options:
+            if index + 1 >= len(arguments) or options[name] is not None:
+                raise UsageError(f"{name} needs one value")
+            options[name] = arguments[index + 1]
+            index += 2
+            continue
+        positional.append(name)
+        index += 1
+    if len(positional) != 2 or not options["--skip-reason"]:
+        raise UsageError("settings needs SETTINGS_JSON RC --skip-reason TEXT [--deletion-wait-minutes N]")
+    rc = parse_rc(positional[1])
+    wait_minutes = parse_wait_minutes(options["--deletion-wait-minutes"])
+    text = settings_line(load(positional[0]), rc, options["--skip-reason"], wait_minutes)
     print(text)
     return 1 if text.startswith("FAIL ") else 0
 
@@ -448,6 +610,15 @@ def parse_rc(text):
     return int(text)
 
 
+def parse_wait_minutes(text):
+    """--deletion-wait-minutes: 1 to 1440, DELETION_WAIT_MINUTES when not given."""
+    if text is None:
+        return DELETION_WAIT_MINUTES
+    if not re.fullmatch(r"[1-9][0-9]{0,3}", text) or int(text) > 1440:
+        raise UsageError("--deletion-wait-minutes must be a whole number from 1 to 1440")
+    return int(text)
+
+
 def main(argv):
     # The lines are UTF-8 whatever the host interpreter's locale: a reason may cite "OPERATIONS_RUNBOOK §8" or carry a
     # report's own text, and check.sh, the scheduler's emails and the records read them as UTF-8.
@@ -455,12 +626,14 @@ def main(argv):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     try:
-        if not argv or argv[0] not in ("status", "archive", "reconcile"):
-            raise UsageError("the first argument must be status, archive or reconcile")
+        if not argv or argv[0] not in ("status", "archive", "settings", "reconcile"):
+            raise UsageError("the first argument must be status, archive, settings or reconcile")
         if argv[0] == "status":
             return run_status(argv[1:])
         if argv[0] == "archive":
             return run_archive(argv[1:])
+        if argv[0] == "settings":
+            return run_settings(argv[1:])
         return run_reconcile(argv[1:])
     except UsageError as exc:
         print(f"monitor_report: {exc}", file=sys.stderr)

@@ -62,9 +62,10 @@ the installation.
 | Name and publish a release (developers) | §10 of this guide |
 
 `deploy/production/pf` is the short command for the production stack: `install`, `update`, `backup`, `restore`,
-`status`, `archive` (the hourly work of the history archive job now, runbook §11) and `delete-permanently` (Work Orders
-and Part Numbers entered only for testing, runbook §10), each running the documented procedure ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any
-command).
+`status`, `archive` (the history archive job now, runbook §11) and `delete-permanently` (a permanent deletion request
+of Work Orders and Part Numbers entered only for testing, which the history archive job carries out, runbook §10), each
+running the documented procedure ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you
+run any command).
 
 ### 1.3 What is supported
 
@@ -163,10 +164,10 @@ the import), so that a running import can finish; the history archival preview a
 read, or write in one transaction at the end, so a stop can cut them off without a partial change. `restart: unless-stopped`, never `on-failure`, because with several workers a configuration refusal exits with code 0. When an outgoing mail server is set in Administration → Settings, `backend` connects to it through the `edge` network to send email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. The only published port: `127.0.0.1:${PARTFLOW_HTTP_PORT}` to container port 80; there is deliberately no setting for the bind address. No `depends_on`, so it keeps serving the screens while `backend` is stopped. 200 s stop grace period. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Applies database migrations and grants in one transaction. Needs a backup option (Migrations, below). Mounts the backup folder read-only at `/backups`. |
-| `db-roles` | Ops job: `python -m app.cli provision-roles` (default), `apply-grants` or `delete-permanently` | Creates or repairs the database roles and applies the grants (Database roles, below); `pf delete-permanently` runs the deletion of test data in it ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §10). Connects as the owner role and mounts the three secret files. |
+| `db-roles` | Ops job: `python -m app.cli provision-roles` (default), `apply-grants` or `delete-permanently` | Creates or repairs the database roles and applies the grants (Database roles, below); `pf delete-permanently` shows the preview of a deletion of test data in it and records the operator's permanent deletion request, which the history archive job carries out ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §10). Connects as the owner role and mounts the three secret files. |
 | `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` or `backup-rotate` | Used by `backup.sh`. No network, no database and no secret; mounts only the backup folder at `/backups`. |
 | `status` | Ops job: `python -m app.cli status` | A read-only report as `partflow_app`, with the backup folder mounted read-only. Used by `check.sh`. |
-| `maintenance` | Ops job: `python -m app.cli history-archive <step>` | The history archive job ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §11), run by `archive.sh` (and `status` by `check.sh`). Connects as the database role `partflow_maintenance` and mounts only its password file. The only service that mounts the archive folder (at `/archive`); `archive.sh` adds the copy folder at `/archive-copy` when it is usable (Archive folders, below). Network `internal` only. It exports, verifies and copies archives and then purges the archived Movement history from the database, after `archive.sh` took the pre-purge backup; it never mounts the backup folder. |
+| `maintenance` | Ops job: `python -m app.cli history-archive <step>` | The history archive job ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §10, §11), run by `archive.sh` (and `status` by `check.sh`). Connects as the database role `partflow_maintenance` and mounts only its password file. The only service that mounts the archive folder (at `/archive`); `archive.sh` adds the copy folder at `/archive-copy` when it is usable (Archive folders, below). Network `internal` only. It exports, verifies and copies archives and then purges the archived Movement history from the database, and it carries out the permanent deletion requests (the deletion of the stored rows of Work Orders and Part Numbers entered only for testing, in one transaction), each after `archive.sh` took its pre-purge backup; it never mounts the backup folder. |
 
 Every service has a restart policy, memory and processor limits from `.env.production`, and log rotation (`json-file`,
 10 MiB per file, 5 files). Every long-running service has a health check; the `backend` health check calls the
@@ -187,7 +188,7 @@ example file are exactly the `${NAME}` references of the two production Compose 
 | `PARTFLOW_ACCEPT_SCHEMA_REVISION` | Rollback path 2 only (runbook §6): the one database revision the running release may serve. `release.sh` clears it. | empty |
 | `PARTFLOW_SECRETS_DIR` | Absolute path of the secrets folder, outside the release checkout (folder mode 0700, file mode 0444). | required |
 | `PARTFLOW_BACKUP_DIR` | Absolute path of the production backup folder: outside the release checkout, the secrets folder and any archive folder, never shared with another installation or a restore drill, mode 0700, owned by the operating account. It must exist before the first `$PF` command, because **every** `$PF` command needs it. | required |
-| `PARTFLOW_ARCHIVE_DIR` | Absolute path of the archive folder of History archival & purge (Archive folders, below). Only the `maintenance` service mounts it. | required before the first archival run; empty until then |
+| `PARTFLOW_ARCHIVE_DIR` | Absolute path of the archive folder of History archival & purge (Archive folders, below). Only the `maintenance` service mounts it. The history archive job, which also carries out the permanent deletion requests, refuses to work without it. | required before the first archival run and the first permanent deletion request; empty until then |
 | `PARTFLOW_ARCHIVE_COPY_DIR` | Absolute path of the off-host copy folder on another device (Archive folders, below). Empty: a run waits for its copy to be confirmed in Administration. | empty (optional) |
 | `PARTFLOW_SITE_TIMEZONE` | The factory's time zone, as an IANA name such as `America/Los_Angeles` (§6). | required |
 | `PARTFLOW_HTTP_PORT` | Loopback port that the reverse proxy connects to. | `18080` |
@@ -244,7 +245,7 @@ hold the archives; the backend never sees either of them.
 
 | Folder | Setting | Rules |
 | --- | --- | --- |
-| Archive folder | `PARTFLOW_ARCHIVE_DIR` | Required before the first archival run. An absolute path, written unquoted, without spaces or `:`; outside the release checkout, the secrets folder and the backup folder. Owned by the account that runs `archive.sh` and `check.sh` (the same account as the backup folder; `root` on the NAS), mode 0700: the `maintenance` job runs as that account (`--user`) and writes there. Without the setting, the `maintenance` service mounts a path that does not exist, so a run fails instead of writing anywhere else. Copied off the host with the backups (NAS guide §11.3). |
+| Archive folder | `PARTFLOW_ARCHIVE_DIR` | Required before the first archival run and before the first permanent deletion request (the history archive job carries both out and refuses to work without it). An absolute path, written unquoted, without spaces or `:`; outside the release checkout, the secrets folder and the backup folder. Owned by the account that runs `archive.sh` and `check.sh` (the same account as the backup folder; `root` on the NAS), mode 0700: the `maintenance` job runs as that account (`--user`) and writes there. Without the setting, the `maintenance` service mounts a path that does not exist, so a run fails instead of writing anywhere else. Copied off the host with the backups (NAS guide §11.3). |
 | Copy folder | `PARTFLOW_ARCHIVE_COPY_DIR` | Optional. A folder on **another device**, such as a network share or a USB disk mounted on the host, writable by the same account. With it, each archive is copied there and checked, and the run goes on to its pre-purge backup and purge unattended; the purge receipt is copied there too. `archive.sh` and `check.sh` mount it at `/archive-copy` only while it exists, is writable and lies on a file system that is neither the archive folder's nor the root file system `/`, and `archive.sh` checks this again before every step. The mount is a long-syntax bind with `create_host_path: false` in a generated Compose override file (`docker compose run -v` would create a missing folder), so Docker refuses a folder that vanished in between. A disk or share that is not mounted is therefore never mistaken for a copy. Without it, a run waits until its copy is confirmed in Administration. |
 
 Layout of the archive folder (the copy folder holds the same names):
@@ -265,8 +266,11 @@ Files have mode 0600 and folders 0700, as in the backup folder. `sha256sum -c SH
 every file with standard tools alone; the purge receipt lies outside it. The copy folder also receives the receipt of
 a run whose archive the job copied there. A move to another host takes the archive folder along (runbook §6 and §11).
 
-**Space.** Before each purge, `archive.sh` takes a backup of the kind `pre-purge` in the backup folder (one dump each;
-Administration → Backups keeps the newest 3 by default, runbook §3): plan the backup folder's space for them. A purge
+**Space.** Before each purge and before each permanent deletion, `archive.sh` takes a backup of the kind `pre-purge` in
+the backup folder (one dump each, named after the run's archive name or the deletion request's label; Administration →
+Backups keeps the newest 3 of both together by default, runbook §3): plan the backup folder's space for them.
+Deletions and purges share that number, so a series of deletions can rotate out the pre-purge backup of an earlier
+purge: raise **Pre-purge backups kept** before a session of test-data deletions when that backup still matters. A purge
 frees space inside the database for new Movements, so the database stops growing, but its files shrink only with
 `VACUUM FULL` (runbook §11).
 
@@ -358,18 +362,19 @@ The production database has three roles:
 | --- | --- | --- |
 | Owner (`POSTGRES_USER`, default `partflow_owner`) | `db`, `migrate`, `db-roles`, backups | The PostgreSQL superuser created with the database; it owns every object. Its name must differ from the two roles below. |
 | `partflow_app` | `backend` (the API and its commands `reconcile`, `revision` and the recovery commands) and `status` | Holds only the privileges in the next table. |
-| `partflow_maintenance` | `maintenance` (the history archive job, runbook §11) | Reads the history it archives, writes the archive records (`history_archive_runs`, `history_archived_flows`) and their audit rows, and purges archived Movements; it holds `SELECT` on a named list of tables, `SELECT` and `UPDATE` on `history_archive_runs`, `SELECT`, `INSERT` and `UPDATE` on `history_archived_flows`, `INSERT` on `audit_events`, and `SELECT` and `DELETE` on `part_movements`, its only `DELETE`. The row trigger `trg_part_movements_guard_delete` refuses the deletion of every Movement, for every role, the owner included, except the archived rows of a run in `PURGING`. |
+| `partflow_maintenance` | `maintenance` (the history archive job, runbook §10, §11) | Reads the history it archives, writes the archive records (`history_archive_runs`, `history_archived_flows`) and their audit rows, purges archived Movements, and carries out the permanent deletion requests. It holds `SELECT` on `alembic_version`, `application_policy`, `areas`, `machines`, `operations`, `role_permissions`, `roles`, `scan_stations`, `users`, `worker_sessions`, `workers` and `deletion_request_rows`; `SELECT` and `DELETE` on `assigned_route_steps`, `assigned_routes`, `part_movements`, `part_numbers`, `quantity_flow_lineage`, `quantity_flows` and `work_order_allocations`; `SELECT`, `UPDATE` and `DELETE` on `work_orders` and `work_order_demands` (`UPDATE` only because locking their rows needs it: a statement trigger refuses every `UPDATE` by this role); `SELECT`, `INSERT` and `DELETE` on `audit_events`; `SELECT` and `UPDATE` on `history_archive_runs` and `deletion_requests`; and `SELECT`, `INSERT` and `UPDATE` on `history_archived_flows`. Its `DELETE` covers exactly the ten tables a permanent deletion deletes from, and a row trigger on each of them refuses every deleted row, for every role, the owner included, except the archived Movements of a run in `PURGING` (`trg_part_movements_guard_delete`) and the stored rows of the `RUNNING` deletion request that the job names (`trg_<table>_guard_delete`, and the same Movement guard); without that request, only the application's own earlier deletes on three tables pass (the future steps of a route adjustment, a demand line removal, a Part Number master deletion), never for this role. It records no request: only a user (in PartFlow) or the owner (`pf delete-permanently`) does. |
 
 | Table class | `partflow_app` privileges | Tables |
 | --- | --- | --- |
-| append-only | `SELECT`, `INSERT` | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions` and `history_archive_runs` (a row trigger limits the changes) |
+| append-only | `SELECT`, `INSERT` | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations`, `deletion_request_rows` |
+| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions`, `history_archive_runs` and `deletion_requests` (a row trigger limits the changes: a user may only cancel an `APPROVED` deletion request) |
 | no update | `SELECT`, `INSERT`, `DELETE` | `assigned_route_steps` |
 | read only | `SELECT` | `alembic_version`, `history_archived_flows` |
 | ordinary | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | every other table |
 
 This table holds the privileges of `partflow_app`. `partflow_maintenance` holds only the list of the role table above,
-so its `DELETE` on `part_movements`, which the row trigger limits to the purge, is not a class of this table.
+so its `DELETE` on the ten tables of a permanent deletion, which their row triggers limit to the purge and to a
+`RUNNING` deletion request, is not a class of this table.
 
 - `provision-roles` (the default of `db-roles`) creates or repairs `partflow_app` and `partflow_maintenance` as
   `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, with no membership, no per-role setting and no
@@ -533,9 +538,9 @@ Strict Transport Security (HSTS) is the reverse proxy's job; `web` does not set 
 | `release.sh` | Installs a new release: backup, build, migration, switch and checks. | runbook §5 |
 | `smoke.sh` | Checks a running release through `web` on the loopback port. It first waits, up to 120 s, while `web` does not accept connections yet or answers 502/504 for a backend that is still starting, because `up -d` returns before they answer. | runbook §5 |
 | `backup.sh` | Takes, verifies and rotates a backup. | runbook §3 |
-| `archive.sh` | The history archive job: run every 5 minutes with `--scheduled` by the host scheduler, it does the hourly work of History archival & purge once an hour at the Start minute of Administration: the export, verification and off-host copy of a requested run, its pre-purge backup (`backup.sh --kind pre-purge`), the purge of the archived Movement history from the database and the full reconciliation after it. | runbook §11 |
+| `archive.sh` | The history archive job: run every 5 minutes with `--scheduled` by the host scheduler. At every start it carries out an open permanent deletion request at once: its pre-purge backup (`backup.sh --kind pre-purge`), the deletion in one transaction and the full reconciliation after it. Once an hour, at the Start minute of Administration, it does the hourly work of History archival & purge: the export, verification and off-host copy of a requested run, its pre-purge backup, the purge of the archived Movement history from the database and the full reconciliation after it. | runbook §10, §11 |
 | `restore-test.sh` | Restores a backup into a throwaway stack and checks it. | runbook §4 |
-| `check.sh` | Run every 15 minutes by the host scheduler, whose failure notification is the alert. It checks HTTPS readiness, the certificate, the containers, restarts, backend errors, the disks, the read-only `status` report and the read-only archival status, never changes anything, and exits non-zero when there is something to report. | runbook §2 |
+| `check.sh` | Run every 15 minutes by the host scheduler, whose failure notification is the alert. It checks HTTPS readiness, the certificate, the containers, restarts, backend errors, the disks, the read-only `status` report and the read-only archival status (a permanent deletion request that has waited longer than 15 minutes included), never changes anything, and exits non-zero when there is something to report. | runbook §2 |
 | `scheduled-reconcile.sh` | Runs the full reconciliation once a day, after the daily backup. | runbook §7 |
 | `reconcile_regression.py`, `monitor_report.py` | Helpers that the scripts call; never run them by hand. | — |
 
@@ -784,8 +789,9 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §3.1 Scripts and monitoring: `check.sh` reports a backup older than the backup interval plus 2 hours by default, no longer 26 hours. |
-| 2026-11-18 | uncommitted | §3.1: the history archive job purges archived Movement history: the `maintenance` service and `archive.sh` delete through the purge, the maintenance role's `DELETE` on `part_movements` and its row guard, the purge receipt beside the archive folder, and the space of the pre-purge backups and of the database after a purge. |
+| 2026-11-18 | uncommitted | §1.2, §3.1: permanent deletion requests: `pf delete-permanently` records a request that the history archive job carries out after a pre-purge backup, so the archive folder is needed for it; the maintenance role's grants and row guards on the ten tables a deletion deletes from, the table classes of the two request tables, `archive.sh` and `check.sh` for the requests, and the Pre-purge backups kept that deletions and purges share. |
+| 2026-11-18 | `d094f5e` | §3.1 Scripts and monitoring: `check.sh` reports a backup older than the backup interval plus 2 hours by default, no longer 26 hours. |
+| 2026-11-18 | `d094f5e` | §3.1: the history archive job purges archived Movement history: the `maintenance` service and `archive.sh` delete through the purge, the maintenance role's `DELETE` on `part_movements` and its row guard, the purge receipt beside the archive folder, and the space of the pre-purge backups and of the database after a purge. |
 | 2026-11-17 | `2f12d33` | §1.2, §3.1, §8: `pf archive`, the `maintenance` service and the role it uses, `archive.sh`, the archive and copy folders and their settings, and the 610 s wait of the history archival routes; the current build step exports and copies archives and never deletes anything. |
 | 2026-11-17 | `01ce427` | §1.2, §3.1: `pf delete-permanently` in the list of `pf` commands and as a command of `db-roles`. |
 | 2026-11-17 | `1fc96e1` | §3.1: the rate limits of the passkey requests. |

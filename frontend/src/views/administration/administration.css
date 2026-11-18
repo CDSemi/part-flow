@@ -548,6 +548,16 @@
   color: var(--muted);
   font-size: 12.5px;
   white-space: pre-wrap;
+}
+
+/* Prose of a table (a reason, or what a deletion request came to) wraps
+   only between words. Its column never gets narrower than 6.5rem, so the
+   table's automatic layout cannot squeeze a word in two; only a word
+   longer than that — a pasted link, or a table or constraint name in a
+   failure reason — breaks, anywhere, rather than widening the table. */
+.admin-runreason,
+.admin-runresult {
+  min-width: 6.5rem;
   overflow-wrap: anywhere;
 }
 
@@ -560,6 +570,24 @@
 .admin-runsub {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* A record a permanent deletion request names (`Work Order 007201`,
+   `Part Number A-100`): it wraps between its kind and its number, and the
+   number stays whole, since a break inside it reads as two records; only
+   a number too long for a line (`long`) may break anywhere, so that it
+   never widens the table. */
+.admin-runscope {
+  font-weight: 700;
+}
+
+.admin-runname {
+  white-space: nowrap;
+}
+
+.admin-runname.long {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* An archive name or a SHA-256: a smaller monospace that wraps anywhere

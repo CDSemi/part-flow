@@ -266,7 +266,7 @@ Instead:
 The following rules are mandatory:
 
 1. A recorded PN must never become untraceable.
-2. Movement history is immutable: no Movement is ever changed, and Movements leave the database only through the explicit maintenance of §28 Administrative Archival and Purge — the archival purge, after a verified archive of them exists off the host, and the interim permanent deletion of test data.
+2. Movement history is immutable: no Movement is ever changed, and Movements leave the database only through the explicit maintenance of §28 Administrative Archival and Purge — the archival purge, after a verified archive of them exists off the host, and a permanent deletion request for Work Orders and Part Numbers that should never have been entered.
 3. Current production state must be derived from Movement history whenever practical; for a flow whose Movements were purged by archival, from its carry-forward record (§28 Administrative Archival and Purge).
 4. A PN may simultaneously have quantity in multiple Areas.
 5. A PN may simultaneously have quantity assigned to multiple Machines.
@@ -1816,7 +1816,11 @@ No permission rewrites historical data directly: the initial Operator role holds
 
 ## Super User
 
-The initial Super User role grants every permission key: every capability listed in this section. Its grants are ordinary grants, not an implicit superuser: an authorized administrator may rename the role or change what it grants like any other role's. When a release adds a permission key, every role that holds every other key at that moment receives the new key too, so a role that holds every key keeps holding every key, and a role an administrator has narrowed stays narrowed.
+The initial Super User role grants every permission key: every capability listed in this section, including one that no other initial role grants:
+
+- delete Work Orders and Part Numbers permanently — request the permanent deletion of a Work Order or a Part Number with all its data, and cancel a request until it starts (§28 Administrative Archival and Purge).
+
+Its grants are ordinary grants, not an implicit superuser: an authorized administrator may rename the role or change what it grants like any other role's. When a release adds a permission key, every role that holds every other key at that moment receives the new key too, so a role that holds every key keeps holding every key, and a role an administrator has narrowed stays narrowed.
 
 ## User Sign-in
 
@@ -2060,6 +2064,8 @@ Completed Work Orders (every Work Order Demand fully allocated, §8.2) never app
 
 If the PN already has active quantity, the view must show the existing distribution and require explicit confirmation of intent; it must never automatically create additional physical quantity or merge Quantity Flows.
 
+A User who may delete Work Orders and Part Numbers permanently (§20) also finds **Delete permanently…** in Work Order Details: it requests the permanent deletion of that Work Order with all its data and shows the request's state (§28 Administrative Archival and Purge).
+
 Work Order Intake must not grow into ERP-style customer, pricing, invoicing, shipping, purchasing, or accounting functionality.
 
 ---
@@ -2093,7 +2099,8 @@ It must provide:
 - creating a master record ahead of first production use: the entered PN is canonicalized (trimmed, internal whitespace rejected, uppercased — §7 Part Number), and one master record may exist per canonical PN; create-on-first-use at intake (§8.1) is unaffected,
 - editing the metadata: name/description, informational revision, ERP id, and uploading, changing, or removing the PN image (removing returns to the shared default placeholder),
 - viewing and printing a simple PN barcode label: the `PF:PN:<part-number>` barcode with the PN text beneath it — no additional barcode configuration; and printing the labels of many PNs at once, chosen from the PNs of the running Work Orders (released and not completed, §8.2) or from the master records, which can be ordered by PN, name, date added (when the master record was created) or last use in a Work Order (when the newest Work Order Demand line for the PN was created, completed Work Orders included) — every printed label is that same label,
-- hard deletion of a master record per §8.1/§28: deletion removes only the metadata, never cascades into WorkOrderDemand, QuantityFlow, PartMovement, Allocation, or history, every surface keeps displaying the canonical PN normally, and a record may be created again later for the same canonical PN. There is no PN archive, no soft-delete, and no active/inactive lifecycle.
+- hard deletion of a master record per §8.1/§28: deletion removes only the metadata, never cascades into WorkOrderDemand, QuantityFlow, PartMovement, Allocation, or history, every surface keeps displaying the canonical PN normally, and a record may be created again later for the same canonical PN. There is no PN archive, no soft-delete, and no active/inactive lifecycle,
+- for a User who may delete Work Orders and Part Numbers permanently (§20), **Delete permanently…** in the Part Number dialog: unlike the hard deletion of the master record, it requests the permanent deletion of the Part Number with all its production data (§28 Administrative Archival and Purge).
 
 ---
 
@@ -2137,7 +2144,7 @@ Administration stays focused on system administration:
 - scan behavior,
 - Worker session policies (the scanned-session sliding inactivity timeout — one default value with per-Area overrides — and the badge-confirmation options of `DONE`, `QUEUE` return and Undo, §19),
 - Department display settings (per Department — including the Production Board rotation timing, §21),
-- history archival and purge maintenance with its retention and purge batch settings (§28 Administrative Archival and Purge),
+- history archival and purge maintenance with its retention and purge batch settings, and the permanent deletion requests (§28 Administrative Archival and Purge),
 - application settings.
 
 Machines, Route Templates, and PartNumber master metadata are not Administration screens: they are production master data managed permission-based in Management → Machines, Management → Planned Routes, and Management → Part Numbers (§20) with no duplicate Administration screens. Machines remain part of the minimum environment setup prerequisite — configured through Management → Machines before real production runs.
@@ -2329,9 +2336,10 @@ The system must preserve a complete audit trail for:
 - Undo,
 - Worker Sessions,
 - administrative configuration changes,
-- administrative archival and purge operations (who, when, scope, reason, result, the archive and its purge receipt).
+- administrative archival and purge operations (who, when, scope, reason, result, the archive and its purge receipt),
+- permanent deletion requests (who requested or cancelled them, when, the scope, the reason, each change of state, the pre-purge backup, and one record of each deleted Work Order and Part Number).
 
-Historical production records never disappear through normal application workflows — normal production runtime is append-only (**immutable during production runtime**). Only the explicit maintenance of *Administrative Archival and Purge* below removes production records: the archival purge, after a verified archive of them exists off the host, and the interim permanent deletion of test data. The archival purge never removes audit events.
+Historical production records never disappear through normal application workflows — normal production runtime is append-only (**immutable during production runtime**). Only the explicit maintenance of *Administrative Archival and Purge* below removes production records: the archival purge, after a verified archive of them exists off the host, and a permanent deletion request carried out by the host job. The archival purge never removes audit events; a permanent deletion removes the audit rows that concern only the records it deletes.
 
 Database constraints should enforce, whenever practical:
 
@@ -2359,14 +2367,16 @@ Normal production runtime is append-only and never silently rewrites or deletes 
 - if the PN appears again later, a new master metadata record may be created for the same canonical PN identity;
 - there is no PN archive, soft-delete, or tombstone kept merely to preserve PN identity — the canonical PN string itself fulfills that responsibility.
 
-**Permanent deletion of test data (interim operator tool).** Work Orders and Part Numbers that the owner entered only for testing in production may be deleted permanently, as if they had never been entered, by the operator command `deploy/production/pf delete-permanently` (`python -m app.cli delete-permanently`; OPERATIONS_RUNBOOK §10). It is the one exception to the append-only rule above, and an interim tool until an in-app delete for a Super User is designed together with history archival and purge:
+**Permanent deletion of Work Orders and Part Numbers.** Work Orders and Part Numbers that should never have been entered — for example records the owner entered only for testing in production — may be deleted permanently, as if they had never been entered. Besides the archival purge, it is the only exception to the append-only rule above:
 
-- it runs only as the database owner role, never through the application role or any application workflow; the application role gains no privilege;
-- it shows a preview by default; with `--confirm` it first takes a verified manual backup, then deletes in one transaction;
-- it deletes a Work Order with its demand lines, their allocations, the Quantity Flows released for them and every flow linked to those by lineage, their Movements, lineage edges and Assigned Route snapshots; a Part Number with its master record and every flow, demand line and allocation of that PN; and the audit rows that concern only these records;
+- a User whose role grants the permission to delete Work Orders and Part Numbers permanently (§20; initially the Super User role only) requests it with **Delete permanently…** in Work Order Details or in the Part Number dialog (§21); an operator on the server requests it with the command `deploy/production/pf delete-permanently` (OPERATIONS_RUNBOOK §10);
+- the request shows a preview first — what goes, or every refusal — and requires a reason and the Work Order Number or the Part Number typed again; PartFlow records it together with the exact rows it will delete; at most one request is open at a time, and a request may be cancelled until the host job starts it;
+- the web application only records requests: it never deletes production records itself, and the application role holds no delete privilege on an append-only table;
+- the host job carries a request out at its next start, within 5 minutes on the history archive task: first a verified pre-purge backup, then the deletion in one transaction as the maintenance database role, under row guards that admit the delete of exactly the rows the request recorded. Nothing is deleted, and the request fails with its reason, when the requesting User is no longer active or no longer holds the permission, or when the data changed after the request; it is then requested again;
+- it deletes a Work Order with its demand lines, their allocations, the Quantity Flows released for them and every flow linked to those by lineage, their Movements, lineage edges and Assigned Route snapshots; a Part Number with its master record and every flow, demand line and allocation of that PN; and the audit rows that concern only these records — never an audit row that records an earlier permanent deletion or a deletion request, which always stays;
 - it refuses, deleting nothing and naming each link, whenever the data to delete is linked to data that stays (a lineage link, one command or reversal spanning data that stays, stocked quantity that remaining allocations need, a Part Number still used by a Work Order that stays, a demand line on the Hot list);
-- it keeps exactly one new audit row (`DELETED`) per deleted Work Order and per deleted Part Number, recording the operator, the time, the reason, the backup and the row counts; audit rows that also concern records that stay are kept unchanged;
-- the deleted data remains in existing backups and their off-host copies until they age out.
+- it keeps exactly one new audit row (`DELETED`) per deleted Work Order and per deleted Part Number, recording the requesting User or the operator, the time, the reason, the request, the pre-purge backup and the row counts; audit rows that also concern records that stay are kept unchanged, and the request and each change of its state keep their own audit rows;
+- the deleted data remains in existing backups, the pre-purge backup among them, and their off-host copies until they age out.
 
 **Movement history retention, archival, and purge.** PartMovement is immutable during active production runtime: normal workflows never modify or delete Movement records. Immutability does **not** mean that every Movement row must live in the primary PostgreSQL database forever — archival and purge under an explicit retention policy is lifecycle/storage maintenance, separate from production runtime. As Movement history grows, PartFlow may apply a **configurable retention policy** (for example: keep N years of history in the primary database — the retention period is configuration, never a hard-coded number of years in domain rules). Older history is then:
 
@@ -2377,7 +2387,7 @@ Normal production runtime is append-only and never silently rewrites or deletes 
 
 The archival files become the long-term historical storage for the purged portion of history. Mandatory rules:
 
-- **Normal production runtime may never UPDATE or DELETE `PartMovement` rows.** The application role holds neither privilege; a statement trigger refuses every UPDATE and TRUNCATE; and a row trigger refuses the DELETE of any Movement except an archived Movement of the run that is purging now (state `PURGING`), older than that run's cutoff — the interim permanent deletion of test data, above, is the only other exception. Archive/purge is executed only through a **separate privileged Admin maintenance path** with its own authorization — the host job, as the maintenance database role, whose only DELETE privilege is on Movements — never through the application role, the normal application workflows, or any production write path.
+- **Normal production runtime may never UPDATE or DELETE `PartMovement` rows.** The application role holds neither privilege; a statement trigger refuses every UPDATE and TRUNCATE; and a row trigger refuses the DELETE of any Movement except an archived Movement of the run that is purging now (state `PURGING`), older than that run's cutoff, and a Movement that the running permanent deletion request recorded (above). Archive/purge and permanent deletion are executed only through a **separate privileged Admin maintenance path** with its own authorization — the host job, as the maintenance database role, whose delete privileges cover only the tables that a purge or a permanent deletion deletes from, each guarded by a row trigger that admits only those rows — never through the application role, the normal application workflows, or any production write path.
 - **Never purge before a successful, verified archive export, never before the verified archive also exists off the host, and never without a fresh backup**: the maintenance job copies the archive to a second folder on another device and checks the copy, or a person copies it and confirms the copy in Administration; the job then takes a verified backup of the database (a pre-purge backup) that starts after the archive's verification, and records the backup's name on the run before it deletes anything.
 - The archive must retain enough data to identify the PN, quantity, Movement type, Area, Operation, Machine, Worker, timestamps, relationships/correction context, and the required audit fields.
 - The PN in archived history is stored directly as the canonical PN string — never dependent on the PN master.
@@ -2504,7 +2514,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §2, §6, §8.11, §11, §13, §16, §20, §21, §27 and §28: runs purge archived Movement history after the off-host copy and a pre-purge backup, and the carry-forward record keeps every figure unchanged. |
+| 2026-11-18 | uncommitted | §6, §20, §21 and §28: a holder of the new permission to delete Work Orders and Part Numbers permanently requests the deletion in PartFlow, and the host job carries it out after a pre-purge backup under row guards; the operator command records a request too. |
+| 2026-11-18 | d094f5e | §2, §6, §8.11, §11, §13, §16, §20, §21, §27 and §28: runs purge archived Movement history after the off-host copy and a pre-purge backup, and the carry-forward record keeps every figure unchanged. |
 | 2026-11-17 | 2f12d33 | §20 and §28: the permission to run history archival and purge, the cutoff and flow-component rules of a run, and the off-host copy of the archive. |
 | 2026-11-17 | 4539a2b | §20 and §21: Administration → Security gathers the sign-in settings, with configurable password rules and Remember me. |
 | 2026-11-17 | 4be2389 | §15 and §20: a User who may manage Scan Stations can view any Scan Station from a browser that is not enrolled, read-only. |

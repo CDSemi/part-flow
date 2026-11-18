@@ -1,18 +1,22 @@
-"""Tests for ``python -m app.cli delete-permanently`` (interim test-data deletion).
+"""Tests for ``python -m app.cli delete-permanently`` (the operator's permanent deletion).
 
 Every scenario is built through the real API (Work Orders, releases,
 transfers, a partial transfer, a completion into the Stockroom,
 allocations, combines, Scan Station receipts and quantity additions) in
 one module database; each test uses its own Part Numbers and Work Order
-Numbers. The deletion runs as the database owner (``owner_engine``, as
-``pf delete-permanently`` runs it through the owner's one-shot service);
-everything else, also in the application-role test mode, runs as the
-application role.
+Numbers. The command runs as the database owner (``owner_engine``, as
+``pf delete-permanently`` runs it through the owner's one-shot service):
+with ``--confirm`` it records a deletion request with the operator's name
+and reason (history archival step 3), which the host job carries out — as
+the maintenance role in the application-role test mode, as the owner
+otherwise — after the pre-purge backup; everything else, also in the
+application-role test mode, runs as the application role.
 
 After every successful deletion: reconciliation (all checks) is clean,
 the deleted Work Order Number can be entered again, exactly one audit
-row remains per deleted Work Order and Part Number, and every guard
-trigger is enabled. A preview and a refusal never change anything.
+row remains per deleted Work Order and Part Number (the operator in its
+metadata, no actor), and no guard trigger was ever disabled. A preview
+and a refusal never change anything or record a request.
 """
 
 import datetime
@@ -32,16 +36,17 @@ from sqlalchemy.engine import URL, make_url
 
 from alembic import command
 from app import cli
-from app.application import permanent_deletion, reconciliation
+from app.application import history_archive_job, permanent_deletion, reconciliation
 from app.core.config import get_settings
 from app.infrastructure.database_privileges import GUARD_TRIGGERS
 from app.main import create_app
+from tests.archive_dataset import carry_out_request, job_engine
 from tests.auth_harness import admin_of, station_device_client
 from tests.conftest import app_mode_roles, owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _DB_URL_ENV = "DATABASE_URL"
-_TABLES = permanent_deletion.LOCK_ORDER
+_TABLES = (*sorted(permanent_deletion.DELETE_ORDER), "deletion_requests")
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -332,6 +337,14 @@ def owner(builder: Builder) -> Iterator[Engine]:
     engine.dispose()
 
 
+@pytest.fixture(scope="module")
+def job(builder: Builder) -> Iterator[Engine]:
+    """The host job: the maintenance role in the application-role mode, else the owner."""
+    engine = job_engine(builder.url)
+    yield engine
+    engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -349,7 +362,6 @@ def _request(
         operator="Test Operator",
         reason="test data entered by mistake",
         confirm=confirm,
-        backup_name="20261117T010203Z-manual",
     )
 
 
@@ -363,6 +375,28 @@ def _run(
     return permanent_deletion.run_deletion(
         engine, _request(work_orders, part_numbers, confirm=confirm), lock_timeout_seconds=10
     )
+
+
+class Deleted(NamedTuple):
+    """The recorded request (the command's report) and the job's deletion."""
+
+    recorded: permanent_deletion.DeletionReport
+    report: history_archive_job.JobReport
+
+
+def _delete(
+    owner: Engine,
+    job: Engine,
+    work_orders: tuple[str, ...] = (),
+    part_numbers: tuple[str, ...] = (),
+) -> Deleted:
+    """``--confirm`` records the request; the host job carries it out."""
+    recorded = _run(owner, work_orders, part_numbers, confirm=True)
+    assert recorded.result == "requested", permanent_deletion.deletion_document(recorded)
+    assert recorded.exit_code == 0
+    assert recorded.recorded is not None
+    request_id = int(cast(int, recorded.recorded["id"]))
+    return Deleted(recorded, carry_out_request(job, owner, request_id))
 
 
 def _fingerprint(engine: Engine) -> dict[str, str]:
@@ -394,16 +428,20 @@ def _trigger_states(connection: sa.Connection) -> dict[str, str]:
 
 def _assert_after_deletion(
     builder: Builder,
-    report: permanent_deletion.DeletionReport,
+    deleted: Deleted,
     *,
     work_order_ids: list[int],
     part_numbers: list[str],
 ) -> None:
-    assert report.result == "deleted", permanent_deletion.deletion_document(report)
+    report = deleted.report
+    document = history_archive_job.job_document(report)
+    assert report.result == "deleted", document
     assert report.exit_code == 0
+    # No guard trigger was ever disabled: the row guards admitted the stored rows.
     with builder.engine.connect() as connection:
         states = _trigger_states(connection)
     assert states == dict.fromkeys(GUARD_TRIGGERS, "O")
+    backup = report.details["backup"]["name"]
     for work_order_id in work_order_ids:
         rows = builder.column(
             "SELECT metadata FROM audit_events WHERE entity_type = 'WorkOrder' AND entity_id = :id",
@@ -413,8 +451,17 @@ def _assert_after_deletion(
         record = rows[0][permanent_deletion.AUDIT_KEY]
         assert record["operator"] == "Test Operator"
         assert record["reason"] == "test data entered by mistake"
-        assert record["backup"] == "20261117T010203Z-manual"
+        assert record["backup"] == backup
+        assert (record["source"], record["request_id"]) == ("cli", report.request_id)
         assert record["deleted"]["work_orders"] >= 1
+        assert (
+            builder.scalar(
+                "SELECT actor_user_id FROM audit_events WHERE entity_type = 'WorkOrder'"
+                " AND entity_id = :id",
+                id=str(work_order_id),
+            )
+            is None
+        )
         assert (
             builder.scalar("SELECT count(*) FROM work_orders WHERE id = :id", id=work_order_id) == 0
         )
@@ -432,8 +479,7 @@ def _assert_after_deletion(
                 )
                 == 0
             )
-    document = permanent_deletion.deletion_document(report)
-    assert len(document["audit_rows"]) == len(work_order_ids) + len(part_numbers)  # type: ignore[arg-type]
+    assert len(report.details["audit_rows"]) == len(work_order_ids) + len(part_numbers)
     clean = reconciliation.run_reconciliation(builder.engine)
     assert reconciliation.result_of(clean) == ("clean", 0), reconciliation.report_document(clean)
 
@@ -444,7 +490,7 @@ def _assert_after_deletion(
 
 
 def test_released_work_order_is_deleted_as_if_never_entered(
-    builder: Builder, owner: Engine
+    builder: Builder, owner: Engine, job: Engine
 ) -> None:
     s = _suffix()
     pn_a, pn_b = f"DEL-A-{s}", f"DEL-B-{s}"
@@ -486,21 +532,10 @@ def test_released_work_order_is_deleted_as_if_never_entered(
     assert counts["part_numbers"] == 0
     assert counts["audit_events"] >= 3
 
-    report = _run(owner, (number,), confirm=True)
-    _assert_after_deletion(builder, report, work_order_ids=[work_order_id], part_numbers=[])
-    # Every guard that refuses a delete on the touched tables; the INSERT-only
-    # scope of the maintenance role's audit rows (Phase 16) and the UPDATE /
-    # TRUNCATE statement guard of part_movements (history purge, step 2:
-    # its row guard refuses the deletes) stay enabled.
-    assert sorted(report.guard_triggers) == sorted(
-        trigger
-        for trigger in GUARD_TRIGGERS
-        if GUARD_TRIGGERS[trigger].table
-        in ("audit_events", "part_movements", "quantity_flow_lineage", "work_order_allocations")
-        and trigger
-        not in ("trg_audit_events_maintenance_scope", "trg_part_movements_forbid_mutation")
-    )
-    assert "trg_part_movements_guard_delete" in report.guard_triggers
+    deleted = _delete(owner, job, (number,))
+    _assert_after_deletion(builder, deleted, work_order_ids=[work_order_id], part_numbers=[])
+    # The job deleted exactly the rows the request stored.
+    assert deleted.report.details["deleted"] == counts
     # No trace of the deleted records is left besides the one audit row.
     assert (
         builder.scalar(
@@ -531,7 +566,9 @@ def test_released_work_order_is_deleted_as_if_never_entered(
     assert again != work_order_id
 
 
-def test_part_numbers_with_flows_and_internal_work_order(builder: Builder, owner: Engine) -> None:
+def test_part_numbers_with_flows_and_internal_work_order(
+    builder: Builder, owner: Engine, job: Engine
+) -> None:
     s = _suffix()
     pn_p, pn_q = f"DEL-P-{s}", f"DEL-Q-{s}"
     number = f"TEST-P-{s}"
@@ -564,10 +601,10 @@ def test_part_numbers_with_flows_and_internal_work_order(builder: Builder, owner
     assert entries[internal_id]["internal"] is True
     assert entries[internal_id]["named"] is False
 
-    report = _run(owner, (number,), (pn_p, pn_q), confirm=True)
+    deleted = _delete(owner, job, (number,), (pn_p, pn_q))
     _assert_after_deletion(
         builder,
-        report,
+        deleted,
         work_order_ids=[work_order_id, internal_id],
         part_numbers=[pn_p, pn_q],
     )
@@ -582,7 +619,9 @@ def test_part_numbers_with_flows_and_internal_work_order(builder: Builder, owner
     builder.work_order(number, [(pn_p, 1)])
 
 
-def test_kept_audit_rows_that_also_concern_other_records(builder: Builder, owner: Engine) -> None:
+def test_kept_audit_rows_that_also_concern_other_records(
+    builder: Builder, owner: Engine, job: Engine
+) -> None:
     s = _suffix()
     pn = f"DEL-H-{s}"
     number, stay_number = f"TEST-H-{s}", f"STAY-H-{s}"
@@ -601,10 +640,10 @@ def test_kept_audit_rows_that_also_concern_other_records(builder: Builder, owner
     )
     assert len(kept_ids) == 1
 
-    report = _run(owner, (number,), confirm=True)
-    _assert_after_deletion(builder, report, work_order_ids=[work_order_id], part_numbers=[])
-    assert report.plan is not None
-    listed = {int(cast(int, row["id"])) for row in report.plan.kept_audit_rows}
+    deleted = _delete(owner, job, (number,))
+    _assert_after_deletion(builder, deleted, work_order_ids=[work_order_id], part_numbers=[])
+    assert deleted.recorded.plan is not None
+    listed = {int(cast(int, row["id"])) for row in deleted.recorded.plan.kept_audit_rows}
     assert set(kept_ids) <= listed
     assert builder.scalar(
         "SELECT count(*) FROM audit_events WHERE id = ANY(:ids)", ids=kept_ids
@@ -636,7 +675,9 @@ def _assert_refused(
     return [refusal.code for refusal in report.plan.refusals]
 
 
-def test_refused_combine_with_a_flow_of_another_work_order(builder: Builder, owner: Engine) -> None:
+def test_refused_combine_with_a_flow_of_another_work_order(
+    builder: Builder, owner: Engine, job: Engine
+) -> None:
     s = _suffix()
     pn = f"DEL-M-{s}"
     number, other = f"TEST-M-{s}", f"OTHER-M-{s}"
@@ -654,7 +695,7 @@ def test_refused_combine_with_a_flow_of_another_work_order(builder: Builder, own
         assert f"Quantity Flow {theirs}" in messages
         assert repr(other) in messages
     # Deleting both Work Orders together is allowed.
-    both = _run(owner, (number, other), confirm=True)
+    both = _delete(owner, job, (number, other))
     _assert_after_deletion(builder, both, work_order_ids=[work_order_id, other_id], part_numbers=[])
 
 
@@ -828,7 +869,7 @@ def run_cli(
 
 
 def test_cli_preview_then_confirm(
-    builder: Builder, owner: Engine, run_cli: Callable[..., CliRun]
+    builder: Builder, owner: Engine, job: Engine, run_cli: Callable[..., CliRun]
 ) -> None:
     s = _suffix()
     number = f" TEST CLI {s} "
@@ -854,17 +895,46 @@ def test_cli_preview_then_confirm(
     assert document["refusals"] == [] and document["audit_rows"] == []
     assert "preview" in preview.stderr
 
-    done = run_cli(*common, "--confirm", "--backup-name", "20261117T010203Z-manual")
-    assert done.exit_code == 0, done
-    assert (done.document["result"], done.document["mode"]) == ("deleted", "delete")
-    assert done.document["audit_rows"] == [
+    # --confirm records the operator's request; it deletes nothing itself.
+    requested = run_cli(*common, "--confirm")
+    assert requested.exit_code == 0, requested
+    assert (requested.document["result"], requested.document["mode"]) == ("requested", "delete")
+    request = requested.document["request"]
+    assert (request["state"], request["requested_by_operator"]) == ("APPROVED", "Ops")
+    assert request["requested_by_user_id"] is None
+    assert request["scope"] == {"work_order_numbers": [number], "part_numbers": []}
+    assert request["rows"] == requested.document["rows"]
+    assert (
+        requested.document["audit_rows"],
+        requested.document["guard_triggers"],
+        requested.document["backup"],
+    ) == ([], [], None)
+    assert "deletion request" in requested.stderr
+    assert _fingerprint(owner)["work_orders"] == before["work_orders"]
+    [created] = builder.column(
+        "SELECT metadata FROM audit_events WHERE entity_type = 'DeletionRequest'"
+        " AND entity_id = :id",
+        id=str(request["id"]),
+    )
+    assert created == {"source": "cli", "command": "request", "operator": "Ops"}
+    # While it is open, another request is refused.
+    open_again = run_cli(*common, "--confirm")
+    assert open_again.exit_code == 1
+    assert [item["code"] for item in open_again.document["refusals"]] == ["request_open"]
+    assert open_again.document["refusals"][0]["message"] == (
+        f"Deletion request {request['id']} is still open (APPROVED). Cancel it or wait until it"
+        " finishes before requesting another deletion."
+    )
+    # The host job carries it out.
+    report = carry_out_request(job, owner, int(request["id"]))
+    assert report.result == "deleted", history_archive_job.job_document(report)
+    assert report.details["audit_rows"] == [
         {
-            "id": done.document["audit_rows"][0]["id"],
+            "id": report.details["audit_rows"][0]["id"],
             "entity_type": "WorkOrder",
             "entity_id": str(work_order_id),
         }
     ]
-    assert done.document["guard_triggers"]
 
     refused = run_cli(*common, "--confirm")
     assert refused.exit_code == 1

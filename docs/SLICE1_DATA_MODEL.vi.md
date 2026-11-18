@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0041_phase16_history_purge`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0042_phase16_deletion_requests`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -125,10 +125,11 @@ hai.
 6. Một flow chiếm đúng một Area hiện tại. Khi một PN trải trên nhiều Area, mỗi Area giữ flow riêng của nó.
 7. Release không bao giờ gộp với số lượng active hiện có và không bao giờ ngầm tạo thêm số lượng. Release một PN đang có
    số lượng active cần một xác nhận ý định tường minh trên UI (§8).
-8. Lịch sử Movement là bất biến và chỉ-append: một Movement không bao giờ bị cập nhật, và chỉ việc purge của lưu trữ
-   lịch sử Movement mới xóa Movement, cụ thể là các Movement đã lưu trữ của những thành phần flow đã đóng trọn vẹn
-   (§11, §17). Trạng thái hiện tại phải dựng lại được từ các Movement còn giữ, với bản ghi chuyển tiếp của các flow đã
-   purge thay cho lịch sử của chúng (§15, §17 Các bảng lưu trữ lịch sử).
+8. Lịch sử Movement là bất biến và chỉ-append: một Movement không bao giờ bị cập nhật, và chỉ hai tác vụ bảo trì của
+   job trên host mới xóa Movement: việc purge của lưu trữ lịch sử Movement, cụ thể là các Movement đã lưu trữ của những
+   thành phần flow đã đóng trọn vẹn (§11, §17), và một yêu cầu xóa vĩnh viễn, cụ thể là các Movement của những flow mà
+   nó đã lưu (§17 Các yêu cầu xóa vĩnh viễn). Trạng thái hiện tại phải dựng lại được từ các Movement còn giữ, với bản
+   ghi chuyển tiếp của các flow đã purge thay cho lịch sử của chúng (§15, §17 Các bảng lưu trữ lịch sử).
 9. Việc tạo QuantityFlow (mang projection `current_area_id` ban đầu), snapshot AssignedRoute và việc insert Movement
    commit nguyên tử, hoặc không gì cả (§13).
 10. Một lần gửi release trùng với cùng `device_event_id` và cùng request đã chuẩn hóa trả về kết quả gốc và không tạo gì.
@@ -435,14 +436,18 @@ Các cột theo PROJECT_PROFILE §8.11. Một release ghi Movement `RECEIVED` nh
   mang giá trị này) và WorkOrderDemand khởi động dưới dạng `context.work_order_demand_id` để hiển thị audit. Không điều
   nào trong đó tạo quyền sở hữu: WorkOrderDemand không bao giờ sở hữu Movement (§3).
 - Dòng là bất biến và chỉ-insert. UPDATE và DELETE bị thu hồi khỏi application role, và các guard trigger từ chối mọi
-  UPDATE và TRUNCATE cùng việc DELETE bất kỳ dòng nào mà việc purge của một lần chạy lưu trữ đang `PURGING` không cho
-  phép (§17), theo rule ưu tiên ràng buộc PostgreSQL trước. Việc thu hồi được `apply-grants` áp dụng trên production
-  stack; database development và test giữ một owner role (§17). Cơ chế bảo vệ này ràng buộc ứng dụng mọi lúc. Đường duy
-  nhất xóa Movement là việc purge của lưu trữ lịch sử Movement (PROJECT_PROFILE §28), một đường bảo trì riêng, có đặc
-  quyền, nằm ngoài slice này: một User có quyền Run history archival and purge (`RUN_HISTORY_ARCHIVAL_AND_PURGE`) yêu
-  cầu một lần chạy trong Administration, và job trên host, với role bảo trì, xóa các Movement đã lưu trữ của những thành
-  phần flow đã đóng trọn vẹn sau khi archive được kiểm tra, được sao chép ra ngoài host và có một bản sao lưu pre-purge
-  (§17 Các bảng lưu trữ lịch sử).
+  UPDATE và TRUNCATE cùng việc DELETE bất kỳ dòng nào mà cả việc purge của một lần chạy lưu trữ đang `PURGING` lẫn một
+  yêu cầu xóa vĩnh viễn đang `RUNNING` đều không cho phép (§17), theo rule ưu tiên ràng buộc PostgreSQL trước. Việc thu
+  hồi được `apply-grants` áp dụng trên production stack; database development và test giữ một owner role (§17). Cơ chế
+  bảo vệ này ràng buộc ứng dụng mọi lúc. Chỉ hai đường bảo trì riêng, có đặc quyền, nằm ngoài slice này mới xóa Movement
+  (PROJECT_PROFILE §28), cả hai đều do job trên host thực hiện với role bảo trì. Trong việc purge của lưu trữ lịch sử
+  Movement, một User có quyền Run history archival and purge (`RUN_HISTORY_ARCHIVAL_AND_PURGE`) yêu cầu một lần chạy
+  trong Administration, và job xóa các Movement đã lưu trữ của những thành phần flow đã đóng trọn vẹn sau khi archive
+  được kiểm tra, được sao chép ra ngoài host và có một bản sao lưu pre-purge (§17 Các bảng lưu trữ lịch sử). Trong một
+  yêu cầu xóa vĩnh viễn, một User có quyền Delete Work Orders and Part Numbers permanently
+  (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), hoặc một operator trên host, yêu cầu xóa các Work Order được gọi
+  tên hoặc một Part Number, và job xóa đúng các dòng mà yêu cầu đã lưu sau một bản sao lưu pre-purge (§17 Các yêu cầu
+  xóa vĩnh viễn).
 
 ---
 
@@ -615,7 +620,7 @@ Các ràng buộc được liệt kê ở §17.
 |---|---|
 | `id` | Khóa chính identity kiểu `bigint`; thứ tự của nó là thứ tự ghi. |
 | `event_type` | `CREATED`, `UPDATED`, `DELETED` (xóa cứng bản ghi master và cấu hình) hoặc `ROUTE_ADJUSTED`. |
-| `entity_type` | Entity được audit: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`, `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`, `RouteTemplate`, `User`, `Role`, `ScanStationDevice` hoặc `AssignedRoute`. |
+| `entity_type` | Entity được audit: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`, `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`, `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun` hoặc `DeletionRequest`. |
 | `entity_id` | Khóa của dòng được audit, lưu dạng text. Nó đa hình theo thiết kế, nên không có foreign key. Với `WorkOrder` và `WorkOrderDemand` đó là khóa chính nội bộ; với `PartNumber` đó là chuỗi PN canonical (khóa tự nhiên của master); các entity type khác được mô tả bên dưới. Tính toàn vẹn được bảo đảm bằng việc ghi dòng audit trong cùng transaction với thay đổi được audit. |
 | `actor_reference` | Text cũ có thể null, được giữ cho lịch sử và không bao giờ được điền ngược (backfill). Không nơi ghi nào đã chuyển đổi còn ghi nó, nên nó là NULL trên mọi dòng mới. Trên các dòng cũ nó giữ một định danh tác nhân development hoặc hệ thống được cấu hình tường minh, hoặc NULL. |
 | `actor_user_id` | Foreign key kiểu integer có thể null tới `users (id)` (`fk_audit_events_actor_user_id_users`): User đã đăng nhập, **do server suy ra chỉ từ principal của session và không bao giờ từ body của request**. Xem "User thực hiện" bên dưới. |
@@ -804,6 +809,11 @@ Các ràng buộc được liệt kê ở §17.
   hoa chữ thường trước, rồi tới bất kỳ cách viết hoa nào) và cho mọi role đang có mọi key khác, và append một dòng
   `UPDATED` cho mỗi role nó thay đổi, không có actor, với metadata `{"source": "migration", "revision":
   "0040_phase16_history_archive"}`. Downgrade của nó thu hồi key theo cùng cách, metadata có thêm `"downgrade": true`.
+- `0042_phase16_deletion_requests` cấp key mới của nó Delete Work Orders and Part Numbers permanently
+  (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`) cho mọi role đang có mọi key khác, và không cho role nào theo tên,
+  và append một dòng `UPDATED` cho mỗi role nó thay đổi, không có actor, với metadata `{"source": "migration",
+  "revision": "0042_phase16_deletion_requests"}`. Downgrade của nó thu hồi key khỏi mọi role đang có nó, metadata có
+  thêm `"downgrade": true`.
 - Theme ưa thích của User (`users.theme_preference`) là tùy chọn hiển thị chỉ được ghi bởi nút chuyển của chính User
   (`PUT /api/session/theme-preference`). Nó không bao giờ được audit, không bao giờ nằm trong snapshot `User`, và không
   thay đổi `users.updated_at`. Lần ghi của nó chỉ lock dòng User (`FOR NO KEY UPDATE`) và không lấy advisory lock
@@ -930,8 +940,31 @@ lần gỡ khỏi Hot list mà nó kích hoạt được audit như mô tả ở
   "command": "request" | "cancel" | "copy_confirmation"}`. Các dòng do job trên host ghi không có actor, với metadata
   `{"source": "maintenance", "command": "export" | "verify" | "copy" | "next" | "purge" | "recover"}` (`next` làm thất
   bại một lần chạy mà người yêu cầu không còn được phép chạy).
-- Database role bảo trì chèn các dòng này không dùng `RETURNING`, vì nó được append dòng audit nhưng không bao giờ được
-  đọc chúng, và trigger `trg_audit_events_maintenance_scope` từ chối mọi entity type khác từ nó (§17).
+- Database role bảo trì chèn các dòng này không dùng `RETURNING`, và trigger `trg_audit_events_maintenance_scope` giới
+  hạn những gì nó được append (§17).
+
+### Các yêu cầu xóa vĩnh viễn
+
+- Mỗi lần đổi trạng thái của một yêu cầu xóa vĩnh viễn append một dòng với `entity_type` `DeletionRequest` và
+  `entity_id` là id của yêu cầu dạng text, trong cùng transaction với thay đổi. Yêu cầu là `CREATED` (`before_data`
+  NULL); mọi thay đổi sau đó là `UPDATED`. Snapshot là mọi cột của `deletion_requests` (thời điểm dạng text ISO-8601
+  UTC); các dòng đã lưu không nằm trong đó.
+- Một yêu cầu được ghi qua API, và việc hủy nó, mang `actor_user_id` và metadata `{"source": "web", "command":
+  "request" | "cancel"}`. Một yêu cầu được ghi bởi command của operator `pf delete-permanently --confirm` không có actor
+  và có metadata `{"source": "cli", "command": "request", "operator": "<name>"}`. Các thay đổi của job trên host không
+  có actor, với metadata `{"source": "maintenance", "command": "start-deletion" | "delete" | "recover"}`.
+- Việc xóa ghi, trong transaction của chính nó, một dòng `DELETED` cho mỗi Work Order bị xóa (`entity_id` là id của nó,
+  `before_data` là snapshot của nó) và cho mỗi Part Number bị xóa (`entity_id` là PN canonical, `before_data` là
+  snapshot của master, hoặc NULL khi nó không có master), với `after_data` NULL, `actor_user_id` là User yêu cầu (NULL
+  với yêu cầu của operator) và metadata `{"permanent_deletion": {"source", "run_id", "request_id", "operator",
+  "reason", "backup", "work_orders", "part_numbers", "deleted"}}` (`backup` là bản sao lưu pre-purge của yêu cầu,
+  `deleted` là số dòng theo từng bảng).
+- Cùng transaction đó xóa các dòng audit chỉ liên quan tới các bản ghi bị xóa (một Work Order, một dòng demand, một
+  master Part Number hoặc một Assigned Route mà nó xóa, khi mọi bản ghi mà dữ liệu của chúng gọi tên cũng bị xóa và mọi
+  dòng khác của cùng command đi cùng chúng); mọi dòng audit khác giữ nguyên.
+- Các dòng audit ghi lại một lần xóa vĩnh viễn trước đó (metadata có key `permanent_deletion`) và mọi dòng
+  `DeletionRequest` luôn được giữ: một lần xóa không bao giờ đưa chúng vào plan, xóa hay liệt kê chúng, kể cả khi một
+  Part Number mà nó đã xóa được nhập lại và bị xóa thêm một lần nữa.
 
 ### User thực hiện
 
@@ -964,9 +997,11 @@ lần gỡ khỏi Hot list mà nó kích hoạt được audit như mô tả ở
 
 - Mỗi dòng audit commit trong **cùng transaction** với thay đổi mà nó ghi. Một lần ghi có audit mà thiếu dòng audit, hoặc
   một dòng audit mà thiếu lần ghi, phải là không thể.
-- Dòng audit là chỉ-append. UPDATE và DELETE bị thu hồi khỏi application role, và một trigger raise-on-write từ chối
-  chúng, như với `part_movements`; khác với Movement, không dòng audit nào bị purge. Trigger tồn tại từ khi bảng được
-  tạo; việc thu hồi trên application role được `apply-grants` áp dụng trên production stack, nơi backend kết nối dưới
+- Dòng audit là chỉ-append. UPDATE và DELETE bị thu hồi khỏi application role; một trigger cấp câu lệnh từ chối mọi
+  UPDATE và TRUNCATE và một trigger cấp dòng từ chối mọi DELETE, như với `part_movements`. Việc purge lưu trữ không bao
+  giờ gỡ một dòng audit; chỉ một yêu cầu xóa vĩnh viễn xóa các dòng audit chỉ liên quan tới các bản ghi mà nó xóa (ở
+  trên). Cơ chế bảo vệ tồn tại từ khi bảng được tạo (`0042_phase16_deletion_requests` tách nó thành hai trigger); việc
+  thu hồi trên application role được `apply-grants` áp dụng trên production stack, nơi backend kết nối dưới
   `partflow_app` (§17). Database development và test giữ một owner role.
 - Một lần sửa append một dòng `UPDATED` mới; các dòng trước không bao giờ bị ghi lại.
 
@@ -1023,7 +1058,9 @@ thể null; `default_expected_duration` có thể null; `is_external boolean NOT
 - Barcode PN được dẫn xuất (`'PF:PN:' || part_number`, PROJECT_PROFILE §10). Không có cột `barcode_value` lưu trữ và
   không có expression index `lower(...)`; chữ hoa canonical làm chúng không cần thiết.
 - Không bảng sản xuất nào tham chiếu bảng này bằng foreign key, nên một dòng master có thể bị xóa cứng (và tạo lại về sau
-  cho cùng PN canonical) theo PROJECT_PROFILE §28.
+  cho cùng PN canonical) theo PROJECT_PROFILE §28. Guard dòng `trg_part_numbers_guard_delete` giữ việc xóa đó của
+  Management, và chỉ cho phép job trên host xóa một master khi đó là một dòng đã lưu của một yêu cầu xóa vĩnh viễn
+  (§17 Các yêu cầu xóa vĩnh viễn).
 
 ### Bảng business demand
 
@@ -1098,7 +1135,9 @@ null; `preferred_machine_id` có thể null. Đây là bản sao snapshot của 
 - Các bước đã qua là bất biến trong database (`0032_phase14_route_adjusted`). Trigger cấp câu lệnh
   `trg_assigned_route_steps_forbid_update` (function `partflow_assigned_route_steps_forbid_update`) từ chối mọi UPDATE,
   và một bước được Movement tham chiếu không bao giờ bị xóa (foreign key `part_movements.assigned_route_step_id` là `NO
-  ACTION`). DELETE vẫn được phép với các bước tương lai chưa được tham chiếu mà một lần điều chỉnh thay thế.
+  ACTION`). DELETE vẫn được phép với các bước tương lai chưa được tham chiếu mà một lần điều chỉnh thay thế; guard
+  dòng `trg_assigned_route_steps_guard_delete` giữ việc xóa đó và chỉ cho phép việc xóa của job trên host với các dòng
+  đã lưu của một yêu cầu xóa vĩnh viễn (§17 Các yêu cầu xóa vĩnh viễn).
 
 ### Bảng sản xuất
 
@@ -1162,17 +1201,19 @@ null; `preferred_machine_id` có thể null. Đây là bản sao snapshot của 
   lần điều chỉnh xóa một bước tương lai chưa được tham chiếu, và ranh giới "bước này có được tham chiếu không" của việc
   sửa.
 - Cơ chế bảo vệ bất biến: thu hồi UPDATE và DELETE khỏi application role, cộng hai trigger ràng buộc mọi role, kể cả
-  owner (`0041_phase16_history_purge`):
+  owner (`0041_phase16_history_purge`, `0042_phase16_deletion_requests`):
   - trigger cấp câu lệnh `trg_part_movements_forbid_mutation` (`BEFORE UPDATE OR TRUNCATE`, function
     `partflow_part_movements_forbid_mutation`) từ chối mọi UPDATE và TRUNCATE;
   - trigger cấp dòng `trg_part_movements_guard_delete` (`BEFORE DELETE`, function
-    `partflow_part_movements_guard_delete`) raise với mọi dòng, nên một DELETE không bao giờ lặng lẽ bỏ qua dòng nào,
-    trừ khi tất cả các điều sau đều đúng: thiết lập cục bộ theo transaction `partflow.archive_run_id` chỉ một lần chạy
-    đang `PURGING`; flow của dòng có một bản ghi của lần chạy đó chưa purge và chưa skip; id của dòng không lớn hơn
-    `last_movement_id` của bản ghi; và `occurred_at` cùng `server_received_at` của dòng đều trước cutoff của lần chạy.
-    Nó đọc lần chạy và bản ghi theo primary key cho mỗi dòng, nên một đợt purge 50.000 Movement vẫn nhanh. Trong hai
-    role ứng dụng, chỉ role bảo trì có DELETE trên bảng (§17 Database role và grant), và chỉ việc purge lịch sử đã lưu
-    trữ mới đặt dấu đánh này (§17 Các bảng lưu trữ lịch sử).
+    `partflow_part_movements_guard_delete`) raise với mọi dòng, nên một DELETE không bao giờ lặng lẽ bỏ qua dòng nào.
+    Khi thiết lập cục bộ theo transaction `partflow.deletion_request_id` được đặt, một dòng chỉ được cho phép khi là một
+    dòng đã lưu của yêu cầu xóa vĩnh viễn đó, yêu cầu này phải đang `RUNNING`, và bởi một role được ghi bản ghi lưu trữ
+    (§17 Các yêu cầu xóa vĩnh viễn). Nếu không, tất cả các điều sau phải đúng: thiết lập cục bộ theo transaction
+    `partflow.archive_run_id` chỉ một lần chạy đang `PURGING`; flow của dòng có một bản ghi của lần chạy đó chưa purge
+    và chưa skip; id của dòng không lớn hơn `last_movement_id` của bản ghi; và `occurred_at` cùng `server_received_at`
+    của dòng đều trước cutoff của lần chạy. Nó đọc lần chạy và bản ghi theo primary key cho mỗi dòng, nên một đợt purge
+    50.000 Movement vẫn nhanh. Trong hai role ứng dụng, chỉ role bảo trì có DELETE trên bảng (§17 Database role và
+    grant), và chỉ việc purge lịch sử đã lưu trữ và job trên host khi thực hiện một yêu cầu xóa mới đặt một dấu đánh.
 
 **`part_movements.scan_session_id`** (`0020_phase13_worker_sessions`): `bigint` có thể null (lịch sử giữ NULL và không
 bao giờ được backfill); `ck_part_movements_session_requires_worker` (`scan_session_id IS NULL OR worker_id IS NOT
@@ -1189,8 +1230,8 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
 - `event_type NOT NULL` với `ck_audit_events_event_type`: `CREATED`, `UPDATED`, `DELETED`, `ROUTE_ADJUSTED`.
 - `entity_type NOT NULL` với `ck_audit_events_entity_type`: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`,
   `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`,
-  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun`. Cả hai danh sách mở rộng
-  theo kiểu chỉ-thêm.
+  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun`, `DeletionRequest`. Cả
+  hai danh sách mở rộng theo kiểu chỉ-thêm.
 - `entity_id NOT NULL` (không foreign key: đa hình, §16).
 - `actor_reference` có thể null; `actor_user_id` FK có thể null `fk_audit_events_actor_user_id_users` tới `users (id)`.
 - `occurred_at timestamptz NOT NULL`; `before_data jsonb` có thể null; `after_data jsonb` có thể null; `metadata jsonb`.
@@ -1202,10 +1243,16 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   `(metadata['route_adjustment'] ->> 'device_event_id') WHERE entity_type = 'AssignedRoute'` (dạng subscript JSONB, tạo
   bằng SQL thô để biểu thức được lưu là biểu thức mà Application phát ra). Nó làm idempotency của adjustment không có
   race.
-- Cơ chế bảo vệ chỉ-append: thu hồi UPDATE và DELETE, cộng trigger raise `trg_audit_events_forbid_mutation` (§16).
-- `trg_audit_events_maintenance_scope` (`0040_phase16_history_archive`): trigger mức dòng `BEFORE INSERT` với `WHEN
-  (NEW.entity_type <> 'HistoryArchiveRun')`, từ chối dòng khi role đang chèn được ghi bản ghi lưu trữ (INSERT trên
-  `history_archived_flows`) và không sở hữu `audit_events`: role bảo trì chỉ append dòng `HistoryArchiveRun`.
+- Cơ chế bảo vệ chỉ-append: thu hồi UPDATE và DELETE khỏi application role, cộng trigger cấp câu lệnh
+  `trg_audit_events_forbid_mutation` (`BEFORE UPDATE OR TRUNCATE`) và guard dòng `trg_audit_events_guard_delete`, chỉ
+  cho phép một DELETE khi đó là một dòng đã lưu của một yêu cầu xóa vĩnh viễn đang `RUNNING` (§16, §17 Các yêu cầu
+  xóa vĩnh viễn).
+- `trg_audit_events_maintenance_scope` (`0040_phase16_history_archive`, function được thay bởi
+  `0042_phase16_deletion_requests`): trigger mức dòng `BEFORE INSERT` với `WHEN (NEW.entity_type <>
+  'HistoryArchiveRun')`, xét dòng khi role đang chèn được ghi bản ghi lưu trữ (INSERT trên `history_archived_flows`) và
+  không sở hữu `audit_events`. Role bảo trì append các dòng `HistoryArchiveRun`, các dòng `DeletionRequest` của yêu cầu
+  mà `partflow.deletion_request_id` gọi tên, và, khi yêu cầu đó đang `RUNNING`, một dòng `DELETED` của một Work Order
+  mà nó đã lưu hoặc của một Part Number trong phạm vi của nó; mọi dòng khác raise.
 
 ### Bảng policy và Worker Session
 
@@ -1310,11 +1357,12 @@ gắn khóa theo tên của chúng.
 
 **`role_permissions`** (`0028_phase13_users_roles`): một dòng cho mỗi grant. PK `pk_role_permissions` `(role_id,
 permission)`; `role_id` FK `fk_role_permissions_role_id_roles` tới `roles (id)`; `permission text NOT NULL` với
-`ck_role_permissions_permission_known`, chấp nhận đúng bộ từ vựng 36 key (mỗi key cho một khả năng của PROJECT_PROFILE
+`ck_role_permissions_permission_known`, chấp nhận đúng bộ từ vựng 37 key (mỗi key cho một khả năng của PROJECT_PROFILE
 §20: `Permission` trong `app/domain/enums.py`, được lặp lại dạng literal trong migration mở rộng nó gần nhất và được một
 schema test ghim cho bằng nhau). `0040_phase16_history_archive` thêm `RUN_HISTORY_ARCHIVAL_AND_PURGE` vào cuối và cấp nó
-cho role tên Administrator và cho mọi role có mọi key khác (§16). Một khả năng mới về sau mở rộng CHECK; một key không bao
-giờ bị đổi tên.
+cho role tên Administrator và cho mọi role có mọi key khác; `0042_phase16_deletion_requests` thêm
+`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY` vào cuối và cấp nó cho mọi role có mọi key khác, và không cho role nào
+theo tên (§16). Một khả năng mới về sau mở rộng CHECK; một key không bao giờ bị đổi tên.
 
 **`users`** (`0028_phase13_users_roles`): tài khoản ứng dụng, không bao giờ là Worker.
 
@@ -1548,6 +1596,97 @@ hoặc một dòng audit `HistoryArchiveRun`, hoặc khi một trong các thiế
 cả hai bảng, các guard và các thiết lập, khôi phục các CHECK trước đó và thu hồi `RUN_HISTORY_ARCHIVAL_AND_PURGE`
 (§16). Khoảng retention giữ nguyên.
 
+### Các yêu cầu xóa vĩnh viễn
+
+Migration `0042_phase16_deletion_requests` thêm các yêu cầu xóa vĩnh viễn (Phase 16, bước 3 của thiết kế lưu trữ, quyết
+định D17): một User có quyền Delete Work Orders and Part Numbers permanently
+(`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), hoặc một operator với `pf delete-permanently --confirm`, ghi một
+yêu cầu; job trên host thực hiện nó dưới role bảo trì. Những gì một lần xóa xóa, và những gì làm nó từ chối, là plan của
+`app.application.permanent_deletion` (OPERATIONS_RUNBOOK §10).
+
+**`deletion_requests`**: một dòng cho mỗi yêu cầu.
+
+- PK `pk_deletion_requests` `id` (identity kiểu integer). `state text NOT NULL` với `ck_deletion_requests_state`: các
+  trạng thái mở `APPROVED` và `RUNNING`, và các trạng thái cuối `COMPLETED`, `FAILED` và `CANCELLED`.
+- Yêu cầu, không bao giờ thay đổi: `work_order_numbers text[]` và `part_numbers text[]` (cả hai `NOT NULL DEFAULT
+  '{}'`; phạm vi như được yêu cầu: Work Order Number đúng như đã lưu và Part Number canonical; ít nhất một mục và không
+  phần tử NULL, `ck_deletion_requests_scope_shape`); `reason` (`ck_deletion_requests_reason_length`, 1–500 ký tự);
+  đúng một trong `requested_by_user_id` (FK tới `users (id)`) và `requested_by_operator` (tên của operator, 1–500 ký
+  tự) (`ck_deletion_requests_requester_shape`); `requested_at timestamptz NOT NULL DEFAULT now()`; và những gì plan
+  của nó lấy, `row_counts jsonb` (số dòng theo từng bảng) và `records jsonb` (các Work Order và Part Number mà nó gọi
+  tên), cả hai là JSON object (`ck_deletion_requests_plan_shape`).
+- Tiến trình của job trên host, tất cả có thể null: `started_at`, một giây tròn, và `backup_label`, được đặt cùng nhau,
+  nhãn của bản sao lưu pre-purge của yêu cầu `deletion-<id>-<started_at, UTC, YYYYMMDDTHHMMSSZ>`
+  (`ck_deletion_requests_progress_shape`: một yêu cầu `APPROVED` hoặc `CANCELLED` không có cả hai, một yêu cầu
+  `RUNNING` hoặc `COMPLETED` có cả hai); `pre_purge_backup_name` và `pre_purge_backup_started_at`, được đặt cùng nhau,
+  chỉ ở một yêu cầu `COMPLETED`, vốn cần chúng, hoặc một yêu cầu `FAILED` (`ck_deletion_requests_backup_shape`: tên là
+  `<UTC stamp>-pre-purge-` theo sau là nhãn của yêu cầu, và dump bắt đầu tại hoặc sau `started_at` của yêu cầu);
+  `finished_at`, được đặt đúng ở các trạng thái cuối, và `cancelled_by_user_id` FK tới `users (id)`, được đặt đúng khi
+  `CANCELLED` (`ck_deletion_requests_finish_shape`); `failure_reason`, được đặt đúng khi `FAILED`, tối đa 2.000 ký tự
+  (`ck_deletion_requests_failure_shape`).
+- Partial UNIQUE expression index `uq_deletion_requests_open` trên `((true)) WHERE state IN ('APPROVED', 'RUNNING')`:
+  tối đa một yêu cầu đang mở, kể cả khi hai yêu cầu chạy đua.
+- Trigger bảo vệ `trg_deletion_requests_guard_mutation` (mức dòng, `BEFORE INSERT OR DELETE OR UPDATE`) và
+  `trg_deletion_requests_forbid_truncate` (hàm `partflow_deletion_requests_guard_mutation`):
+  - một lần chèn phải là `APPROVED` chưa có tiến trình, `requested_at` của nó là thời điểm bắt đầu transaction của nó;
+    một yêu cầu của operator (không có User) chỉ do owner của bảng chèn;
+  - các cột yêu cầu không bao giờ thay đổi, một yêu cầu đã kết thúc không bao giờ thay đổi, và không yêu cầu nào bị xóa
+    hay truncate;
+  - application role chỉ được hủy một yêu cầu `APPROVED`;
+  - mọi thay đổi khác cần một role được ghi bản ghi lưu trữ (role bảo trì, hoặc owner) trong khi thiết lập cục bộ theo
+    transaction `partflow.deletion_request_id` gọi tên yêu cầu: `APPROVED` sang `RUNNING` (bắt đầu) hoặc `FAILED`
+    (người yêu cầu có thể không còn được phép cho thực hiện nó), và `RUNNING` sang `COMPLETED` hoặc `FAILED`, giữ
+    nguyên `started_at` và `backup_label`; job không bao giờ hủy, và role bảo trì không thay đổi một yêu cầu theo cách
+    nào khác.
+
+**`deletion_request_rows`**: mọi dòng mà một yêu cầu xóa.
+
+- PK `pk_deletion_request_rows` `(request_id, table_name, row_key)`; `request_id` FK tới `deletion_requests (id)`.
+- `table_name` là một trong mười bảng mà một lần xóa xóa dữ liệu (`ck_deletion_request_rows_table_name`):
+  `audit_events`, `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `assigned_route_steps`,
+  `assigned_routes`, `work_order_allocations`, `work_order_demands`, `work_orders`, `part_numbers`. `row_key` là
+  primary key của dòng dạng text: PN canonical của một dòng `part_numbers`, id thập phân của mọi dòng khác
+  (`ck_deletion_request_rows_row_key_shape`).
+- Trigger bảo vệ `trg_deletion_request_rows_guard_mutation` (mức dòng, `BEFORE INSERT OR DELETE OR UPDATE`) và
+  `trg_deletion_request_rows_forbid_truncate` (hàm `partflow_deletion_request_rows_guard_mutation`): một dòng chỉ được
+  chèn bởi transaction đã ghi yêu cầu của nó, khi yêu cầu đang `APPROVED`; không dòng nào bị thay đổi, xóa hay
+  truncate.
+
+**Các guard dòng.** Mọi bảng mà một lần xóa xóa dữ liệu có một trigger mức dòng `BEFORE DELETE`: `part_movements` có
+`trg_part_movements_guard_delete` của nó (§17 Bảng sản xuất), và chín bảng còn lại có `trg_<table>_guard_delete` (hàm
+`partflow_guard_delete`). Nó raise (`P0001`) với mọi dòng, nên một DELETE không bao giờ lặng lẽ bỏ qua dòng nào, trừ
+khi:
+
+- thiết lập cục bộ theo transaction `partflow.deletion_request_id` gọi tên một yêu cầu đang `RUNNING`, các dòng đã lưu
+  của nó liệt kê dòng này (theo bảng và primary key), và role đang xóa được ghi bản ghi lưu trữ; hoặc
+- thiết lập không được đặt và việc xóa là việc mà bảng đã cho phép trước đây: trên `assigned_route_steps`,
+  `work_order_demands` và `part_numbers`, mọi role trừ role bảo trì đều được xóa (các bước tương lai của một lần điều
+  chỉnh route, việc gỡ một dòng demand, việc xóa một master Part Number), và trên `part_movements` là việc purge của
+  một lần chạy lưu trữ.
+
+Mọi việc xóa khác raise, với mọi role, kể cả owner: không gì xóa một Work Order, một flow, một Assigned Route, một
+allocation, một cạnh lineage hay một dòng audit ngoài một yêu cầu xóa vĩnh viễn. Các bảng chỉ-append tiếp tục từ chối
+UPDATE và TRUNCATE với mọi role qua các trigger cấp câu lệnh `trg_<table>_forbid_mutation` của chúng (`BEFORE UPDATE OR
+TRUNCATE` trên `audit_events`, `quantity_flow_lineage`, `work_order_allocations` và `part_movements`;
+`machine_lifecycle_events` vẫn từ chối cả DELETE). Các trigger cấp câu lệnh
+`trg_work_orders_maintenance_forbid_update` và `trg_work_order_demands_maintenance_forbid_update` (hàm
+`partflow_maintenance_forbid_update`) từ chối mọi UPDATE của role bảo trì, role này giữ UPDATE trên hai bảng này chỉ để
+lock các dòng của chúng trong một lần xóa.
+
+**Việc xóa** (`python -m app.cli history-archive delete`, do job trên host chạy dưới role bảo trì sau `start-deletion`
+và bản sao lưu pre-purge): một transaction `READ COMMITTED` đặt `partflow.deletion_request_id`, lock dòng yêu cầu (nó
+phải đang `RUNNING`), kiểm tra các dòng đã lưu của nó khớp với `row_counts`, lấy advisory lock của mọi PN mà các dòng
+đã lưu và phạm vi của nó gọi tên theo thứ tự đã sắp xếp rồi lock dòng của các dòng demand và Work Order đã lưu theo
+thứ tự tăng dần (thứ tự mà mọi command lấy chúng), tính lại plan và đòi nó bằng đúng các dòng đã lưu, xóa theo thứ tự
+phụ thuộc (mỗi bảng đúng số đếm đã lưu của nó), ghi các dòng audit `DELETED` (§16) và chuyển yêu cầu sang `COMPLETED`
+cùng bản sao lưu pre-purge của nó. Mọi khác biệt hay lỗi đều rollback toàn bộ và yêu cầu trở thành `FAILED` mà không gì
+bị xóa; một lỗi database không kéo dài để yêu cầu ở `RUNNING`, và lần bắt đầu kế tiếp của job trên host chuyển nó sang
+`FAILED` (như sau khi khôi phục bản sao lưu pre-purge của nó, bản sao lưu này giữ nó ở `RUNNING`).
+
+Downgrade của `0042_phase16_deletion_requests` từ chối khi còn một yêu cầu hoặc một dòng audit `DeletionRequest`; nếu
+không, nó thu hồi key (một dòng audit `Role` `UPDATED` cho mỗi role mà nó thay đổi) và khôi phục các guard, function
+và CHECK của `0041_phase16_history_purge`.
+
 ### Ranh giới migration của slice
 
 Các migration đã tạo schema của slice này (`0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`)
@@ -1582,24 +1721,28 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (37 at head `0041_phase16_history_purge`) |
+| Class | `partflow_app` privileges | Tables (39 at head `0042_phase16_deletion_requests`) |
 |---|---|---|
-| `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở), `history_archive_runs` (trigger dòng chỉ cho role ứng dụng yêu cầu, hủy và xác nhận một bản sao) |
+| `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations`, `deletion_request_rows` (chỉ được ghi cùng yêu cầu của chúng) |
+| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở), `history_archive_runs` (trigger dòng chỉ cho role ứng dụng yêu cầu, hủy và xác nhận một bản sao), `deletion_requests` (trigger dòng chỉ cho role ứng dụng yêu cầu và hủy) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (bước đã qua bất biến nhờ trigger và đặc quyền; một lần điều chỉnh xóa các bước tương lai chưa được tham chiếu) |
 | `READ_ONLY` | SELECT | `alembic_version`, `history_archived_flows` |
 | `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
-- `partflow_maintenance` có đúng những gì việc xuất archive, việc purge và job trên host cần (`MAINTENANCE_PRIVILEGES`):
-  SELECT trên `alembic_version`, `application_policy`, `areas`, `assigned_route_steps`, `assigned_routes`, `machines`,
-  `operations`, `part_numbers`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
-  `scan_stations`, `users`, `work_order_demands`, `work_orders`, `worker_sessions` và `workers`; SELECT và DELETE trên
-  `part_movements`, nơi `trg_part_movements_guard_delete` chỉ cho phép các Movement đã lưu trữ của lần chạy mà nó đang
-  purge (§17 Bảng sản xuất); SELECT và UPDATE trên `history_archive_runs` (không có INSERT: chỉ một người yêu cầu một
-  lần chạy, trong Administration) và SELECT, INSERT và UPDATE trên `history_archived_flows`, mà trigger bảo vệ của chúng
-  quyết định nó được thay đổi gì; và INSERT, không có SELECT, trên `audit_events`, mà
-  `trg_audit_events_maintenance_scope` giới hạn ở các dòng `HistoryArchiveRun`. `part_movements` là bảng duy nhất mà
-  nó có DELETE, và nó không bao giờ đọc các bảng credential, session đăng nhập, mail hay thiết bị Scan Station.
+- `partflow_maintenance` có đúng những gì việc xuất archive, việc purge, việc xóa vĩnh viễn và job trên host cần
+  (`MAINTENANCE_PRIVILEGES`): SELECT trên `alembic_version`, `application_policy`, `areas`, `machines`, `operations`,
+  `role_permissions`, `roles`, `scan_stations`, `users`, `worker_sessions` và `workers`; SELECT và DELETE trên các bảng
+  mà một lần xóa xóa dữ liệu — `assigned_route_steps`, `assigned_routes`, `part_movements`, `part_numbers`,
+  `quantity_flow_lineage`, `quantity_flows` và `work_order_allocations` — nơi các guard dòng chỉ cho phép các Movement
+  đã lưu trữ của lần chạy mà nó đang purge và các dòng đã lưu của yêu cầu xóa đang `RUNNING` mà nó thực hiện (§17 Các
+  yêu cầu xóa vĩnh viễn); SELECT, UPDATE và DELETE trên `work_order_demands` và `work_orders` (UPDATE chỉ để lock dòng
+  trong một lần xóa: các trigger cấp câu lệnh của chúng từ chối mọi thay đổi của nó); SELECT, INSERT và DELETE trên
+  `audit_events`, mà các trigger của nó giới hạn những gì nó append (các dòng `HistoryArchiveRun`, và các dòng
+  `DeletionRequest` và `DELETED` của yêu cầu mà nó thực hiện) và những gì nó xóa (các dòng audit đã lưu của yêu cầu
+  đó); SELECT và UPDATE trên `history_archive_runs` và `deletion_requests` (không có INSERT: chỉ một người yêu cầu một
+  lần chạy hay một lần xóa, hoặc owner ghi yêu cầu xóa của một operator) và SELECT, INSERT và UPDATE trên
+  `history_archived_flows`, mà trigger bảo vệ của chúng quyết định nó được thay đổi gì; và SELECT trên
+  `deletion_request_rows`. Nó không bao giờ đọc các bảng credential, session đăng nhập, mail hay thiết bị Scan Station.
 - Không role nào có đặc quyền sequence (cột identity), hay `CREATE` trên schema `public` hoặc trên database. PUBLIC
   không có gì trên bất kỳ bảng hay sequence nào của PartFlow, và default privilege cho PUBLIC và cả hai role đều bị gỡ.
   PUBLIC vẫn giữ đặc quyền `TEMPORARY` trên database, mà việc xuất archive và việc kiểm tra nó dùng cho bảng tạm giữ
@@ -1649,6 +1792,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Import Work Order từ file | không có: Work Order mới, và thay đổi Work Order Open và Released qua việc sửa demand thông thường, dùng lại validation của §5 một cách idempotent | PROJECT_PROFILE §13; §5, §14 và §16 ở đây; IMPLEMENTATION_ROADMAP Phase 15 |
 | Nhận diện Worker và lưu trữ ScanSession | bảng `workers` (badge UNIQUE trên dạng canonical, avatar trên dòng) và phần mở rộng từ vựng audit (`0014_phase13_workers`); `part_movements.worker_id`, `work_order_allocations.allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` (`0019_phase13_worker_identity`); `part_movements.scan_session_id`, `worker_sessions`, `application_policy` và `areas.worker_session_timeout_minutes` (`0020_phase13_worker_sessions`); ba cột xác nhận badge của `application_policy` (`0021_phase13_badge_confirmation`) | PROJECT_PROFILE §8.13 và §19; §11, §16 và §17 ở đây |
 | Lưu trữ và purge lịch sử Movement | bảng lần chạy `history_archive_runs` và bảng chuyển tiếp `history_archived_flows` cùng các guard của chúng, đặc quyền của role bảo trì và các thiết lập của History archival & purge (`0040_phase16_history_archive`); các trạng thái và bằng chứng purge của một lần chạy, guard dòng `trg_part_movements_guard_delete` cùng quyền DELETE của role bảo trì trên `part_movements`, các thiết lập đợt purge, số bản sao lưu pre-purge được giữ và các index của bộ đọc bản ghi đã purge (`0041_phase16_history_purge`) | PROJECT_PROFILE §28; §8a, §11 và §17 ở đây; IMPLEMENTATION_ROADMAP Phase 16 |
+| Yêu cầu xóa vĩnh viễn | key Delete Work Orders and Part Numbers permanently (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), các bảng `deletion_requests` và `deletion_request_rows` cùng các guard của chúng, guard dòng của mọi bảng mà một lần xóa xóa dữ liệu, các dòng audit `DeletionRequest` và đặc quyền của role bảo trì để thực hiện một yêu cầu (`0042_phase16_deletion_requests`) | PROJECT_PROFILE §20 và §28; §16 và §17 ở đây; IMPLEMENTATION_ROADMAP Phase 16 |
 
 ### Vẫn còn hoãn
 
@@ -1657,7 +1801,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Trường và đồng bộ ERP | hoãn và chưa được duyệt (IMPLEMENTATION_ROADMAP Deferred) | một ranh giới tích hợp tách biệt; `device_event_id` vẫn tương thích |
 | Đồng bộ quét offline | không lên kế hoạch (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §32); các lần ghi sản xuất vẫn bị chặn khi mất kết nối | `device_event_id` được chọn để một thiết kế offline được duyệt trong tương lai không cần đổi tên (§20) |
 | Đưa số lượng đã nhập kho trở lại sản xuất active | không thuộc PartFlow (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §18) | không có |
-| Các bước tiếp theo của lưu trữ lịch sử Movement | IMPLEMENTATION_ROADMAP Phase 16, bước 3 đến 7: yêu cầu xóa vĩnh viễn, các lần chạy tự động, xem một archive, các nhóm tùy chọn và việc hết hạn cuối cùng của các bản ghi đã lưu trữ | cùng đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
+| Các bước tiếp theo của lưu trữ lịch sử Movement | IMPLEMENTATION_ROADMAP Phase 16, bước 4 đến 7: các lần chạy tự động, xem một archive, các nhóm tùy chọn và việc hết hạn cuối cùng của các bản ghi đã lưu trữ | cùng đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
 | Các khả năng import file bổ sung | hoãn cho tới khi một quyết định của owner yêu cầu (IMPLEMENTATION_ROADMAP Deferred) | không có thay đổi schema nào được lên kế hoạch |
 
 ---
@@ -1692,9 +1836,9 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 10. Sửa một RouteTemplate sau release không thay đổi snapshot AssignedRoute nào, và các lần sửa template không bao giờ
     làm thay đổi ngữ cảnh route mà bất kỳ Movement hiện có nào đã ghi.
 11. Thủ tục dựng lại projection tái tạo `current_area_id` cho mọi flow active chỉ từ lịch sử Movement.
-12. Application role không thể cập nhật hay xóa dòng `part_movements` và `audit_events`. Trigger được kiểm chứng bởi các
-    schema test; quyền được kiểm chứng bởi các test database role (`tests/test_database_roles.py`) và bằng việc chạy bộ
-    test dưới application role.
+12. Application role không thể cập nhật hay xóa dòng `part_movements` và `audit_events`. Các trigger được kiểm chứng
+    bởi các schema test; quyền được kiểm chứng bởi các test database role (`tests/test_database_roles.py`) và bằng việc
+    chạy bộ test dưới application role.
 13. Mọi lần tạo hoặc sửa WorkOrder và WorkOrderDemand append một dòng `audit_events` (`CREATED` hoặc `UPDATED`, với
     `before_data` và `after_data`) trong cùng transaction với thay đổi; các lần sửa giữ nguyên mọi dòng audit trước đó
     (lịch sử chỉ-append, được kiểm chứng bằng test).
@@ -1737,7 +1881,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-18 | uncommitted | Migration head `0041_phase16_history_purge`: việc purge lịch sử Movement đã lưu trữ, với các trạng thái lần chạy `PURGING` và `COMPLETED_WITH_SKIPS`, các kết quả `PURGED` và `NOTHING_PURGED`, bằng chứng bản sao lưu pre-purge và các số đếm purge của một lần chạy, guard dòng Movement `trg_part_movements_guard_delete`, quyền DELETE của role bảo trì trên `part_movements`, các thiết lập đợt purge, số bản sao lưu pre-purge được giữ, và released quantity cũng đọc từ các bản ghi đã purge. |
+| 2026-11-18 | uncommitted | Migration head `0042_phase16_deletion_requests`: các yêu cầu xóa vĩnh viễn, với key Delete Work Orders and Part Numbers permanently (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), các bảng `deletion_requests` và `deletion_request_rows`, guard dòng của mọi bảng mà một lần xóa xóa dữ liệu, các dòng audit `DeletionRequest` và đặc quyền của role bảo trì để thực hiện một yêu cầu. |
+| 2026-11-18 | `d094f5e` | Migration head `0041_phase16_history_purge`: việc purge lịch sử Movement đã lưu trữ, với các trạng thái lần chạy `PURGING` và `COMPLETED_WITH_SKIPS`, các kết quả `PURGED` và `NOTHING_PURGED`, bằng chứng bản sao lưu pre-purge và các số đếm purge của một lần chạy, guard dòng Movement `trg_part_movements_guard_delete`, quyền DELETE của role bảo trì trên `part_movements`, các thiết lập đợt purge, số bản sao lưu pre-purge được giữ, và released quantity cũng đọc từ các bản ghi đã purge. |
 | 2026-11-17 | `2f12d33` | Migration head `0040_phase16_history_archive`: các lần chạy lưu trữ lịch sử và bản ghi chuyển tiếp của chúng, các guard, các thiết lập của History archival & purge với mặc định retention 24 tháng, các dòng audit `HistoryArchiveRun`, key `RUN_HISTORY_ARCHIVAL_AND_PURGE` và đặc quyền của role bảo trì. |
 | 2026-11-17 | `1490927` | `GET /api/part-numbers/resolve` trả về dạng canonical của server cho một PN đã nhập, dùng cho Add Part. |
 | 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: các cột quy tắc mật khẩu và Remember me của `application_policy`, các mục audit của chúng và `user_sessions.remembered`. |

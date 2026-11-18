@@ -68,11 +68,12 @@ const CONTRACT_KEYS = [
   'EDIT_WORK_ORDER_ALLOCATION',
   'PERFORM_HISTORICAL_CORRECTIONS',
   'RUN_HISTORY_ARCHIVAL_AND_PURGE',
+  'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
 ];
 
-test('PERMISSIONS is the 36-key server vocabulary, in order', () => {
+test('PERMISSIONS is the 37-key server vocabulary, in order', () => {
   expect([...PERMISSIONS]).toEqual(CONTRACT_KEYS);
-  expect(new Set(PERMISSIONS).size).toBe(36);
+  expect(new Set(PERMISSIONS).size).toBe(37);
 });
 
 test('every permission sits in exactly one editable group or the correction subset', () => {
@@ -80,7 +81,7 @@ test('every permission sits in exactly one editable group or the correction subs
     ...ROLE_PERMISSION_GROUPS.flatMap((group) => group.permissions),
     ...CORRECTION_PERMISSIONS,
   ];
-  expect(placed).toHaveLength(36);
+  expect(placed).toHaveLength(37);
   expect([...placed].sort()).toEqual([...CONTRACT_KEYS].sort());
   expect(ROLE_PERMISSION_GROUPS.map((group) => group.label)).toEqual([
     'Administration',
@@ -116,11 +117,20 @@ test('labels are unique and non-empty, with the GUI-vocabulary renames', () => {
   expect(PERMISSION_LABELS.RUN_HISTORY_ARCHIVAL_AND_PURGE).toBe(
     'Run history archival and purge',
   );
-  // The archival key follows Configure system settings in Administration.
-  expect(ROLE_PERMISSION_GROUPS[0].permissions.slice(-2)).toEqual([
+  expect(
+    PERMISSION_LABELS.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY,
+  ).toBe('Delete Work Orders and Part Numbers permanently');
+  // The two data-maintenance keys follow Configure system settings in
+  // Administration: the archival key, then the permanent deletion key.
+  expect(ROLE_PERMISSION_GROUPS[0].permissions.slice(-3)).toEqual([
     'CONFIGURE_SYSTEM_SETTINGS',
     'RUN_HISTORY_ARCHIVAL_AND_PURGE',
+    'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
   ]);
+  // A key an API route requires: never shown as reserved.
+  expect(
+    permissionChoiceLabel('DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY'),
+  ).toBe('Delete Work Orders and Part Numbers permanently');
 });
 
 test('the protected and reserved permissions are the contract literals', () => {

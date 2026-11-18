@@ -826,3 +826,37 @@ def default_cutoff() -> datetime.datetime:
     zone = history_archive.site_zone()
     today = history_archive.site_date_of(history_archive.now(), zone)
     return history_archive.start_of_day(history_archive.months_before(today, 24), zone)
+
+
+# ---------------------------------------------------------------------------
+# Driving a permanent deletion request (build step 3)
+# ---------------------------------------------------------------------------
+
+#: The deletion commands need neither the archive folder nor the copy folder.
+NO_FOLDERS = JobFolders(None, None)
+
+
+def deletion_backup_of(owner: Engine, request_id: int) -> history_archive_job.PurgeBackup:
+    """The evidence of the pre-purge backup taken right after the request started."""
+    with owner.connect() as connection:
+        request = (
+            connection.execute(
+                sa.text("SELECT started_at, backup_label FROM deletion_requests WHERE id = :id"),
+                {"id": request_id},
+            )
+            .mappings()
+            .one()
+        )
+    started: datetime.datetime = request["started_at"].astimezone(datetime.UTC)
+    return history_archive_job.PurgeBackup(
+        f"{started.strftime('%Y%m%dT%H%M%SZ')}-pre-purge-{request['backup_label']}",
+        started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def carry_out_request(job: Engine, owner: Engine, request_id: int) -> history_archive_job.JobReport:
+    """``start-deletion``, the pre-purge backup's evidence, ``delete`` (as archive.sh does)."""
+    done(history_archive_job.start_deletion(job, NO_FOLDERS, request_id), "started")
+    return history_archive_job.delete_request(
+        job, NO_FOLDERS, request_id, deletion_backup_of(owner, request_id)
+    )

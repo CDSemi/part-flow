@@ -1,38 +1,51 @@
 #!/bin/sh
-# PartFlow history archival host job (Movement-history archival, build steps 1 and 2; OPERATIONS_RUNBOOK §11,
+# PartFlow history archival host job (Movement-history archival, build steps 1 to 3; OPERATIONS_RUNBOOK §10, §11,
 # DEPLOYMENT §3.1). Run from the repository root of the RUNNING release's checkout, as the account that owns
-# PARTFLOW_ARCHIVE_DIR and PARTFLOW_BACKUP_DIR (root on the NAS). `deploy/production/archive.sh --help` prints the
-# usage. This job DELETES: once a run's archive is exported, verified and copied off the host, it takes the run's
-# pre-purge backup and purges the archived Movement history from the database (whole flow components, in batches), and
-# the full reconcile checks the database right after the purge.
+# PARTFLOW_ARCHIVE_DIR and PARTFLOW_BACKUP_DIR (root on the NAS). `deploy/production/archive.sh --help` prints the usage.
+# This job DELETES, always after a pre-purge backup and with the full reconcile right after: it purges the archived
+# Movement history of a run whose archive is exported, verified and copied off the host (whole flow components, in
+# batches), and it carries out the permanent deletion requests recorded in Administration or by `pf delete-permanently`
+# (the rows the request stored, deleted in one transaction).
 #
-# The hourly work runs the steps of `python -m app.cli history-archive` in the one-shot `maintenance` service (as the
+# A start runs the steps of `python -m app.cli history-archive` in the one-shot `maintenance` service (as the
 # maintenance database role, the archive folder mounted, `--user` this account): `recover`; then `next` and the step it
-# names, again and again until `next` answers wait, running or none, a run finishes, or a step fails: export --run N,
-# verify --run N and copy --run N; for `backup`, the pre-purge backup (deploy/production/backup.sh --kind pre-purge
-# --label <archive name>, which waits up to --backup-wait-minutes for a backup that is running) and then purge --run N
-# --backup NAME --backup-started-at UTC; for `purge` (a run an earlier start left PURGING), purge --run N alone. After a
-# purge that ended with exit 0, or with exit 3 once the run was purging, the full `python -m app.cli reconcile` runs in a
-# one-off `backend` container as the application database role, as release.sh and scheduled-reconcile.sh run it; then
-# `status`. A start never begins another run after a purge: the reconcile's verdict comes first. A purge that ends with
-# exit 2 (a transient database error or a lost connection while PURGING: the batch in progress rolled back, and the run
-# stays PURGING) is not reconciled in that start: the next start resumes the purge and reconciles when it ends.
+# names, again and again until `next` answers wait, running or none, a run or a deletion finishes, or a step fails.
+# - A permanent deletion request comes first. `start_deletion`: start-deletion --request N (the request becomes RUNNING,
+#   or FAILED when the User who requested it may no longer have it carried out). `deletion_backup`: the pre-purge backup
+#   (deploy/production/backup.sh --kind pre-purge --label deletion-<id>-<UTC stamp>), then delete --request N --backup
+#   NAME --backup-started-at UTC, which deletes the request's stored rows in one transaction, then the full reconcile. A
+#   start that worked on a deletion does no run work and leaves the hourly slot to the next start.
+# - The run work: export --run N, verify --run N and copy --run N; for `backup`, the pre-purge backup (backup.sh --kind
+#   pre-purge --label <archive name>), then purge --run N --backup NAME --backup-started-at UTC; for `purge` (a run an
+#   earlier start left PURGING), purge --run N alone. After a purge that ended with exit 0, or with exit 3 once the run
+#   was purging, the full reconcile runs, and the start begins no other run. A purge that ends with exit 2 (a transient
+#   database error or a lost connection while PURGING: the batch in progress rolled back, and the run stays PURGING) is
+#   not reconciled in that start: the next start resumes the purge and reconciles when it ends.
+# A pre-purge backup waits up to --backup-wait-minutes for a backup that holds the backup lock. The full reconcile is
+# `python -m app.cli reconcile` in a one-off `backend` container as the application database role, as release.sh and
+# scheduled-reconcile.sh run it. Every start ends with `status`.
 #
-# A run left RUNNING after its copy (its pre-purge backup failed, or the job stopped) is failed by the next start's
-# `recover`, on purpose: the pre-purge backup is taken while the run is RUNNING, so a database restored from that backup
-# never purges again. A database restored from a backup taken while a run was PURGING (an hourly backup during a purge)
-# holds that run PURGING, and the next start resumes its purge: disable the task before any restore (OPERATIONS_RUNBOOK
-# §6).
+# A run or a deletion request left RUNNING (its pre-purge backup failed, the job stopped, or a deletion stopped on a
+# database error that does not last) is failed by the next start's `recover`, on purpose: the pre-purge backup is taken
+# while it is RUNNING, so a database restored from that backup never purges or deletes again. A deletion is one
+# transaction, so a request that failed or stayed RUNNING deleted nothing. Whenever `delete` ends with exit 2 (a
+# database error that does not last, a step that could not run, an outcome unknown) or gives no valid report, the start
+# reads `status`: a COMPLETED request is reconciled at once, a FAILED one or one still RUNNING deleted nothing, and when
+# `status` cannot tell, the reconcile runs anyway. A database restored from a backup taken while a run was PURGING
+# (an hourly backup during a purge) holds that run PURGING, and the next start resumes its purge; one restored from a
+# backup taken between a deletion request and its deletion holds the request APPROVED, and the next start carries it
+# out: disable the task before any restore (OPERATIONS_RUNBOOK §6).
 #
 # Each step's JSON report and stderr go to <records-dir>/archive/<UTC stamp>/ (`next`, then `next-2`, `next-3`, ...;
 # backup.out and backup.log of backup.sh; reconcile.json and reconcile.log); that folder is kept only when a step did
-# something or failed. A reconcile after a purge that does not end clean (a finding, an error, no complete report) is an
-# incident (design §10): archive.sh exits 4 and writes the incident record <records-dir>/archive/reconcile-after-purge
-# (key=value lines: result, exit code, run, archive name, pre-purge backup, failing checks, time, report path), which
-# check.sh reports as FAIL archival_proposal reconcile_after_purge. While the record exists, the job fails closed: a
-# start runs `recover` and `status` only and refuses every step that changes data (export, verify, copy, the pre-purge
-# backup and the purge, the resumed purge of a run left PURGING included) with exit 1. Only the operator removes the
-# record, once the investigation is done (OPERATIONS_RUNBOOK §8).
+# something or failed. A reconcile after a purge or a deletion that does not end clean (a finding, an error, no complete
+# report) is an incident (design §10): archive.sh exits 4 and writes the incident record
+# <records-dir>/archive/reconcile-after-purge (key=value lines: result, exit code, run, archive name, request, pre-purge
+# backup, failing checks, time, report path), which check.sh reports as FAIL archival_proposal reconcile_after_purge.
+# While the record exists, the job fails closed: a start runs `recover` and `status` only and refuses every step that
+# changes data (export, verify, copy, the pre-purge backups, the purge, the resumed purge of a run left PURGING, and
+# every deletion) with exit 1. Only the operator removes the record, once the investigation is done
+# (OPERATIONS_RUNBOOK §8).
 #
 # The optional off-host copy folder (PARTFLOW_ARCHIVE_COPY_DIR) is mounted at /archive-copy only while it exists, is
 # writable, and lies on a file system that is neither the archive folder's nor the root file system `/` (a disk or
@@ -42,31 +55,45 @@
 # Docker refuses a source that vanished in between. Otherwise the job finds /archive-copy unusable and the run waits for
 # a copy confirmation in Administration.
 #
-# `--scheduled` (the host task that starts every 5 minutes, design D12): the hourly work runs once per hour, at the first
-# start at or after the Start minute of Administration → History archival & purge (`history-archive settings`). The
-# hourly stamp <records-dir>/archive/hourly-slot holds the epoch minute of the slot last attempted; a start within an
-# hour of it ends at once without Docker (NOT_DUE). The first scheduled start (no stamp yet) only records the current
-# slot, so the work starts at the next Start minute. Once a slot is attempted, a refusal or a failure is reported once
-# for that hour, never at every 5-minute start.
+# `--scheduled` (the host task that starts every 5 minutes, design D12): every start runs the cheap check first,
+# `python -m app.cli history-archive settings` with `docker compose exec` in the running `backend` container (two
+# indexed reads as the application database role: whether a permanent deletion request is open, and the Start minute of
+# Administration → History archival & purge). A start that finds a request open carries it out at once, whatever the
+# time. Otherwise the hourly work runs once per hour, at the first start at or after the Start minute. The hourly stamp
+# <records-dir>/archive/hourly-slot holds the epoch minute of the slot last attempted. A start within an hour of it looks
+# only for an open deletion request and otherwise ends at once (NOT_DUE); until the check finds a request, it ends
+# quietly as NOT_DUE also when a release runs, the incident record exists, the configuration is incomplete or the check
+# gives no answer (the backend is down): the next hourly start reports such a problem. When the check gives no answer
+# at an hourly start, the Start minute is read in the `maintenance` service, and a waiting request is carried out by a
+# later start. The first scheduled start (no stamp yet) only records the current slot, so the hourly work starts at the
+# next Start minute. A slot is attempted, and its stamp written, once `next` answers anything but deletion work, or once
+# the start is refused or fails before it could ask: a refusal or a failure is then reported once for that hour, never at
+# every 5-minute start. A start that worked on a deletion request leaves the slot to the next start, which does the
+# hourly work. While a request is open, every start tries to carry it out, so a failure that keeps it from starting (a
+# `maintenance` step that cannot run) is reported by each 5-minute start until it is fixed or the request is cancelled.
 #
 # Locks: <records-dir>/.archive.lock (owner file: host, pid, started_at, by, and the kernel boot id and the process
-# start time from /proc) is taken only for the hourly work, never by a start that only checks the time and never while
-# a run merely waits for its copy confirmation. It is held for the whole hourly work, the wait for the backup lock, the
-# purge and the reconcile included. archive.sh refuses while <records-dir>/.release.lock exists, and release.sh refuses
-# while the archive lock is held, so no live release holds the backup lock while the pre-purge backup waits for it (a
-# backup lock left by a killed release.sh is stale, and backup.sh refuses it at once). A lock whose owner provably no
-# longer exists (same host, no `maintenance` container running, and its pid gone, or the boot id or the pid's start time
-# differs from the recorded one) is removed automatically: the job's `recover` then fails a run left RUNNING. The
-# database itself is guarded by the job's advisory lock.
+# start time from /proc) is taken only for the hourly work and for a deletion, never by a start that only checks the
+# time and never while a run merely waits for its copy confirmation. It is held for the whole work, the wait for the
+# backup lock, the purge or the deletion and the reconcile included. archive.sh refuses while
+# <records-dir>/.release.lock exists, and release.sh refuses while the archive lock is held, so no live release holds the
+# backup lock while a pre-purge backup waits for it (a backup lock left by a killed release.sh is stale, and backup.sh
+# refuses it at once). A lock whose owner provably no longer exists (same host, no `maintenance` container running, and
+# its pid gone, or the boot id or the pid's start time differs from the recorded one) is removed automatically: the
+# job's `recover` then fails a run or a deletion request left RUNNING. The database itself is guarded by the job's
+# advisory lock.
 #
-# stdout on exit 0: exactly one line, `NOT_DUE`, `DEFERRED <reason>` (scheduled: the previous start still works on
-# its hourly work), or `ARCHIVE <outcome> <run id|-> <state|->`. stderr: progress, each step's one-line summary, errors.
+# stdout on exit 0: exactly one line, `NOT_DUE`, `DEFERRED <reason>` (scheduled: the previous start still works),
+# `ARCHIVE <outcome> <run id|-> <state|->`, or, for a start that worked on a deletion request,
+# `DELETION <outcome> <request id> <state>` (for example `DELETION deleted 7 COMPLETED`). stderr: progress, each step's
+# one-line summary, errors.
 # Exit status: 0 done (or nothing due); 1 refused, nothing changed (a release runs, the archive lock is held, a step
 # refused, the incident record exists); 2 could not run (configuration, Docker, database, an unknown outcome), or the
-# pre-purge backup failed (nothing was deleted; the next start fails the run); 3 a run failed: it is now FAILED and a
-# new run must be requested in Administration → History archival & purge (a run that failed while purging keeps the
-# whole components it purged, which its purge receipt lists); 4 the reconcile after a purge did not end clean: an
-# incident (OPERATIONS_RUNBOOK §8, Reconcile finding after a purge).
+# pre-purge backup failed, or a deletion was interrupted (nothing was deleted; the next start fails a run or a deletion
+# request left RUNNING); 3 a run or a deletion request failed: it is now FAILED, and a new run, or the deletion, must be
+# requested again (a run that failed while purging keeps the whole components it purged, which its purge receipt lists;
+# a failed deletion request deleted nothing); 4 the reconcile after a purge or a deletion did not end clean: an incident
+# (OPERATIONS_RUNBOOK §8, Reconcile finding after a purge, or Reconcile finding after a deletion).
 set -eu
 
 # The values in the shell would override the env file for every Compose command: the script sets them per command only.
@@ -77,7 +104,7 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
-# The archive name of a run, the label of its pre-purge backup (contract §4).
+# The archive name of a run, the label of its pre-purge backup (contract B2 §4).
 ARCHIVE_NAME_PATTERN='^run-[0-9]+-[0-9]{8}T[0-9]{6}Z$'
 UTC_PATTERN='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 # The container path of the copy folder (compose.production.yaml sets PARTFLOW_ARCHIVE_COPY_DIR to it when configured).
@@ -116,25 +143,32 @@ Usage: deploy/production/archive.sh [--scheduled] [--env-file .env.production] [
            [--backup-wait-minutes N]
 
 Run from the repository root of the running release's checkout, as the account that owns PARTFLOW_ARCHIVE_DIR and
-PARTFLOW_BACKUP_DIR. Runs the hourly work of Movement-history archival in the `maintenance` service: recover, then the
-steps that `next` names (export, verify and copy; the pre-purge backup and the purge; or the purge of a run left
-PURGING), the full reconcile after a purge, and status. The purge DELETES the archived Movement history from the
-database, after the archive's off-host copy and the pre-purge backup.
-  --scheduled             the host task that starts every 5 minutes: the hourly work runs once per hour, at the first
-                          start at or after the Start minute of Administration → History archival & purge; every
-                          other start ends at once (NOT_DUE)
+PARTFLOW_BACKUP_DIR. Runs the history archive job in the `maintenance` service: recover, then the steps that `next`
+names, and status. A permanent deletion request comes first: its start, its pre-purge backup and the deletion of its
+stored rows in one transaction (OPERATIONS_RUNBOOK §10), then the full reconcile; a start that worked on a deletion
+does no run work. The hourly work of Movement-history archival: export, verify and copy a requested run, take its
+pre-purge backup and PURGE its archived Movement history from the database (or resume the purge of a run left
+PURGING), then the full reconcile. Both DELETE from the database, always after their pre-purge backup.
+  --scheduled             the host task that starts every 5 minutes: every start first runs the cheap check
+                          (history-archive settings in the running backend container) and carries out an open
+                          deletion request at once; the hourly work runs once per hour, at the first start at or after
+                          the Start minute of Administration → History archival & purge; every other start ends at
+                          once (NOT_DUE)
   --env-file FILE         default .env.production
   --records-dir DIR       default $HOME/partflow-deployments: the release lock .release.lock, the archive lock
                           .archive.lock, the hourly stamp archive/hourly-slot, the reports archive/<UTC stamp>/ and
                           the incident record archive/reconcile-after-purge (while it exists, a start runs recover
-                          and status only and works on no run)
-  --backup-wait-minutes N how long the pre-purge backup waits for another backup that holds the backup lock, polling
+                          and status only and works on no run and no deletion request)
+  --backup-wait-minutes N how long a pre-purge backup waits for another backup that holds the backup lock, polling
                           (0-1440, default 60; 0 = refused at once)
 Exit: 0 done (or nothing due), 1 refused (a release runs, the archive lock is held, a step refused, the incident record
-      exists; nothing changed), 2 could not run, or the pre-purge backup failed (nothing was deleted; the next start
-      fails the run), 3 a run failed: it is FAILED; request a new run in Administration → History archival & purge,
-      4 the reconcile after a purge did not end clean: an incident (OPERATIONS_RUNBOOK §8).
-stdout on exit 0: NOT_DUE, DEFERRED <reason>, or ARCHIVE <outcome> <run id|-> <state|->
+      exists; nothing changed), 2 could not run, or the pre-purge backup failed, or a deletion was interrupted (nothing
+      was deleted; the next start fails a run or deletion request left RUNNING), 3 a run or a deletion request failed:
+      it is FAILED; request a new run in Administration → History archival & purge, or the deletion again (a failed
+      deletion request deleted nothing), 4 the reconcile after a purge or a deletion did not end clean: an incident
+      (OPERATIONS_RUNBOOK §8).
+stdout on exit 0: NOT_DUE, DEFERRED <reason>, ARCHIVE <outcome> <run id|-> <state|->, or, for a start that worked on
+a deletion request, DELETION <outcome> <request id> <state> (DELETION deleted 7 COMPLETED)
 EOF
 }
 
@@ -205,11 +239,14 @@ say() {
     fi
 }
 STAMP_FILE=$RECORDS_DIR/archive/hourly-slot
-# The incident record of a reconcile after a purge that did not end clean (check.sh reads it).
+# The incident record of a reconcile after a purge or a deletion that did not end clean (check.sh reads it).
 INCIDENT_FILE=$RECORDS_DIR/archive/reconcile-after-purge
-# Scheduled only: set once the hourly work is due (or its due check started), cleared once the stamp is written.
+# Scheduled only: set once this start may attempt the hourly slot SLOT, cleared once the stamp is written.
 STAMP_PENDING=
 SLOT=
+# Scheduled, within the hour of the last attempted slot: until the cheap check finds an open deletion request, whatever
+# keeps this start from one ends it quietly as NOT_DUE (the next hourly start reports it).
+QUIET=
 # mark_slot: write the hourly stamp (the slot this start attempted) so the next attempt waits for the next hour.
 mark_slot() {
     [ -n "$STAMP_PENDING" ] || return 0
@@ -219,12 +256,20 @@ mark_slot() {
 }
 KEEP=
 could_not_run() {
+    if [ -n "$QUIET" ]; then
+        echo "NOT_DUE"
+        exit 0
+    fi
     mark_slot
     KEEP=1
     say "$1 Nothing was changed."
     exit 2
 }
 refuse() {
+    if [ -n "$QUIET" ]; then
+        echo "NOT_DUE"
+        exit 0
+    fi
     mark_slot
     KEEP=1
     say "refused — $1 Nothing was changed."
@@ -237,6 +282,11 @@ json_field() {
 # json_number FILE KEY: a top-level whole-number value of an indented app.cli report (empty for null or absent).
 json_number() {
     sed -n 's/^  "'"$2"'": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# json_bool FILE KEY: a top-level boolean of an indented app.cli report: true, false, or empty for null or absent.
+json_bool() {
+    sed -n -e 's/^  "'"$2"'": true,\{0,1\}$/true/p' -e 's/^  "'"$2"'": false,\{0,1\}$/false/p' "$1" 2>/dev/null \
+        | head -n 1
 }
 # json_nested FILE OBJECT KEY: the string value KEY of the top-level object OBJECT (empty for null or absent).
 json_nested() {
@@ -269,6 +319,18 @@ failing_checks() {
         /^      "status": "(fail|error)",?$/ { printf "%s%s", sep, id; sep = " " }
     ' "$1" 2>/dev/null
 }
+# deleted_rows FILE: the rows a deletion deleted, from its report's `deleted` object ("work_orders 1, ...").
+deleted_rows() {
+    awk '
+        !on && $0 == "  \"deleted\": {" { on = 1; next }
+        on && index($0, "  }") == 1 { exit }
+        on {
+            line = $0; sub(/^ +"/, "", line); sub(/,$/, "", line)
+            split(line, part, "\": ")
+            if (part[2] + 0 > 0) { printf "%s%s %s", sep, part[1], part[2]; sep = ", " }
+        }
+    ' "$1" 2>/dev/null
+}
 # mount_point PATH: the mount point of the file system holding PATH (empty when df cannot tell).
 mount_point() {
     df -P "$1" 2>/dev/null | awk 'NR == 2 { print $6 }'
@@ -280,9 +342,10 @@ done
 mkdir -p "$RECORDS_DIR/archive" 2>/dev/null || could_not_run "The records directory $RECORDS_DIR/archive cannot be created."
 
 # ---------------------------------------------------------------------------
-# --scheduled: the hourly stamp (no Docker for a start within an hour of the last attempted slot)
+# --scheduled: the hourly stamp
 # ---------------------------------------------------------------------------
 
+WITHIN_HOUR=
 if [ -n "$SCHEDULED" ]; then
     clock=$(date '+%s %M %S') || clock=
     NOW_EPOCH=$(printf '%s' "$clock" | awk '{ print $1 }')
@@ -298,12 +361,14 @@ if [ -n "$SCHEDULED" ]; then
         LAST=
     fi
     if [ -n "$LAST" ] && [ "$NOW" -lt $((LAST + 60)) ]; then
-        echo "NOT_DUE"
-        exit 0
+        # Within the hour of the last attempted slot: this start looks only for an open deletion request.
+        WITHIN_HOUR=1
+        QUIET=1
+    else
+        # From here on this start attempts a slot: refusals and failures are reported once for it.
+        SLOT=$NOW
+        STAMP_PENDING=1
     fi
-    # From here on this start attempts a slot: refusals and failures are reported once for it.
-    SLOT=$NOW
-    STAMP_PENDING=1
 fi
 
 # ---------------------------------------------------------------------------
@@ -392,13 +457,21 @@ WORK=
 LOCK=$RECORDS_DIR/.archive.lock
 RELEASE_LOCK=$RECORDS_DIR/.release.lock
 LOCK_OWNED=
-# The step that runs now (export, verify, copy, backup, purge or reconcile), for the signal handler.
+# The step that runs now (export, verify, copy, backup, purge, start-deletion, deletion-backup, delete or reconcile), for
+# the signal handler.
 CURRENT_STEP=
-# Set once a purge may have deleted something in this start, cleared once its reconcile result is recorded.
+# Set once a purge or a deletion may have deleted something in this start, cleared once its reconcile result is recorded
+# (or once the deletion is known to have deleted nothing). RECONCILE_FOR says which: purge or deletion.
 RECONCILE_PENDING=
+RECONCILE_FOR=
 RUN_ID=
 ARCHIVE_NAME=
 BACKUP_NAME=
+# The deletion request this start works on, and what became of it (the DELETION line).
+REQUEST_ID=
+DELETION_WORKED=
+DEL_OUTCOME=
+DEL_STATE=
 cleanup() {
     [ -z "$WORK" ] || rm -rf "$WORK"
     if [ -n "$LOCK_OWNED" ]; then
@@ -409,14 +482,25 @@ cleanup() {
         rm -rf "$REC"
     fi
 }
-# record_incident RESULT EXIT_CODE CHECKS: the incident record of a reconcile after a purge that did not end clean,
-# replaced in one rename. Until the operator removes it, check.sh reports it and no start works on a run.
+# record_incident RESULT EXIT_CODE CHECKS: the incident record of a reconcile after a purge or a deletion that did not
+# end clean, replaced in one rename. Until the operator removes it, check.sh reports it and no start works on a run or
+# a deletion request.
 record_incident() {
+    if [ "$RECONCILE_FOR" = deletion ]; then
+        incident_run=
+        incident_archive=
+        incident_request=$REQUEST_ID
+    else
+        incident_run=$RUN_ID
+        incident_archive=$ARCHIVE_NAME
+        incident_request=
+    fi
     {
         echo "result=$1"
         echo "exit_code=$2"
-        echo "run=$RUN_ID"
-        echo "archive_name=$ARCHIVE_NAME"
+        echo "run=$incident_run"
+        echo "archive_name=$incident_archive"
+        echo "request=$incident_request"
         echo "pre_purge_backup=$BACKUP_NAME"
         echo "failing_checks=$3"
         echo "finished_at=$(utc)"
@@ -424,12 +508,27 @@ record_incident() {
     } >"$INCIDENT_FILE.tmp" 2>/dev/null && mv -f "$INCIDENT_FILE.tmp" "$INCIDENT_FILE" 2>/dev/null \
         || say "the incident record $INCIDENT_FILE could not be written, so it cannot stop the next start: disable the history archive task until the incident is closed (OPERATIONS_RUNBOOK §8)."
 }
+# reconcile_subject: what the pending reconcile follows ("the purge of run 3", "the deletion of request 7") and the
+# runbook entry of its incident.
+reconcile_subject() {
+    if [ "$RECONCILE_FOR" = deletion ]; then
+        SUBJECT="the deletion of request ${REQUEST_ID:-?}"
+        SECTION="Reconcile finding after a deletion"
+    else
+        SUBJECT="the purge of run ${RUN_ID:-?}"
+        SECTION="Reconcile finding after a purge"
+    fi
+}
+REQUEST_NEW="Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+REQUEST_AGAIN="Request the deletion again in PartFlow, or with pf delete-permanently (OPERATIONS_RUNBOOK §10)."
 on_signal() {
     trap - INT TERM
     # The trap can run while a step's output is redirected to its report and log: speak on the script's own stdout and
     # stderr (fds 8 and 9), never into the step's files.
     exec 1>&8 2>&9
     KEEP=1
+    # A start that worked on a deletion leaves the hourly slot to the next start; any other attempted it.
+    [ -n "$DELETION_WORKED" ] || mark_slot
     case "$CURRENT_STEP" in
         purge)
             say "interrupted during the purge of run ${RUN_ID:-?}. Whole components only are ever deleted: the next start resumes the purge of a run left PURGING and reconciles when it ends (the purge receipt then lists what was deleted), or fails a run that was still RUNNING (then nothing was deleted)."
@@ -437,12 +536,24 @@ on_signal() {
         backup)
             say "interrupted during the pre-purge backup of run ${RUN_ID:-?}. Nothing was deleted: the run stays RUNNING, and the next start fails it (recover); request a new run in Administration → History archival & purge."
             ;;
+        start-deletion)
+            say "interrupted while deletion request ${REQUEST_ID:-?} was being started. Nothing was deleted: the next start makes the request FAILED if it was started (recover), or starts it again."
+            ;;
+        deletion-backup)
+            say "interrupted during the pre-purge backup of deletion request ${REQUEST_ID:-?}. Nothing was deleted: the request stays RUNNING, and the next start makes it FAILED (recover). $REQUEST_AGAIN"
+            ;;
+        delete)
+            # Its one transaction committed (the request is COMPLETED) or rolled back (it stays RUNNING): fail closed.
+            record_incident interrupted 2 ""
+            say "interrupted during the deletion of request ${REQUEST_ID:-?}: its one transaction either committed (the request is COMPLETED, and no reconcile ran after it) or rolled back (it stays RUNNING, nothing was deleted, and the next start makes it FAILED). Read history-archive status (OPERATIONS_RUNBOOK §11) and run the reconcile by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion). $INCIDENT_FILE records the incident: no start works on a run or a deletion request until you remove it."
+            ;;
         *)
             if [ -n "$RECONCILE_PENDING" ]; then
                 record_incident interrupted 2 ""
-                say "interrupted before the reconcile after the purge of run ${RUN_ID:-?} ended: run it by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge). $INCIDENT_FILE records the incident: no start works on a run until you remove it."
+                reconcile_subject
+                say "interrupted before the reconcile after $SUBJECT ended: run it by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 ($SECTION). $INCIDENT_FILE records the incident: no start works on a run or a deletion request until you remove it."
             else
-                say "interrupted. The next start recovers a run left RUNNING (it becomes FAILED); nothing was deleted."
+                say "interrupted. The next start recovers a run or a deletion request left RUNNING (it becomes FAILED); nothing was deleted."
             fi
             ;;
     esac
@@ -476,31 +587,77 @@ if [ -d "$RELEASE_LOCK" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# --scheduled: is the hourly work due? (the Start minute from Administration)
+# --scheduled: the cheap check (an open deletion request), then is the hourly work due?
 # ---------------------------------------------------------------------------
 
+# The hourly work is due (a manual start always does it); a scheduled start decides below.
+DUE=1
+# The cheap check found an open deletion request: this start carries it out first.
+DELETION_PENDING=
 if [ -n "$SCHEDULED" ]; then
-    rc=0
-    copy_rule
-    job settings >"$WORK/settings.json" 2>"$WORK/settings.log" || rc=$?
-    START_MINUTE=$(json_number "$WORK/settings.json" start_minute)
-    if [ "$rc" -ne 0 ] || ! report_valid "$WORK/settings.json" "$rc" || [ -z "$START_MINUTE" ] \
-        || [ "$START_MINUTE" -gt 59 ]; then
-        tail -n 3 "$WORK/settings.log" >&2 2>/dev/null || true
-        could_not_run "the Start minute could not be read (history-archive settings exit $rc; see above)."
-    fi
-    # The slot: the newest HH:<Start minute> at or before now, as an epoch minute.
-    SLOT=$((NOW - (NOW_MINUTE - START_MINUTE + 60) % 60))
-    if [ -z "$LAST" ]; then
-        # The first scheduled start (or a lost stamp): record the current slot; the work starts at the next Start minute.
-        mark_slot
+    DUE=
+    # The incident record stops every deletion: a start within the hour has nothing to look for (the hourly start
+    # reports the record).
+    if [ -n "$WITHIN_HOUR" ] && [ -e "$INCIDENT_FILE" ]; then
         echo "NOT_DUE"
         exit 0
     fi
-    if [ "$SLOT" -le "$LAST" ]; then
-        STAMP_PENDING=
-        echo "NOT_DUE"
-        exit 0
+    # The cheap check (contract B3 §3.1): history-archive settings in the running backend container, as the application
+    # database role; it creates no container. No answer (the backend is down) counts as no request open.
+    START_MINUTE=
+    crc=0
+    pf exec -T backend python -m app.cli history-archive settings >"$WORK/check.json" 2>"$WORK/check.log" || crc=$?
+    if [ "$crc" -eq 0 ] && report_valid "$WORK/check.json" 0 && [ "$(json_field "$WORK/check.json" result)" = read ]; then
+        START_MINUTE=$(json_number "$WORK/check.json" start_minute)
+        if [ "$(json_bool "$WORK/check.json" deletion_pending)" = true ]; then
+            DELETION_PENDING=1
+            QUIET=
+            pending_id=$(json_nested_number "$WORK/check.json" deletion_request id)
+            pending_state=$(json_nested "$WORK/check.json" deletion_request state)
+            say "deletion request ${pending_id:-?} (${pending_state:-?}) is open: this start carries it out now and does no run work."
+        fi
+    elif [ -z "$WITHIN_HOUR" ]; then
+        say "the deletion check (history-archive settings in the running backend container) gave no answer (exit $crc): an open deletion request waits for a later start; the hourly work goes on."
+        tail -n 3 "$WORK/check.log" >&2 2>/dev/null || true
+    fi
+    if [ -n "$WITHIN_HOUR" ]; then
+        # Within the hour of the last slot: an open deletion request, or nothing to do.
+        if [ -z "$DELETION_PENDING" ]; then
+            echo "NOT_DUE"
+            exit 0
+        fi
+    else
+        if [ -z "$START_MINUTE" ] || [ "$START_MINUTE" -gt 59 ]; then
+            # Without the cheap check's answer, the Start minute is read in the maintenance service.
+            rc=0
+            copy_rule
+            job settings >"$WORK/settings.json" 2>"$WORK/settings.log" || rc=$?
+            START_MINUTE=$(json_number "$WORK/settings.json" start_minute)
+            if [ "$rc" -ne 0 ] || ! report_valid "$WORK/settings.json" "$rc" || [ -z "$START_MINUTE" ] \
+                || [ "$START_MINUTE" -gt 59 ]; then
+                tail -n 3 "$WORK/settings.log" >&2 2>/dev/null || true
+                could_not_run "the Start minute could not be read (history-archive settings exit $rc; see above)."
+            fi
+        fi
+        # The slot: the newest HH:<Start minute> at or before now, as an epoch minute.
+        SLOT=$((NOW - (NOW_MINUTE - START_MINUTE + 60) % 60))
+        if [ -z "$LAST" ]; then
+            # The first scheduled start (or a lost stamp) records the current slot; the work starts at the next Start
+            # minute. A start that works on a deletion request leaves that to the next start.
+            if [ -z "$DELETION_PENDING" ]; then
+                mark_slot
+                echo "NOT_DUE"
+                exit 0
+            fi
+        elif [ "$SLOT" -le "$LAST" ]; then
+            STAMP_PENDING=
+            if [ -z "$DELETION_PENDING" ]; then
+                echo "NOT_DUE"
+                exit 0
+            fi
+        else
+            DUE=1
+        fi
     fi
 fi
 
@@ -535,10 +692,16 @@ lock_busy() {
     fi
     if [ -n "$containers" ] || [ -n "$alive" ]; then
         # A step runs, or the owner is between two steps (its pre-purge backup or reconcile included): a scheduled start
-        # leaves this hour to it.
+        # leaves this hour to it, and an open deletion request to a later start.
         if [ -n "$SCHEDULED" ]; then
             mark_slot
-            say "the previous archive.sh ($who) is still working; this hour's work is skipped."
+            if [ -n "$WITHIN_HOUR" ]; then
+                say "the previous archive.sh ($who) is still working; the open deletion request waits for a later start."
+            elif [ -n "$DELETION_PENDING" ]; then
+                say "the previous archive.sh ($who) is still working; this hour's work is skipped, and the open deletion request waits for a later start."
+            else
+                say "the previous archive.sh ($who) is still working; this hour's work is skipped."
+            fi
             echo "DEFERRED archive_running"
             exit 0
         fi
@@ -584,13 +747,17 @@ fi
 if [ -d "$RELEASE_LOCK" ]; then
     refuse "a release is running ($RELEASE_LOCK). The archive work runs at the next hourly start after it (OPERATIONS_RUNBOOK §11)."
 fi
-mark_slot
 
 REC=$RECORDS_DIR/archive/$(date -u +%Y%m%dT%H%M%SZ)
 mkdir "$REC" 2>/dev/null || { REC=; could_not_run "the record folder $RECORDS_DIR/archive/<UTC stamp> cannot be created."; }
+if [ -n "$DELETION_PENDING" ]; then
+    # The cheap check that took this start for a deletion request.
+    KEEP=1
+    cp "$WORK/check.json" "$REC/check.json" 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
-# The hourly work (contract §3.1)
+# The work (contract B2 §3.1, B3 §3.1)
 # ---------------------------------------------------------------------------
 
 EXIT=0
@@ -601,7 +768,8 @@ STEP_CMD=
 # The purge of this start reached PURGING (its report names the run's pre-purge backup): it may have deleted something.
 PURGE_STARTED=
 # step NAME COMMAND ARGS...: one history-archive command; report REC/NAME.json, stderr REC/NAME.log; sets RC, RESULT,
-# VALID and STATE (when the report names a state).
+# VALID and STATE (when the report names a state). The report of a command on a deletion request (start-deletion,
+# delete) must also name that request (request_id), or it is no valid report.
 step() {
     STEP_NAME=$1
     STEP_CMD=$2
@@ -613,7 +781,11 @@ step() {
     job "$@" >"$REC/$STEP_NAME.json" 2>"$REC/$STEP_NAME.log" || RC=$?
     CURRENT_STEP=
     VALID=
-    if report_valid "$REC/$STEP_NAME.json" "$RC"; then
+    case "$STEP_CMD" in
+        start-deletion | delete) named=$(json_number "$REC/$STEP_NAME.json" request_id) ;;
+        *) named=$REQUEST_ID ;;
+    esac
+    if report_valid "$REC/$STEP_NAME.json" "$RC" && [ "$named" = "$REQUEST_ID" ]; then
         VALID=1
         RESULT=$(json_field "$REC/$STEP_NAME.json" result)
         state=$(json_field "$REC/$STEP_NAME.json" state)
@@ -626,7 +798,6 @@ step() {
         tail -n 3 "$REC/$STEP_NAME.log" >&2 2>/dev/null || true
     fi
 }
-REQUEST_NEW="Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
 # failed: the step STEP_CMD (record STEP_NAME) did not end with exit 0: set EXIT and say why (the run's state is in the
 # report).
 failed() {
@@ -640,6 +811,8 @@ failed() {
                 say "the outcome of $STEP_CMD is unknown. The next start recovers a run left RUNNING (it becomes FAILED); nothing was deleted." ;;
             purge)
                 say "the outcome of the purge of run ${RUN_ID:-?} is unknown. Whole components only are ever deleted: the next start resumes a run left PURGING and reconciles when its purge ends, or fails a run that is still RUNNING (then nothing was deleted)." ;;
+            start-deletion)
+                say "the outcome of the start of deletion request ${REQUEST_ID:-?} is unknown. Nothing was deleted: the next start makes the request FAILED if it was started (recover), or starts it again." ;;
         esac
         return 0
     fi
@@ -657,6 +830,10 @@ failed() {
             EXIT=3
             if [ "$STEP_CMD" = purge ] && [ -n "$PURGE_STARTED" ]; then
                 say "run ${RUN_ID:-?} FAILED while purging: $message Whole components only were deleted; the purge receipt $ARCHIVE_DIR/${ARCHIVE_NAME:-<archive name>}.purged.json lists what was deleted and what stays in the database. Request a new run for the rest in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+            elif [ "$STEP_CMD" = start-deletion ]; then
+                # The requester re-check (contract B3 §2): the message says that nothing was deleted and who may
+                # ask again.
+                say "deletion request ${REQUEST_ID:-?} FAILED: $message"
             else
                 say "run ${RUN_ID:-?} FAILED: $message Nothing was deleted. $REQUEST_NEW"
             fi
@@ -670,20 +847,28 @@ failed() {
                 say "run ${RUN_ID:-?} stays PURGING: the batch in progress was rolled back (whole components only are ever deleted), and the next start resumes the purge and reconciles when it ends."
             else
                 say "history-archive $STEP_CMD could not run: $message"
-                [ "$STEP_CMD" != purge ] \
-                    || say "Nothing was deleted. Run ${RUN_ID:-?} stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+                if [ "$STEP_CMD" = purge ]; then
+                    say "Nothing was deleted. Run ${RUN_ID:-?} stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+                elif [ "$STEP_CMD" = start-deletion ]; then
+                    say "Nothing was deleted. The next start makes deletion request ${REQUEST_ID:-?} FAILED if it was started (recover), or starts it again."
+                fi
             fi
             ;;
     esac
 }
 
-# reconcile_after_purge: the full reconcile right after a purge (contract §3.1, design §10), in a one-off backend
-# container as the application database role, as release.sh and scheduled-reconcile.sh run it. Not clean (a finding,
-# an error, no complete report): an incident, exit 4 and the incident record. No earlier record can exist here: while
-# one exists, no start purges.
-reconcile_after_purge() {
+# reconcile_after: the full reconcile right after a purge or a deletion (RECONCILE_FOR; contract B2 §3.1, B3 §3.1,
+# design §10), in a one-off backend container as the application database role, as release.sh and
+# scheduled-reconcile.sh run it. Not clean (a finding, an error, no complete report): an incident, exit 4 and the
+# incident record. No earlier record can exist here: while one exists, no start purges or deletes.
+reconcile_after() {
     KEEP=1
-    say "run ${RUN_ID:-?}: the full reconcile after the purge (python -m app.cli reconcile in a one-off backend container)."
+    reconcile_subject
+    if [ "$RECONCILE_FOR" = deletion ]; then
+        say "deletion request ${REQUEST_ID:-?}: the full reconcile after the deletion (python -m app.cli reconcile in a one-off backend container)."
+    else
+        say "run ${RUN_ID:-?}: the full reconcile after the purge (python -m app.cli reconcile in a one-off backend container)."
+    fi
     CURRENT_STEP=reconcile
     rrc=0
     pf run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 \
@@ -695,7 +880,7 @@ reconcile_after_purge() {
     fi
     if [ "$rrc" -eq 0 ] && [ "$result" = clean ]; then
         RECONCILE_PENDING=
-        say "the reconcile after the purge of run ${RUN_ID:-?} is clean ($REC/reconcile.json)."
+        say "the reconcile after $SUBJECT is clean ($REC/reconcile.json)."
         return 0
     fi
     EXIT=4
@@ -711,14 +896,46 @@ reconcile_after_purge() {
     record_incident "$result" "$rrc" "$checks"
     RECONCILE_PENDING=
     tail -n 3 "$REC/reconcile.log" >&2 2>/dev/null || true
-    say "INCIDENT — the reconcile after the purge of run ${RUN_ID:-?} $what: $REC/reconcile.json. Stop requesting runs and follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge): the purge receipt is $ARCHIVE_DIR/${ARCHIVE_NAME:-<archive name>}.purged.json${BACKUP_NAME:+ and the pre-purge backup $BACKUP_NAME}; $INCIDENT_FILE records the incident, and no start works on a run until you remove it after the investigation."
+    if [ "$RECONCILE_FOR" = deletion ]; then
+        evidence="the pre-purge backup of the deletion is ${BACKUP_NAME:-unknown}"
+    else
+        evidence="the purge receipt is $ARCHIVE_DIR/${ARCHIVE_NAME:-<archive name>}.purged.json${BACKUP_NAME:+ and the pre-purge backup $BACKUP_NAME}"
+    fi
+    say "INCIDENT — the reconcile after $SUBJECT $what: $REC/reconcile.json. Stop requesting runs and deletions and follow OPERATIONS_RUNBOOK §8 ($SECTION): $evidence; $INCIDENT_FILE records the incident, and no start works on a run or a deletion request until you remove it after the investigation."
 }
 
-# pre_purge_backup RECORD: the pre-purge backup of run RUN_ID that `next` (report RECORD) asked for: backup.sh --kind
-# pre-purge, which publishes and verifies it like every backup and waits up to --backup-wait-minutes for a backup that
-# holds the backup lock. Sets BACKUP_NAME and BACKUP_STARTED (its dump start, from its backup-verify report). On a
-# failure it sets EXIT, says why and returns 1: nothing was deleted, and the run stays RUNNING for the next start's
-# recover, which fails it.
+# take_backup LABEL REASON STEP: backup.sh --kind pre-purge --label LABEL, which publishes and verifies it like every
+# backup and waits up to --backup-wait-minutes for a backup that holds the backup lock (STEP names it for the signal
+# handler). Sets BACKUP_NAME and BACKUP_STARTED (its dump start, from its backup-verify report); when it failed or named
+# no backup of LABEL with its dump start, sets EXIT and WHY and returns 1.
+take_backup() {
+    CURRENT_STEP=$3
+    brc=0
+    sh "$SCRIPT_DIR/backup.sh" --kind pre-purge --label "$1" --operator archive.sh \
+        --reason "$2" --env-file "$ENV_FILE" --lock-wait-minutes "$BACKUP_WAIT_MINUTES" \
+        >"$REC/backup.out" 2>"$REC/backup.log" || brc=$?
+    CURRENT_STEP=
+    line=$(sed -n '/^BACKUP /p' "$REC/backup.out" 2>/dev/null | tail -n 1)
+    BACKUP_NAME=$(printf '%s\n' "$line" | awk 'NF == 4 { print $2 }')
+    BACKUP_STARTED=$(printf '%s\n' "$line" | awk 'NF == 4 { print $4 }')
+    if [ "$brc" -eq 0 ] && printf '%s' "$BACKUP_NAME" | grep -Eq "^[0-9]{8}T[0-9]{6}Z-pre-purge-$1\$" \
+        && printf '%s' "$BACKUP_STARTED" | grep -Eq "$UTC_PATTERN"; then
+        return 0
+    fi
+    EXIT=2
+    tail -n 3 "$REC/backup.log" >&2 2>/dev/null || true
+    if [ "$brc" -eq 0 ]; then
+        WHY="backup.sh did not name the pre-purge backup with its dump start ($REC/backup.out)"
+    else
+        WHY="the pre-purge backup failed (backup.sh exit $brc; $REC/backup.log)"
+    fi
+    BACKUP_NAME=
+    return 1
+}
+
+# pre_purge_backup RECORD: the pre-purge backup of run RUN_ID that `next` (report RECORD) asked for. On a failure it sets
+# EXIT, says why and returns 1: nothing was deleted, and the run stays RUNNING for the next start's recover, which fails
+# it.
 pre_purge_backup() {
     kind=$(json_nested "$REC/$1.json" backup kind)
     label=$(json_nested "$REC/$1.json" backup label)
@@ -729,29 +946,11 @@ pre_purge_backup() {
     fi
     ARCHIVE_NAME=$label
     say "run ${RUN_ID:-?}: the pre-purge backup (backup.sh --kind pre-purge --label $label; it waits up to $BACKUP_WAIT_MINUTES min for a backup that is running)."
-    CURRENT_STEP=backup
-    brc=0
-    sh "$SCRIPT_DIR/backup.sh" --kind pre-purge --label "$label" --operator archive.sh \
-        --reason "pre-purge backup for $label" --env-file "$ENV_FILE" --lock-wait-minutes "$BACKUP_WAIT_MINUTES" \
-        >"$REC/backup.out" 2>"$REC/backup.log" || brc=$?
-    CURRENT_STEP=
-    line=$(sed -n '/^BACKUP /p' "$REC/backup.out" 2>/dev/null | tail -n 1)
-    BACKUP_NAME=$(printf '%s\n' "$line" | awk 'NF == 4 { print $2 }')
-    BACKUP_STARTED=$(printf '%s\n' "$line" | awk 'NF == 4 { print $4 }')
-    if [ "$brc" -eq 0 ] && printf '%s' "$BACKUP_NAME" | grep -Eq "^[0-9]{8}T[0-9]{6}Z-pre-purge-$label\$" \
-        && printf '%s' "$BACKUP_STARTED" | grep -Eq "$UTC_PATTERN"; then
+    if take_backup "$label" "pre-purge backup for $label" backup; then
         say "run ${RUN_ID:-?}: the pre-purge backup $BACKUP_NAME is published and verified (its dump started at $BACKUP_STARTED)."
         return 0
     fi
-    EXIT=2
-    tail -n 3 "$REC/backup.log" >&2 2>/dev/null || true
-    if [ "$brc" -eq 0 ]; then
-        why="backup.sh did not name the pre-purge backup with its dump start ($REC/backup.out)"
-    else
-        why="the pre-purge backup failed (backup.sh exit $brc; $REC/backup.log)"
-    fi
-    BACKUP_NAME=
-    say "run ${RUN_ID:-?}: $why. Nothing was deleted. The run stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+    say "run ${RUN_ID:-?}: $WHY. Nothing was deleted. The run stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
     return 1
 }
 
@@ -774,25 +973,132 @@ purge_run() {
     if [ "$RC" -eq 0 ] && [ -n "$VALID" ]; then
         OUTCOME=$RESULT
         RECONCILE_PENDING=1
+        RECONCILE_FOR=purge
         receipt=$(json_nested "$REC/purge.json" receipt name)
         say "run $RUN_ID: $(json_nested_number "$REC/purge.json" purged components) components ($(json_nested_number "$REC/purge.json" purged flows) flows, $(json_nested_number "$REC/purge.json" purged movements) Movements) purged, $(json_nested_number "$REC/purge.json" skipped components) components ($(json_nested_number "$REC/purge.json" skipped flows) flows) skipped; batches this start: $(json_number "$REC/purge.json" batches); purge receipt $ARCHIVE_DIR/${receipt:-?} (SHA-256 $(json_nested "$REC/purge.json" receipt sha256))."
         problem=$(json_nested "$REC/purge.json" receipt copy_problem)
         [ -z "$problem" ] || say "$problem"
-        reconcile_after_purge
+        reconcile_after
         return 0
     fi
     failed
     if [ "$RC" -eq 3 ] && [ -n "$VALID" ] && [ -n "$PURGE_STARTED" ]; then
         RECONCILE_PENDING=1
-        reconcile_after_purge
+        RECONCILE_FOR=purge
+        reconcile_after
     fi
     return 0
 }
 
+# deletion_backup RECORD: the pre-purge backup of deletion request REQUEST_ID that `next` (report RECORD) asked for, with
+# the request's own label deletion-<id>-<UTC stamp> (contract B3 §3.2). On a failure it sets EXIT, says why and returns
+# 1: nothing was deleted, and the request stays RUNNING for the next start's recover, which makes it FAILED.
+deletion_backup() {
+    kind=$(json_nested "$REC/$1.json" backup kind)
+    label=$(json_nested "$REC/$1.json" backup label)
+    if [ "$kind" != pre-purge ] \
+        || ! printf '%s' "$label" | grep -Eq "^deletion-${REQUEST_ID:-x}-[0-9]{8}T[0-9]{6}Z\$"; then
+        EXIT=2
+        say "history-archive next asked for a backup of deletion request ${REQUEST_ID:-?} without the pre-purge kind and the request's label ($REC/$1.json). Nothing was deleted; the request stays RUNNING, and the next start makes it FAILED (recover). $REQUEST_AGAIN"
+        return 1
+    fi
+    say "deletion request $REQUEST_ID: the pre-purge backup (backup.sh --kind pre-purge --label $label; it waits up to $BACKUP_WAIT_MINUTES min for a backup that is running)."
+    if take_backup "$label" "pre-purge backup for deletion request $REQUEST_ID" deletion-backup; then
+        say "deletion request $REQUEST_ID: the pre-purge backup $BACKUP_NAME is published and verified (its dump started at $BACKUP_STARTED)."
+        return 0
+    fi
+    say "deletion request $REQUEST_ID: $WHY. Nothing was deleted. The request stays RUNNING, and the next start makes it FAILED (recover). $REQUEST_AGAIN"
+    return 1
+}
+
+# carry_out_deletion: delete --request REQUEST_ID with the pre-purge backup just taken (one transaction, contract B3 §2
+# and §3.1), then the full reconcile when it deleted. Exit 3: the request FAILED and nothing was deleted. Exit 1: the
+# step was refused and changed nothing; the request stays RUNNING for the next start's recover. Every other end (exit
+# 2: interrupted, could not run or outcome unknown; or no valid report) goes to resolve_deletion, because only `status`
+# tells whether the one transaction committed: even an `interrupted` report could follow a COMMIT that succeeded.
+carry_out_deletion() {
+    # From here on the deletion may delete something: an interruption leaves the incident record (on_signal).
+    RECONCILE_PENDING=1
+    RECONCILE_FOR=deletion
+    step delete delete --request "$REQUEST_ID" --backup "$BACKUP_NAME" --backup-started-at "$BACKUP_STARTED"
+    message=$(error_message "$REC/delete.json")
+    if [ -n "$VALID" ] && [ "$RC" -eq 0 ]; then
+        DEL_OUTCOME=deleted
+        DEL_STATE=${STATE:-COMPLETED}
+        rows=$(deleted_rows "$REC/delete.json")
+        say "deletion request $REQUEST_ID: deleted (${rows:-no rows}) in one transaction, after its pre-purge backup $BACKUP_NAME."
+        reconcile_after
+        return 0
+    fi
+    if [ -n "$VALID" ] && [ "$RC" -eq 3 ]; then
+        RECONCILE_PENDING=
+        EXIT=3
+        DEL_STATE=${STATE:-FAILED}
+        say "deletion request $REQUEST_ID FAILED: ${message:-see $REC/delete.json.} Nothing was deleted: the deletion is one transaction. $REQUEST_AGAIN"
+        return 0
+    fi
+    if [ -n "$VALID" ] && [ "$RC" -eq 1 ]; then
+        RECONCILE_PENDING=
+        EXIT=1
+        say "history-archive delete refused: ${message:-see $REC/delete.json.}"
+        say "Nothing was deleted. Deletion request $REQUEST_ID stays RUNNING, and the next start makes it FAILED (recover). $REQUEST_AGAIN"
+        return 0
+    fi
+    # Exit 2 (deletion_interrupted, a step that could not run, outcome_unknown) or no valid report.
+    if [ -n "$VALID" ] && [ -n "$message" ]; then
+        say "history-archive delete ended with exit $RC ($(json_nested "$REC/delete.json" error code)): $message"
+    fi
+    say "history-archive status tells whether the deletion of request $REQUEST_ID committed."
+    resolve_deletion
+}
+
+# resolve_deletion: after a deletion that ended with exit 2 or gave no valid report, `status` tells whether its one
+# transaction committed. The last finished request is this one, COMPLETED: it deleted, so the reconcile runs now. The
+# request is still open (RUNNING): nothing was deleted, and the next start makes it FAILED (recover). This one FAILED:
+# nothing was deleted. When `status` cannot tell, the reconcile runs anyway: a deletion that may have committed is never
+# left unreconciled.
+resolve_deletion() {
+    step delete-status status
+    finished_id=
+    finished_state=
+    open_id=
+    if [ -n "$VALID" ]; then
+        finished_id=$(json_nested_number "$REC/delete-status.json" last_finished_deletion_request id)
+        finished_state=$(json_nested "$REC/delete-status.json" last_finished_deletion_request state)
+        open_id=$(json_nested_number "$REC/delete-status.json" open_deletion_request id)
+    fi
+    if [ "$finished_id" = "$REQUEST_ID" ] && [ "$finished_state" = COMPLETED ]; then
+        DEL_OUTCOME=deleted
+        DEL_STATE=COMPLETED
+        say "status shows deletion request $REQUEST_ID COMPLETED: its deletion committed, after its pre-purge backup $BACKUP_NAME."
+        reconcile_after
+        return 0
+    fi
+    if [ "$open_id" = "$REQUEST_ID" ]; then
+        RECONCILE_PENDING=
+        EXIT=2
+        DEL_STATE=RUNNING
+        say "status shows deletion request $REQUEST_ID still RUNNING: its deletion did not commit, so nothing was deleted, and the next start makes it FAILED (recover). $REQUEST_AGAIN"
+        return 0
+    fi
+    if [ "$finished_id" = "$REQUEST_ID" ]; then
+        RECONCILE_PENDING=
+        EXIT=3
+        DEL_STATE=$finished_state
+        reason=$(sed -n '/^  "last_finished_deletion_request": {$/,/^  }/s/^    "failure_reason": "\(.*\)",\{0,1\}$/\1/p' \
+            "$REC/delete-status.json" 2>/dev/null | head -n 1)
+        say "status shows deletion request $REQUEST_ID ${finished_state:-finished}${reason:+: $reason} Nothing was deleted: the deletion is one transaction. $REQUEST_AGAIN"
+        return 0
+    fi
+    EXIT=2
+    say "history-archive status does not tell whether the deletion of request $REQUEST_ID committed: the reconcile runs now, as after a deletion. Read the request's state in Administration → History archival & purge, or with history-archive status (OPERATIONS_RUNBOOK §11)."
+    reconcile_after
+}
+
 step recover recover
 if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-    # Without a recover, no run is worked on: a run left RUNNING (also one restored from its pre-purge backup) must be
-    # failed before `next` could hand out its backup and purge again.
+    # Without a recover, no run or request is worked on: a run or a deletion request left RUNNING (also one restored from
+    # its pre-purge backup) must be failed before `next` could hand out its backup and purge or deletion again.
     failed
 else
     if [ "$RESULT" = recovered ]; then
@@ -809,6 +1115,13 @@ else
             EXIT=3
             say "run(s) $stale stopped while RUNNING and are FAILED now (an interrupted job, a pre-purge backup that failed, or a database restored from a pre-purge backup). Nothing was deleted in this database. $REQUEST_NEW"
         fi
+        stale=$(json_list "$REC/recover.json" failed_request_ids | tr '\n' ' ' | sed 's/ *$//')
+        if [ -n "$stale" ]; then
+            # A start stopped, its pre-purge backup failed or its deletion was interrupted while the request was
+            # RUNNING, or the database was restored from that backup: the request is FAILED now, nothing deleted.
+            EXIT=3
+            say "deletion request(s) $stale stopped while RUNNING and are FAILED now (an interrupted job, a pre-purge backup that failed, a deletion that stopped on a database error, or a database restored from the pre-purge backup of a deletion). Nothing was deleted by them in this database. $REQUEST_AGAIN"
+        fi
     fi
     problems=$(json_list "$REC/recover.json" receipt_problems)
     if [ -n "$problems" ]; then
@@ -818,25 +1131,38 @@ else
         done
     fi
 
-    # Fail closed (design §10): while the incident record of a reconcile after a purge exists, a start runs recover and
-    # status only. `next` is not asked, so no step that changes data runs: no export, verify, copy, pre-purge backup or
-    # purge, also no resumed purge of a run left PURGING. Exit 1, unless recover already set a code (3: it failed a run,
-    # as after a restore of a pre-purge backup). Only the operator removes the record (OPERATIONS_RUNBOOK §8).
+    # Fail closed (design §10): while the incident record of a reconcile after a purge or a deletion exists, a start runs
+    # recover and status only. `next` is not asked, so no step that changes data runs: no export, verify, copy, pre-purge
+    # backup, purge or deletion, also no resumed purge of a run left PURGING. Exit 1, unless recover already set a code
+    # (3: it failed a run or a request, as after a restore of a pre-purge backup). Only the operator removes the record
+    # (OPERATIONS_RUNBOOK §8).
     INCIDENT_OPEN=
     if [ -e "$INCIDENT_FILE" ]; then
         INCIDENT_OPEN=1
         [ "$EXIT" -ne 0 ] || EXIT=1
         incident_run=$(sed -n 's/^run=//p' "$INCIDENT_FILE" 2>/dev/null | head -n 1)
+        incident_request=$(sed -n 's/^request=//p' "$INCIDENT_FILE" 2>/dev/null | head -n 1)
         incident_result=$(sed -n 's/^result=//p' "$INCIDENT_FILE" 2>/dev/null | head -n 1)
-        say "refused — the incident record $INCIDENT_FILE of a reconcile after a purge exists (run ${incident_run:-?}, result ${incident_result:-unknown}): no run is worked on while it exists, no export, verification, copy, pre-purge backup or purge, not even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); once the investigation is done and the reconciliation is clean, remove the record (rm $INCIDENT_FILE), and the next start goes on."
+        if [ -n "$incident_request" ]; then
+            what="a reconcile after a deletion exists (deletion request $incident_request, result ${incident_result:-unknown})"
+            section="Reconcile finding after a deletion"
+        else
+            what="a reconcile after a purge exists (run ${incident_run:-?}, result ${incident_result:-unknown})"
+            section="Reconcile finding after a purge"
+        fi
+        say "refused — the incident record $INCIDENT_FILE of $what: no run or deletion request is worked on while it exists, no export, verification, copy, pre-purge backup, purge or deletion, not even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 ($section); once the investigation is done and the reconciliation is clean, remove the record (rm $INCIDENT_FILE), and the next start goes on."
     fi
 
-    # The steps that `next` names, until it answers wait, running or none, a run finishes, or a step fails (contract
-    # §3.1): export → verify → copy → backup → purge in one start. After a purge no further run starts in this start.
-    # Each step runs at most once per run in one start: `next` naming a step again means that a step made no progress,
-    # and the start ends instead of looping. With the incident record (above), the loop does not run at all.
+    # The steps that `next` names, until it answers wait, running or none, a run or a deletion finishes, or a step fails
+    # (contract B2 §3.1, B3 §3.1): an open deletion request first (start-deletion → pre-purge backup → delete →
+    # reconcile; then the start ends: no run work after a deletion), else export → verify → copy → backup → purge in one
+    # start, and no further run after a purge. Each step runs at most once per run or request in one start: `next` naming
+    # a step again means that a step made no progress, and the start ends instead of looping. With the incident record
+    # (above), the loop does not run at all.
     NEXT_COUNT=0
     DONE_STEPS=' '
+    DELETION_STARTED=
+    WAIT_SAID=
     while [ -z "$INCIDENT_OPEN" ]; do
         NEXT_COUNT=$((NEXT_COUNT + 1))
         if [ "$NEXT_COUNT" -eq 1 ]; then record=next; else record=next-$NEXT_COUNT; fi
@@ -844,22 +1170,93 @@ else
         run=$(json_number "$REC/$record.json" run_id)
         [ -z "$run" ] || RUN_ID=$run
         if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-            # Exit 3: the requester re-check failed the run before its backup (contract §2).
+            # Exit 3: the requester re-check failed the run before its backup (contract B2 §2).
             failed
             break
         fi
         action=$RESULT
+        if [ -n "$DELETION_STARTED" ] && [ "$action" != deletion_backup ]; then
+            EXIT=2
+            KEEP=1
+            say "history-archive next answered ${action:-(none)} after deletion request $REQUEST_ID was started, not its pre-purge backup ($REC/$record.json). Nothing was deleted; the next start makes a request left RUNNING FAILED (recover)."
+            break
+        fi
+        case "$action" in
+            start_deletion | deletion_backup)
+                # Deletion work: the hourly slot is left to the next start.
+                DELETION_WORKED=1
+                REQUEST_ID=$(json_number "$REC/$record.json" request_id)
+                if [ -z "$REQUEST_ID" ]; then
+                    EXIT=2
+                    KEEP=1
+                    say "history-archive next answered $action without naming its deletion request ($REC/$record.json). Nothing was deleted; the next start tries again."
+                    break
+                fi
+                subject="r$REQUEST_ID"
+                ;;
+            *)
+                # The hourly work begins (or there is nothing to do): this start attempted the hourly slot.
+                mark_slot
+                if [ -n "$DELETION_PENDING" ] && [ "$NEXT_COUNT" -eq 1 ]; then
+                    # `next` names a request that waits while a run is RUNNING (contract B3 §3): here that run is
+                    # another history-archive command's, since recover ran first.
+                    waiting=$(json_nested_number "$REC/$record.json" request id)
+                    if [ -n "$waiting" ]; then
+                        request_note="deletion request $waiting waits while run ${RUN_ID:-?} is RUNNING in another history-archive command"
+                    else
+                        request_note="deletion request ${pending_id:-?} is no longer open (it was cancelled or finished meanwhile)"
+                    fi
+                    if [ -z "$DUE" ]; then
+                        say "$request_note, and the hourly work is not due: this start ends."
+                        break
+                    fi
+                    say "$request_note: the hourly work goes on."
+                fi
+                subject=${RUN_ID:-}
+                ;;
+        esac
         case "$DONE_STEPS" in
-            *" $action:${RUN_ID:-} "*)
+            *" $action:$subject "*)
                 EXIT=2
                 KEEP=1
-                say "history-archive next answered $action again for run ${RUN_ID:-?}: a step of this start made no progress ($REC/$record.json). The next start tries again."
+                if [ "${subject#r}" != "$subject" ]; then
+                    say "history-archive next answered $action again for deletion request $REQUEST_ID: a step of this start made no progress ($REC/$record.json). The next start tries again."
+                else
+                    say "history-archive next answered $action again for run ${RUN_ID:-?}: a step of this start made no progress ($REC/$record.json). The next start tries again."
+                fi
                 break
                 ;;
         esac
-        DONE_STEPS="$DONE_STEPS$action:${RUN_ID:-} "
+        DONE_STEPS="$DONE_STEPS$action:$subject "
+        case "$action" in
+            export | verify | copy | backup | purge)
+                # An APPROVED request waits while this start's run is RUNNING (contract B3 §3): a later start takes it.
+                waiting=$(json_nested_number "$REC/$record.json" request id)
+                if [ -n "$waiting" ] && [ -z "$WAIT_SAID" ]; then
+                    WAIT_SAID=1
+                    say "deletion request $waiting waits while run ${RUN_ID:-?} is RUNNING in this start: a later start carries it out."
+                fi
+                ;;
+        esac
         OUTCOME=$action
         case "$action" in
+            start_deletion)
+                KEEP=1
+                step start-deletion start-deletion --request "$REQUEST_ID"
+                if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
+                    failed
+                    break
+                fi
+                DELETION_STARTED=1
+                ;;
+            deletion_backup)
+                KEEP=1
+                DELETION_STARTED=
+                if deletion_backup "$record"; then
+                    carry_out_deletion
+                fi
+                break
+                ;;
             export)
                 KEEP=1
                 step export export --run "$RUN_ID"
@@ -932,8 +1329,16 @@ if [ -n "$VALID" ]; then
     [ -z "$findings" ] || say "status findings: $findings (OPERATIONS_RUNBOOK §11)."
 fi
 
+# A start that worked on a deletion request leaves the hourly slot to the next start; any other attempted it.
+[ -n "$DELETION_WORKED" ] || mark_slot
 if [ "$EXIT" -eq 0 ]; then
-    echo "ARCHIVE ${OUTCOME:-none} ${RUN_ID:--} ${STATE:--}"
+    if [ -n "$DELETION_WORKED" ]; then
+        echo "DELETION ${DEL_OUTCOME:-none} ${REQUEST_ID:--} ${DEL_STATE:--}"
+    elif [ -z "$DUE" ]; then
+        echo "NOT_DUE"
+    else
+        echo "ARCHIVE ${OUTCOME:-none} ${RUN_ID:--} ${STATE:--}"
+    fi
 fi
 [ -z "$KEEP" ] || say "reports: $REC"
 exit "$EXIT"

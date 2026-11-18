@@ -1,0 +1,308 @@
+/* Delete permanently… (Phase 16, archival design D17): the zone that
+   opens it at the end of Work Order Details and of the Part Number
+   dialog, and the dialog itself — what is deleted or why it is refused,
+   the reason and the typed confirmation, and the request's state. The
+   zone takes the Danger Zone presentation of the Machines and Part
+   Number dialogs; its own classes keep it apart from the delete of the
+   Part Number details. */
+
+.pdel-zone {
+  margin-top: 20px;
+  border: 1px solid var(--error-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.pdel-zonetitle {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--err-t);
+  background: var(--error-surface-weak);
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--error-border);
+}
+
+.pdel-zonebody {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+}
+
+.pdel-zonebody p {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--err-t) 55%, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.pdel-zonebody p b {
+  color: var(--err-t);
+}
+
+.pdel-zonebtn {
+  flex: none;
+  border: 1px solid var(--err-t);
+  border-radius: 10px;
+  background: var(--err);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 800;
+  padding: 9px 16px;
+  min-height: 42px;
+  white-space: nowrap;
+}
+
+.pdel-zonebtn:hover:not(:disabled) {
+  background: var(--err-d);
+}
+
+.pdel-zonebtn:focus-visible {
+  outline: 2px solid var(--err-t);
+  outline-offset: 2px;
+}
+
+.pdel-zonebtn:disabled {
+  opacity: 0.4;
+}
+
+@media (max-width: 640px) {
+  .pdel-zonebody {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* --- The dialog ---------------------------------------------------------- */
+
+/* The record's name under the eyebrow title: a long Part Number or Work
+   Order Number wraps instead of widening the dialog. */
+.pdel .pdel-name {
+  overflow-wrap: anywhere;
+}
+
+.pdel .pdel-block {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 12px 14px;
+}
+
+.pdel .pdel-block h4 {
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.pdel .pdel-block p {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.pdel .pdel-block p + p {
+  margin-top: 6px;
+}
+
+.pdel .pdel-records {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.pdel .pdel-record {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-wrap: anywhere;
+}
+
+.pdel .pdel-recordname {
+  font-family: var(--mono), monospace;
+  font-weight: 700;
+  font-size: 13.5px;
+}
+
+.pdel .pdel-recordsub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The rows per table: label and count on one line each, in two columns
+   when they fit. */
+.pdel .pdel-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 2px 18px;
+  margin: 0;
+}
+
+.pdel .pdel-rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--hair);
+  font-size: 13px;
+}
+
+.pdel .pdel-rows dt {
+  color: var(--muted);
+}
+
+.pdel .pdel-rows dd {
+  margin: 0;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdel .pdel-kept {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.pdel .pdel-kept summary {
+  color: var(--info-t);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pdel .pdel-kept summary:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+.pdel .pdel-kept ul,
+.pdel .pdel-refusals {
+  margin: 8px 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pdel .pdel-keptwhy {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* A refused deletion and the server's refusals: the error tone. */
+.pdel .pdel-block.refused {
+  border-color: var(--error-border);
+  background: var(--error-surface-weak);
+}
+
+.pdel .pdel-block.refused h4,
+.pdel .pdel-refusals {
+  color: var(--err-t);
+}
+
+/* The reason and the typed confirmation. */
+.pdel .pdel-form {
+  margin-top: 16px;
+}
+
+.pdel .pdel-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.pdel .pdel-field textarea.field {
+  height: auto;
+  min-height: 80px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 15px;
+  margin-bottom: 0;
+}
+
+/* The request: its number and state, then one or two lines. */
+.pdel .pdel-statushead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.pdel-state {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 750;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+
+.pdel-state.on {
+  background: var(--success-surface);
+  color: var(--ok-t);
+}
+
+.pdel-state.off {
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.pdel-state.term {
+  background: var(--info-surface);
+  color: var(--info-t);
+}
+
+.pdel-state.err {
+  background: var(--error-surface);
+  color: var(--err-t);
+}
+
+.pdel .pdel-block p.pdel-strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.pdel .pdel-block p.pdel-failure {
+  color: var(--err-t);
+  font-weight: 650;
+  white-space: pre-wrap;
+}
+
+.pdel .pdel-backup {
+  font-family: var(--mono), monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* The server's message for a refused request, or a lost answer. */
+.pdel .pdel-error {
+  margin-top: 12px;
+  color: var(--err-t);
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pdel .pdel-error .pdel-refusals {
+  font-weight: 450;
+}
+
+.pdel .pdel-note {
+  margin-top: 12px;
+  color: var(--warn-t);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.5;
+}

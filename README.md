@@ -73,6 +73,11 @@ backend. In user terms:
   settings, the Due Soon policy, backups, and the archival of old Movement
   history (exported to checked archive files, copied off the server, then
   purged from the database with every quantity kept).
+- **Permanent deletion.** A Work Order or a Part Number entered by mistake, for
+  example for a test, can be deleted with all its data as if it had never been
+  entered: a user who holds the permission requests it in Work Order Details or
+  in the Part Number dialog, and the server carries it out within 5 minutes,
+  after a backup. By default only the Super User role holds the permission.
 
 Not available yet: the Scan behavior settings in Administration. The full
 implementation state is in
@@ -261,7 +266,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0041_phase16_history_purge`):
+current head, `0042_phase16_deletion_requests`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -550,9 +555,12 @@ The pytest suite holds three kinds of tests:
   `tests/test_history_archive_schema.py` covers
   `0040_phase16_history_archive`, the runs and carry-forward records of
   history archival with their guards; `tests/test_history_purge_schema.py`
-  covers the single head `0041_phase16_history_purge`, the Movement deletion
-  guard and the purge states of the runs, and the parity between the models
-  and the migrations.
+  covers `0041_phase16_history_purge`, the Movement deletion guard and the
+  purge states of the runs; `tests/test_deletion_requests_schema.py` covers the
+  single head `0042_phase16_deletion_requests`, the permanent deletion requests
+  with the row guards of every table a deletion deletes from, and the parity
+  between the models and the migrations; `tests/test_deletion_requests.py`
+  covers the requests, the host job's deletion and the API.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -779,7 +787,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | The migration head is `0041_phase16_history_purge`, covered by `tests/test_history_purge_schema.py`; archival runs purge the archived Movement history, and reconcile check (g) is implemented. |
+| 2026-11-18 | uncommitted | The migration head is `0042_phase16_deletion_requests`, covered by `tests/test_deletion_requests_schema.py`; a Work Order or Part Number can be deleted permanently through a request that the server carries out. |
+| 2026-11-18 | `d094f5e` | The migration head is `0041_phase16_history_purge`, covered by `tests/test_history_purge_schema.py`; archival runs purge the archived Movement history, and reconcile check (g) is implemented. |
 | 2026-11-17 | `2f12d33` | The migration head is `0040_phase16_history_archive`, covered by `tests/test_history_archive_schema.py`; archival runs export old Movement history without deleting it. |
 | 2026-11-17 | `1fc96e1` | The migration head is `0038_phase17_passkeys`, covered by `tests/test_phase17_passkeys_schema.py`. |
 | 2026-11-17 | `aa6287d` | The migration head is `0037_phase17_two_step`, covered by `tests/test_phase17_two_step_schema.py`. |

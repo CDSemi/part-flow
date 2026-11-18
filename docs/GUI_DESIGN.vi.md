@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi chưa commit ngày 2026-11-18.
+> Đồng bộ với bản tiếng Anh tại commit `d094f5e` cộng các thay đổi chưa commit ngày 2026-11-18.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2731,7 +2731,8 @@ dừng tối thiểu mỗi trang 1–300 s; mặc định 3 và 6).
 ### Data & system
 
 - **Backups** (Configure system settings) được mô tả dưới heading riêng của nó bên dưới.
-- **History archival & purge** (Run history archival and purge) được mô tả dưới heading riêng của nó bên dưới.
+- **History archival & purge** (Run history archival and purge; thẻ Permanent deletion requests của nó, Delete Work
+  Orders and Part Numbers permanently) được mô tả dưới heading riêng của nó bên dưới.
 - **Settings** chứa hai panel:
   - panel **Due Soon warning** sở hữu cấu hình đứng sau mọi due countdown được suy ra (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ
@@ -2887,6 +2888,11 @@ quyền.
 - **History archival & purge** có permission riêng, **Run history archival and purge**, ban đầu được cấp cho role
   Administrator và cho Super User (role giữ mọi permission); Configure system settings không bảo vệ section này
   (PROJECT_PROFILE §20).
+- **Delete Work Orders and Part Numbers permanently** cũng là một permission riêng, ban đầu chỉ Super User giữ (role giữ
+  mọi permission); role Administrator không giữ nó (PROJECT_PROFILE §20). Chỉ người giữ nó mới thấy **Delete
+  permanently…** trong Work Order Details (§11.2) và trong dialog Part Number của Management → Part Numbers (§14.2), cùng
+  thẻ **Permanent deletion requests** của History archival & purge; server đòi hỏi nó cho mọi preview, yêu cầu, việc hủy
+  và danh sách các lần xóa vĩnh viễn.
 
 ### Scan Stations
 
@@ -2941,10 +2947,11 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
   Cả hai đều không được đưa ra trên dòng của chính người dùng đang đăng nhập.
 - **Roles & permissions** liệt kê các role có tên (ban đầu là Administrator, Manager, Operator và Super User, với đúng
   các capability mà PROJECT_PROFILE §20 liệt kê là quyền cấp ban đầu) và sửa tên của từng role cùng các permission của
-  nó, nhóm thành Administration, Production master data, Work Orders, priority and reports, và Scan Station. Bốn
-  correction permission (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform
-  authorized historical corrections) chỉ được sửa trong Production rules → **Correction permissions**, dưới dạng một
-  bảng role × permission bên dưới công tắc Undo reason.
+  nó, nhóm thành Administration, Production master data, Work Orders, priority and reports, và Scan Station. Nhóm
+  Administration kết thúc bằng hai permission bảo trì dữ liệu, Run history archival and purge rồi Delete Work Orders and
+  Part Numbers permanently. Bốn correction permission (Undo recent eligible scans, Perform quantity corrections, Edit
+  Work Order Allocation, Perform authorized historical corrections) chỉ được sửa trong Production rules → **Correction
+  permissions**, dưới dạng một bảng role × permission bên dưới công tắc Undo reason.
 
 ### History archival & purge
 
@@ -2955,10 +2962,11 @@ archive, `History archived in run N`, cho mỗi flow đã archive (§7.2), và c
 (§4.5). Các lần chạy đã kết thúc trước khi lần chạy có purge giữ kết quả `Exported to files; nothing deleted.` Mọi người
 dùng đã đăng nhập đều đọc được các thiết lập và các lần chạy. Preview, việc yêu cầu một lần chạy và mọi thay đổi cần
 permission **Run history archival and purge**; không có nó thì một dòng `View only` nêu permission đó, thẻ Preview
-không hiển thị và không có thao tác nào được cung cấp. Section theo quy tắc thẻ, với tối đa hai cột: thẻ **Retention and
-schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng nhau khi đủ chỗ cho hai cột (mỗi thẻ rộng ít nhất
-25rem, bề rộng mà nhãn và giá trị rộng nhất của nó vẫn nằm trên một dòng), nếu không thì một cột rộng hết trang; rồi thẻ
-**Runs** rộng hết trang.
+không hiển thị và không có thao tác nào trên các thiết lập hay các lần chạy được cung cấp. Section theo quy tắc thẻ, với
+tối đa hai cột: thẻ **Retention and schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng nhau khi đủ chỗ
+cho hai cột (mỗi thẻ rộng ít nhất 25rem, bề rộng mà nhãn và giá trị rộng nhất của nó vẫn nằm trên một dòng), nếu không
+thì một cột rộng hết trang; rồi thẻ **Runs** rộng hết trang và, chỉ với người giữ **Delete Work Orders and Part Numbers
+permanently**, thẻ **Permanent deletion requests** bên dưới nó, cũng rộng hết trang.
 
 - **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
   its work, and how much it purges at a time.` Thẻ hiển thị **Retention period** (ban đầu `24 months (2 years)`;
@@ -3020,7 +3028,9 @@ schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng 
     hai phần mở rộng mở được bằng bàn phím: `Pre-purge backup` với tên của backup, và `Purge receipt` với tên file của
     receipt (`<archive folder name>.purged.json`, nằm cạnh thư mục archive) và SHA-256 của nó.
 
-  Dưới 800 px các dòng xếp chồng.
+  Chữ trong bảng chỉ xuống dòng giữa các từ, nên một cửa sổ hẹp không bao giờ cắt đôi một từ: cột của lý do không bao
+  giờ hẹp hơn 6.5rem, và chỉ một từ dài hơn thế (một đường link được dán vào) mới xuống dòng ở bất kỳ chỗ nào, giống tên
+  thư mục archive, tên một backup và SHA-256. Dưới 800 px các dòng xếp chồng.
   - `Cancel…` trên một lần chạy đã được yêu cầu hoặc đang chờ bản sao ngoài server hỏi trước (`Cancel run N?`, với
     `Cancel run` và `Keep run (Esc)`); thư mục archive của một lần chạy đang chờ vẫn ở lại trên server. Một lần chạy mà
     job đang xử lý (`Running`, `Purging`) không có `Cancel…`, và server từ chối hủy nó.
@@ -3033,6 +3043,34 @@ schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng 
   - Một lần từ chối được hiển thị trong dialog đúng như server diễn đạt. Khi một lần hủy hay một lần xác nhận không nhận
     được câu trả lời rõ ràng, danh sách lần chạy được tải lại và thẻ nhắc kiểm tra trạng thái của lần chạy; làm lại cả
     hai thao tác đều an toàn.
+- **Permanent deletion requests** — `Each request deletes Work Orders or a Part Number with all their data from the
+  database, as if they had never been entered; the server carries it out after a pre-purge backup.` Chỉ người giữ
+  **Delete Work Orders and Part Numbers permanently** mới thấy thẻ, và chỉ họ tạo các yêu cầu, bằng **Delete
+  permanently…** (§11.2, §14.2); chú thích cuối thẻ nói điều đó: `Delete permanently… in Work Order Details and in the
+  Part Number dialog of Management → Part Numbers requests a deletion.` Một nút `Reload`, rồi các yêu cầu, mới nhất
+  trước, trong một bảng theo cách trình bày của các lần chạy, với sáu cột để bảng vẫn nằm gọn trong thẻ của nó xuống tới
+  một cửa sổ 1024 px bên cạnh thanh bên của Administration:
+  - **Request**: số của yêu cầu;
+  - **State**: trạng thái dưới dạng status pill — `Waiting for the server`, `Deleting…`, `Deleted`, `Failed — nothing
+    was deleted` hoặc `Cancelled` — với `Cancel…` bên dưới khi yêu cầu đang chờ server;
+  - **Deletes**: các bản ghi mà yêu cầu nêu tên (`Work Order 007201`, `Part Number A-100`), kèm một dòng như `Also 1
+    internal Work Order` khi việc xóa một Part Number kéo theo các Work Order nội bộ, rồi mọi dòng mà nó xóa (`28
+    rows`), với số dòng theo từng bảng được gập dưới `Rows per table`;
+  - **Requested by**: User, hoặc operator trên server (`ops-anna (operator)`), kèm lý do;
+  - **Times**: `Requested` và bước mới nhất (`Started` hoặc `Finished`), toàn bộ dòng thời gian cùng `Backup started`
+    được gập dưới `All times`;
+  - **Result**: `Deleted from the database.`, lý do thất bại đúng như server đưa ra (không có gì bị xóa, và có thể yêu
+    cầu xóa lại), hoặc `Cancelled by <tên>.`, kèm tên của backup mà server tạo trước khi xóa, được gập dưới `Pre-purge
+    backup`.
+
+  Chữ xuống dòng như trong bảng các lần chạy, chỉ giữa các từ: một Work Order Number hay Part Number được giữ nguyên
+  (một số dài hơn 16 ký tự có thể xuống dòng ở bất kỳ chỗ nào), và cột kết quả không bao giờ hẹp hơn 6.5rem, nên chỉ một
+  từ dài hơn — tên một bảng hay một constraint trong lý do thất bại — mới xuống dòng ở bất kỳ chỗ nào, giống tên backup.
+  Dưới 800 px các dòng xếp chồng. `Cancel…` (tên truy cập `Cancel deletion request N…`) hỏi trước (`Cancel deletion
+  request N?`, nói rằng không có gì bị xóa và các bản ghi vẫn ở lại, với `Cancel request` và `Keep request (Esc)`); một
+  yêu cầu mà server đang xử lý không có `Cancel…`, và server từ chối hủy nó. Một lần từ chối được hiển thị trong dialog
+  đúng như server diễn đạt. Khi một lần hủy không nhận được câu trả lời rõ ràng, danh sách yêu cầu được tải lại và thẻ
+  nhắc kiểm tra trạng thái của yêu cầu; hủy lại là an toàn.
 
 ### Backups
 
@@ -3045,7 +3083,8 @@ system settings.
   (0–520, ban đầu 52) là các số nguyên, mỗi ô có lỗi inline riêng. Việc rotation giữ backup scheduled mới nhất của mỗi
   giờ, ngày và tuần trong chừng ấy giờ, ngày và tuần (UTC).
 - **Pre-purge backups kept** (1–100, ban đầu 3) là một số nguyên có lỗi inline riêng: trong các pre-purge backup, mà job
-  history archival tạo trước mỗi lần purge (§9 History archival & purge), việc rotation giữ chừng ấy backup mới nhất.
+  history archival tạo trước mỗi lần purge và trước mỗi lần xóa vĩnh viễn (§9 History archival & purge), việc rotation
+  giữ chừng ấy backup mới nhất.
 - Một dòng trung tính nhắc lại retention và giới hạn trên của nó, rồi số pre-purge backup được giữ, ví dụ `Keeps one
   scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at
   most 130 scheduled backups. Keeps the newest 3 pre-purge backups.`
@@ -3310,6 +3349,46 @@ audit chỉ nằm trên các surface audit đã được phê duyệt (§3 rule 
   sửa (gõ lại quantity đã cam kết, gỡ lại một draft line, xóa giá trị nhập số bên ngoài) đưa dialog về trạng thái không
   có thay đổi chưa lưu, nên marker biến mất, việc đóng không hỏi gì, việc gỡ line đã lưu khả dụng trở lại, và
   **Release to production…** thôi yêu cầu xử lý bản nháp trước (§11.4), tất cả mà không cần lưu hay reload.
+- **Delete permanently…** (PROJECT_PROFILE §28 Administrative Archival and Purge). Với người giữ **Delete Work Orders and
+  Part Numbers permanently** (§9), dialog của một Work Order có Work Order Number kết thúc, bên dưới các action của nó,
+  bằng một danger zone riêng có tiêu đề `Delete permanently`: `This removes Work Order {number} and all its data from
+  the database, as if it had never been entered, after a pre-purge backup.` cùng action `Delete permanently…`, bị vô
+  hiệu hóa khi mất kết nối hoặc khi đang lưu. Một Work Order nội bộ (hiển thị `—`) không có Work Order Number để nêu
+  tên, nên dialog của nó không có zone này; việc xóa vĩnh viễn một Part Number kéo theo mọi Work Order nội bộ mà tất cả
+  line của nó đều thuộc Part Number đó (§14.2). Action mở dialog **Delete permanently** dùng chung, theo tông danger.
+  PartFlow chỉ ghi nhận yêu cầu; server thực hiện nó. Dialog:
+  - có tiêu đề `Delete Work Order permanently`, hiển thị Work Order Number, và nói `This removes Work Order {number}
+    and all its data from the database, as if it had never been entered. The server takes a pre-purge backup first.`;
+  - hiển thị điều server trả lời cho việc xóa. Dưới `What is deleted`: các Work Order (số của chúng, hoặc `—` kèm
+    `Internal Work Order`, và các demand line của chúng cùng các Part Number), các Part Number (`With its saved details`
+    hoặc `No saved details`), số dòng theo từng bảng (Work Orders, Demand lines, Allocations, Quantity Flows, Lineage
+    links, Movements, Assigned Routes, Assigned Route steps, Part Number details và Audit rows), và `Audit rows kept: N`,
+    một phần mở rộng liệt kê từng audit row được giữ lại (entity, sự kiện và thời điểm của nó) kèm lý do server đưa ra
+    (`Kept: also concerns other records`), hoặc `Audit rows kept: none.` Khi việc xóa bị từ chối, `This deletion is
+    refused` liệt kê mọi lần từ chối đúng như server diễn đạt, và không thể yêu cầu gì. Khi một yêu cầu xóa khác đang
+    mở, số, trạng thái, các bản ghi, thời điểm và người yêu cầu của nó được hiển thị cùng `Nothing can be requested
+    until it finishes or is cancelled.` và `Check again`, nút đọc lại preview;
+  - nếu không thì hỏi một **Reason** (bắt buộc, tối đa 500 ký tự) và Work Order Number gõ lại (`Type {number} (Work
+    Order Number) to confirm`). `Request deletion` được bật khi cả hai đều có nội dung; cả hai được gửi đúng như đã nhập,
+    và server kiểm tra chúng. Mọi lần từ chối — của lý do, của xác nhận đã gõ, vì một yêu cầu khác đang mở, hoặc vì việc
+    xóa nay bị từ chối, với từng lần từ chối được liệt kê — được hiển thị đúng như server diễn đạt, và các ô nhập được
+    giữ nguyên;
+  - sau đó hiển thị yêu cầu, `Deletion request N`, với trạng thái dưới dạng status pill: `Waiting for the server` kèm
+    thời điểm yêu cầu, người yêu cầu và `The server's history archive task carries it out, normally within 5 minutes.`
+    (trên một bản cài đặt chưa thiết lập task này, yêu cầu cứ ở trạng thái chờ); `Deleting…` kèm thời điểm bắt đầu; `Deleted`; `Failed — nothing was deleted` kèm lý do đúng như server đưa ra và
+    `You may request the deletion again.`; hoặc `Cancelled`. Khi dialog đang mở và yêu cầu đang chờ hoặc đang xóa,
+    dialog đọc lại trạng thái của nó sau mỗi vài giây. `Cancel request` hủy một yêu cầu đang chờ server; một yêu cầu
+    mà server đang xử lý bị từ chối kèm thông điệp của server. Sau một yêu cầu thất bại hoặc đã hủy, `Preview again`
+    đọc lại những gì sẽ bị xóa và cho phép yêu cầu mới, với lý do được giữ và Work Order Number phải gõ lại;
+  - theo dõi theo cùng cách một yêu cầu đang mở nêu tên đúng Work Order này (yêu cầu trước đó, bởi một User khác hoặc
+    bởi một operator trên server) thay vì hiển thị nó như một yêu cầu khác;
+  - khi một yêu cầu không nhận được câu trả lời rõ ràng, đọc lại preview, nơi hiển thị yêu cầu nếu server đã ghi nhận nó;
+  - khi yêu cầu đã `Deleted`, nói `Work Order {number} no longer exists.` kèm pre-purge backup. `Back to Work Orders` —
+    hoặc bất kỳ yêu cầu đóng nào khác — đóng dialog và Work Order Details, quay về danh sách Work Orders (hoặc trang
+    Completed Work Orders), danh sách được tải lại không còn Work Order đó, và xác nhận việc xóa bằng một thông báo;
+  - đóng ngay khi chưa nhập gì, và hỏi trước (`Discard this deletion request?`) khi đã nhập lý do hoặc xác nhận. Đóng
+    dialog khi yêu cầu còn mở thì để yêu cầu lại cho server, và thẻ Permanent deletion requests của History archival &
+    purge (§9) liệt kê nó. Khi mất kết nối, `Request deletion` và `Cancel request` bị vô hiệu hóa.
 
 ## 11.3 New Work Order — modal dialog ưu tiên nhập thủ công và luồng Add Part
 
@@ -4201,6 +4280,24 @@ của dialog Edit và lời xác nhận của nó (§14.2), và không bao giờ
     các allocation không bao giờ bị động đến hay bị xóa lan theo. Mọi màn hình tiếp tục hiển thị PN chuẩn hóa với các
     trường suy ra từ bản ghi gốc vắng mặt (`—`, §7.1), và một bản ghi có thể được tạo lại về sau cho cùng PN.
   - **Không có archive PN, không có xóa mềm và không có vòng đời active/inactive** (PROJECT_PROFILE §8.1).
+- **Delete permanently (Management → Part Numbers).** Với người giữ **Delete Work Orders and Part Numbers permanently**
+  (§9), dialog mở từ danh sách Part Numbers — dù ở chế độ sửa hay chỉ đọc — kết thúc bằng một danger zone thứ hai, tách
+  riêng, có tiêu đề `Delete permanently`: `This removes Part Number {PN} with all its data, including its production
+  history, from the database, as if it had never been entered, after a pre-purge backup.` cùng action `Delete
+  permanently…`, bị vô hiệu hóa khi mất kết nối hoặc khi đang lưu. Khác với `Delete details…`, vốn chỉ xóa các chi tiết
+  đã lưu, nó yêu cầu xóa vĩnh viễn Part Number cùng mọi dữ liệu của nó (PROJECT_PROFILE §28 Administrative Archival and
+  Purge) qua dialog dùng chung của §11.2, dialog chỉ khác ở những điểm sau:
+  - nó có tiêu đề `Delete Part Number permanently` và nói `This removes Part Number {PN} with all its data, including
+    its saved details and its production history, from the database, as if it had never been entered. The server takes
+    a pre-purge backup first.`;
+  - xác nhận là Part Number gõ lại (`Type {PN} (Part Number) to confirm`), được server so sánh ở dạng chuẩn hóa;
+  - server từ chối việc xóa một Part Number mà một Work Order còn ở lại vẫn dùng (PROJECT_PROFILE §28) và nêu tên từng
+    Work Order như vậy; các Work Order đó được xóa trước, mỗi cái từ Work Order Details của nó;
+  - khi yêu cầu đã `Deleted` (`Part Number {PN} and all its data no longer exist.`), `Back to Part Numbers` — hoặc bất
+    kỳ yêu cầu đóng nào khác — đóng dialog và dialog Part Number, và danh sách được tải lại không còn Part Number đó.
+
+  Dialog mở từ một demand line (§11.2) hoặc từ New Work Order không có zone này: các thao tác ghi của nó chỉ liên quan
+  đến các chi tiết của Part Number.
 
 ## 14.3 Nhãn barcode Part Number
 
@@ -4290,7 +4387,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-18 | uncommitted | §4.5, §7.2, §7.3 và §9: một lần chạy archival purge lịch sử đã archive sau bản sao ngoài server và một pre-purge backup, Tracking hiển thị các mục đã archive và các bước route đã archive, các command đã archive không thể undo được nữa, và các giới hạn batch của purge cùng Pre-purge backups kept là các thiết lập. |
+| 2026-11-18 | uncommitted | §9, §11.2 và §14.2: permission mới Delete Work Orders and Part Numbers permanently đưa ra Delete permanently… trong Work Order Details và trong dialog Part Number, dialog yêu cầu việc xóa và theo dõi trạng thái của nó, cùng thẻ Permanent deletion requests của History archival & purge. |
+| 2026-11-18 | d094f5e | §4.5, §7.2, §7.3 và §9: một lần chạy archival purge lịch sử đã archive sau bản sao ngoài server và một pre-purge backup, Tracking hiển thị các mục đã archive và các bước route đã archive, các command đã archive không thể undo được nữa, và các giới hạn batch của purge cùng Pre-purge backups kept là các thiết lập. |
 | 2026-11-17 | 2f12d33 | §9: History archival & purge hiển thị các thiết lập, preview, việc yêu cầu một lần chạy và các lần chạy với Cancel và Confirm off-host copy; một lần chạy xuất lịch sử và không xóa gì, và permission mới Run history archival and purge bảo vệ section. |
 | 2026-11-17 | 1490927 | §11: Add Part đề xuất, xem trước và tạo dạng chuẩn của một PN mới mà server suy ra từ giá trị đã nhập. |
 | 2026-11-17 | 1a553f2 | §9: mọi section thiết lập của Administration hiển thị mỗi nhóm thiết lập thành một thẻ riêng, như Security. |

@@ -24,9 +24,10 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | Reset a forgotten password or login name, rename a user, or remove a user's access | §8 (Sign-in and user accounts) |
 | Find what a past release did | §1 |
 | Use the short `pf` command for an installation, an update, a backup, a restore or the status | Before you run any command |
-| Delete Work Orders and Part Numbers that were entered only for testing | §10 |
-| Understand the history archive job, its pre-purge backup and its purge, check or confirm an archival run, recover from a failed run, check an archive, or return disk space after a purge | §11 |
+| Delete Work Orders and Part Numbers that were entered only for testing (a permanent deletion request) | §10 |
+| Understand the history archive job, its pre-purge backups, its purge and how it carries out a permanent deletion request, check or confirm an archival run, recover from a failed run, check an archive, or return disk space after a purge | §11 |
 | Handle a reconciliation finding after a purge of Movement history (`archive.sh` exit 4) | §8 (Reconcile finding after a purge) |
+| Handle a reconciliation finding after a permanent deletion (`archive.sh` exit 4) | §8 (Reconcile finding after a deletion) |
 
 ## Before you run any command
 
@@ -56,8 +57,8 @@ its options.
 | `pf backup [--reason TEXT]` | A manual backup (§3). |
 | `pf restore <NAME> --approved-by <owner>` | The new-instance restore of §6 into an empty database, with the owner's approval recorded in `restore.json` before `backend` starts. |
 | `pf status [--url https://<partflow-host>]` | The containers, `/api/health` and the `status` summary (§2); with `--url`, `check.sh --no-state`. |
-| `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | The preview of deleting Work Orders and Part Numbers entered only for testing; with `--confirm`, a verified manual backup and then the deletion in one transaction (§10). |
-| `pf archive` | The hourly work of the history archive job now, `archive.sh` without `--scheduled` (§11): it exports, verifies and copies a requested run, takes its pre-purge backup and **purges** the archived Movement history from the database, then runs the reconciliation. |
+| `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | The preview of deleting Work Orders and Part Numbers entered only for testing; with `--confirm`, a permanent deletion request, which the history archive job carries out at once (its pre-purge backup, the deletion in one transaction and the reconciliation), and the request's final state (§10). It needs the history archive job set up. |
+| `pf archive` | The history archive job now, `archive.sh` without `--scheduled` (§11): it carries out an open permanent deletion request first (its pre-purge backup and the deletion), or does the hourly work: it exports, verifies and copies a requested run, takes its pre-purge backup and **purges** the archived Movement history from the database; then it runs the reconciliation. |
 
 Conventions: a one-shot job that reads or writes the backup folder runs with `--user "$(id -u):$(id -g)"`, because
 that folder has mode 0700. `<partflow-host>` is the host name people type in the browser, `<backup-dir>` is the value
@@ -77,9 +78,9 @@ they tell you which backup belongs to which release and what was checked.
 | `<UTC>-restore-test-<NAME>/` | `restore-test.sh` | `evidence.json`, the result of the drill (§4) |
 | the folder of the release being undone | you, during rollback path 3 (§6) | `rollback.json`, `rollback-reconcile.json` |
 | `<UTC>-restore-<NAME>/` | you, during a new-instance restore (§6) | `restore.json` |
-| `archive/<UTC>/` | `archive.sh`, only for an hourly work that did something or failed (§11) | one JSON report and one log per step (`recover`; `next`, then `next-2`, `next-3` and so on; `export`, `verify`, `copy`, `purge`, `status`); `backup.out` and `backup.log` of the pre-purge backup; `reconcile.json` and `reconcile.log`, the reconciliation after a purge; and `messages.log` |
+| `archive/<UTC>/` | `archive.sh`, only for a start that did something or failed (§11) | one JSON report and one log per step (`recover`; `next`, then `next-2`, `next-3` and so on; `export`, `verify`, `copy`, `purge`, `start-deletion`, `delete`, `status`); `check.json`, the check that found a permanent deletion request; `backup.out` and `backup.log` of the pre-purge backup; `reconcile.json` and `reconcile.log`, the reconciliation after a purge or a deletion; and `messages.log` |
 | `archive/hourly-slot` | `archive.sh --scheduled` (§11) | the hourly stamp: the minute of the last hourly work that was attempted |
-| `archive/reconcile-after-purge` | `archive.sh` (§11) | the incident record of a reconciliation after a purge that did not end clean: the run, the result, the failing checks and the path of the report. While it exists, `archive.sh` works on no run; you remove it when the incident is closed (§8, Reconcile finding after a purge) |
+| `archive/reconcile-after-purge` | `archive.sh` (§11) | the incident record of a reconciliation after a purge or a permanent deletion that did not end clean: the run or the deletion request, the result, the failing checks and the path of the report. While it exists, `archive.sh` works on no run and carries out no deletion request; you remove it when the incident is closed (§8, Reconcile finding after a purge, or after a deletion) |
 
 `record.json` holds the release (tag, commit, previous tag, image IDs), the database revisions before and after, the
 operator and the approver, the times, the pre-release backup and its verification, the migration, smoke and
@@ -139,20 +140,22 @@ It prints one line per check, `PASS|FAIL|SKIP <id> <reason>`, in this order, the
 | `database` | the `status` report could not run, did not answer within 120 s, or reported a database error |
 | `schema` | `status` reports the schema as not ready |
 | `backup_age` | no published backup is found, the backup folder cannot be read, or the newest backup of any kind (a pre-purge backup included) completed longer ago than the scheduled backup interval of Administration → Backups plus 2 hours (3 hours initially; `--max-backup-age-hours` sets another limit) |
-| `archival_proposal` | the read-only `history-archive status` reports a finding, named in the line: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable`, `copy_dir_unusable` or `receipt_not_copied` (§11); or the reconciliation after a purge has not ended clean, named first as `reconcile_after_purge` (§8, Reconcile finding after a purge); `SKIP` while archival is not set up |
+| `archival_proposal` | the read-only `history-archive status` reports a finding, named in the line: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable`, `copy_dir_unusable` or `receipt_not_copied` (§11); a permanent deletion request is still open (`APPROVED` or `RUNNING`) more than 15 minutes after it was requested (`--deletion-wait-minutes`), so the history archive task has not carried it out or has not finished it: `deletion_request_waiting` (§10), which names the run that an `APPROVED` request waits behind; or the reconciliation after a purge or a deletion has not ended clean, named first as `reconcile_after_purge` (§8); `SKIP` while archival is not set up, except for `deletion_request_waiting`: PartFlow records deletion requests all the same, and then nothing carries them out |
 
-- The lines `database`, `schema` and `backup_age` come from one read-only `status` run, and `archival_proposal` from
-  one read-only `history-archive status` run in the `maintenance` service (§11) and from the incident record
-  `<records-dir>/archive/reconcile-after-purge` of `archive.sh`, which `check.sh` only reads. While a release holds its
-  lock, or `release.sh` holds the backup lock, these four lines are `SKIP`. When such a lock is older than 4 hours, the
-  run reports `FAIL database` and names the lock, because a killed `release.sh` leaves it behind (§3, Backup lock and
-  release lock).
+- The lines `database`, `schema` and `backup_age` come from one read-only `status` run, and `archival_proposal` from one
+  read-only `history-archive status` run in the `maintenance` service (§11) and from the incident record
+  `<records-dir>/archive/reconcile-after-purge` of `archive.sh`, which `check.sh` only reads. While archival is not set
+  up, `archival_proposal` comes from the cheap check of `archive.sh` instead: `history-archive settings` with
+  `docker compose exec` in the running `backend` container (30 seconds at most), which tells whether a deletion request
+  is open and when it was requested. While a release holds its lock, or `release.sh` holds the backup lock, these four
+  lines are `SKIP`. When such a lock is older than 4 hours, the run reports `FAIL database` and names the lock, because
+  a killed `release.sh` leaves it behind (§3, Backup lock and release lock).
 - Exit codes: 0 nothing to report, 1 at least one `FAIL`, 2 the check could not run; both 1 and 2 reach the
   scheduler's failure notification. An unchanged set of failures is reported again only after 6 hours
   (`--renotify-hours`); the output then says `already reported`.
 - `check.sh` keeps its state in `~/partflow-monitoring` (mode 0700), including `last-check.txt` (the lines of the last
-  run), `growth.tsv` (the database size once a day) and `archive-status.json` (the last `history-archive status`
-  report).
+  run), `growth.tsv` (the database size once a day), `archive-status.json` (the last `history-archive status`
+  report) and `archive-settings.json` (the last `history-archive settings` report, while archival is not set up).
 - The `errors` check reads the log of the current `backend` container only, and Docker deletes a container's log with
   the container. After `backend` was recreated (by a release or a password change), the run adds a `NOTE errors`
   line. **Before you recreate `backend` by hand**, run
@@ -225,15 +228,17 @@ of a release checkout: the running release's for scheduled, manual and pre-purge
 
 ```text
 NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-scheduled,
-                                         20261008T140000Z-pre-release-v1.0.0-rc.2
-                                         and 20271110T050102Z-pre-purge-run-3-20271110T042000Z
+                                         20261008T140000Z-pre-release-v1.0.0-rc.2,
+                                         20271110T050102Z-pre-purge-run-3-20271110T042000Z
+                                         and 20271110T050132Z-pre-purge-deletion-7-20271110T050130Z
 ```
 
 - `kind` is `scheduled` (the backup task that runs every hour), `manual` (taken by hand, with a reason),
   `pre-release` (taken by `release.sh`, with the target release tag as `label`) or `pre-purge` (taken by `archive.sh`
-  right before the purge of an archival run, with the run's archive name `run-<id>-<UTC time>` as `label`, §11). `daily`
-  is the scheduled kind of earlier releases: such backups are still verified, restored and rotated like scheduled
-  ones. Every kind is verified and restored the same way.
+  right before the purge of an archival run, with the run's archive name `run-<id>-<UTC time>` as `label`, or right
+  before the deletion of a permanent deletion request, with the request's label `deletion-<id>-<UTC time>`, §11).
+  `daily` is the scheduled kind of earlier releases: such backups are still verified, restored and rotated like
+  scheduled ones. Every kind is verified and restored the same way.
 - The folder holds exactly four files: `partflow.dump` (the database, dumped inside `db` with
   `pg_dump --format=custom --no-owner --no-privileges`), `partflow.dump.list` (its table of contents), `manifest.json`
   (when, where and from which release and database revision the backup was taken, the PostgreSQL version, the
@@ -257,8 +262,8 @@ deploy/production/backup.sh --kind manual --operator "<your name>" --reason "<wh
 
 On success, the standard output is exactly one line, `BACKUP <NAME> <absolute path>`; a pre-purge backup adds a third
 value, the time its dump started (`BACKUP <NAME> <absolute path> <YYYY-MM-DDTHH:MM:SSZ>`, read from its verification
-report), which the purge records. Progress lines such as `backup: dump ok (1234 ms)` go to standard error. The backup
-task runs `deploy/production/backup.sh --kind scheduled --operator scheduler` every hour
+report), which the purge or the deletion records. Progress lines such as `backup: dump ok (1234 ms)` go to standard
+error. The backup task runs `deploy/production/backup.sh --kind scheduled --operator scheduler` every hour
 ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.2); Scheduled backups, below, explains it. `release.sh` takes the
 pre-release backup itself; its manual form, for a release by hand, is
 `deploy/production/backup.sh --kind pre-release --label <target tag> --tools-release <target tag> --operator "<your name>"`.
@@ -267,8 +272,8 @@ pre-release backup itself; its manual form, for a release by hand, is
 | Option | Meaning |
 | --- | --- |
 | `--kind scheduled\|manual\|pre-release\|pre-purge`, `--operator NAME` | Required. `--kind daily`, `--keep-daily` and `--keep-weekly` of earlier releases are refused with the command to use instead. |
-| `--reason TEXT` | Required for `manual`. |
-| `--label TAG` | The target release tag for `pre-release`; the archive name of the run, `run-<id>-<UTC time>`, for `pre-purge`. Required for these two kinds, refused otherwise. |
+| `--reason TEXT` | Required for `manual`. The default of `pre-purge` is `pre-purge backup for <archive name>`, or `pre-purge backup for deletion request <id>`. |
+| `--label TAG` | The target release tag for `pre-release`; for `pre-purge`, the archive name of the run, `run-<id>-<UTC time>`, or the label of the deletion request, `deletion-<id>-<UTC time>`. Required for these two kinds, refused otherwise. |
 | `--tools-release TAG` | The release whose `backup-tools` image writes and verifies the manifest (default: `PARTFLOW_RELEASE`). |
 | `--no-rotate` | `scheduled` only: keep every scheduled and pre-purge backup this run. |
 | `--reserve-mib N` | Free space kept beyond twice the newest dump (default 1024). |
@@ -335,9 +340,14 @@ $PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rot
 - It keeps the newest verified scheduled backup of each of the newest `--keep-hourly` hours, `--keep-daily` days and
   `--keep-weekly` calendar weeks that hold one (hours, days and ISO weeks in UTC; the periods overlap), so the newest
   scheduled backup is always kept. The daily backups of earlier releases count as scheduled backups.
-- Of the verified pre-purge backups it keeps the newest `--keep-pre-purge` and deletes the older ones; the two
-  retentions never count each other's backups. A pre-purge backup is never rotated by its own run. With an image from
-  before the purge, whose backup policy has no pre-purge value, the rotation leaves every pre-purge backup alone.
+- Of the verified pre-purge backups, those of archival runs and of permanent deletion requests together, it keeps the
+  newest `--keep-pre-purge` and deletes the older ones; the two retentions never count each other's backups. A pre-purge
+  backup is never rotated by its own run. With an image from before the purge, whose backup policy has no pre-purge
+  value, the rotation leaves every pre-purge backup alone.
+- **The pre-purge backups of deletions and of purges share Pre-purge backups kept.** Deletions are usually far more
+  frequent than purges: with the initial value 3, three deletions after a purge rotate that purge's pre-purge backup
+  out at the next scheduled backup. If that backup matters (a purge whose result you may still want to undo), raise
+  Pre-purge backups kept in Administration → Backups before a session of test-data deletions.
 - It verifies every candidate first. A backup that fails verification is not counted and **never deleted**:
   `backup.sh` exits with 4 and you review it (§9).
 - **Pre-release and manual backups are never rotated**: you remove them after review (§9). No tool ever rotates or
@@ -363,8 +373,9 @@ the host, everything since its last off-host copy. Until the backup task is sche
 Backups never run at the same time. The folder `<backup-dir>/.backup.lock` is the lock; its file `owner` holds
 `host`, `pid`, `started_at`, `by` (`backup.sh` or `release.sh`) and the backup `name` or the `release`. A second run is
 refused, never queued: `backup_running` means that a backup, or a release holding the lock, is in progress, so wait.
-The one exception is the pre-purge backup of `archive.sh`, which waits for the lock (`--lock-wait-minutes`, §11); no
-release can hold the lock then, because `release.sh` refuses to start while `archive.sh` works. A scheduled backup that
+The one exception is a pre-purge backup of `archive.sh` (before a purge or a deletion), which waits for the lock
+(`--lock-wait-minutes`, §11); no release can hold the lock then, because `release.sh` refuses to start while
+`archive.sh` works. A scheduled backup that
 starts while the pre-purge backup runs is refused as during a release (one failure email; the next run backs up as
 usual).
 `release.sh` holds the lock from the write freeze (or from its backup) until the new `backend` runs. **Start a release
@@ -711,16 +722,24 @@ recent errors first with `deploy/production/check.sh --url https://<partflow-hos
    audited data-recovery plan.
 
 **Restores and the history archive job.** Before you restore a backup into production (path 3, the new-instance
-restore below, or §8 Reconcile finding after a purge), disable the history archive task in the host scheduler (on the
-NAS: untick **Enabled** in Task Scheduler), and enable it again only after you have checked the runs in
-Administration → History archival & purge. A restored database holds every archival run in the state it had when the
-backup's dump started:
+restore below, or §8 Reconcile finding after a purge or after a deletion), disable the history archive task in the
+host scheduler (on the NAS: untick **Enabled** in Task Scheduler), and enable it again only after you have checked
+the runs and the permanent deletion requests in Administration → History archival & purge. A restored database holds
+every archival run and every deletion request in the state it had when the backup's dump started:
 
 - A run found `RUNNING` is failed by the next start of the job, and nothing is purged again. That is why a purge is
   undone by restoring that run's pre-purge backup (§8, Reconcile finding after a purge), never a later backup.
 - A run found `PURGING` resumes its purge at the next start, unless the task is disabled or the incident record
   `<records-dir>/archive/reconcile-after-purge` exists (§8). A backup holds a `PURGING` run when it was taken during a
   purge (the hourly backup runs while a long purge works) or while a stopped purge waited to be resumed.
+- A deletion request found `RUNNING` is failed by the next start, and nothing is deleted again: a deletion's own
+  pre-purge backup holds its request `RUNNING` (§8, Reconcile finding after a deletion).
+- A deletion request found `APPROVED` is carried out by the next start, although its deletion may already have
+  happened in the database that the restore replaced, and nobody is asked again: a backup holds a request `APPROVED`
+  when it was taken between the request and its deletion (for example while the request waited behind a long export
+  or purge, an incident record or a disabled task). After the restore and before you enable the task again, cancel in
+  PartFlow (Administration → History archival & purge, **Permanent deletion requests**) every deletion request found
+  `APPROVED` that is no longer wanted.
 
 ### Path 3 procedure
 
@@ -866,8 +885,10 @@ database volume is **new and empty**, then restores a backup into it.
     its Administrators. Scan Station devices keep working when the host name stays the same; with a new host name,
     enroll them again.
 11. Create (or enable) the history archive task (NAS: [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8) only after you have
-    checked the runs in Administration → History archival & purge: a run that the backup holds in `PURGING` resumes
-    its purge at the task's first start (Restores and the history archive job, above).
+    checked the runs and the permanent deletion requests in Administration → History archival & purge: a run that the
+    backup holds in `PURGING` resumes its purge, and a deletion request it holds `APPROVED` is carried out, at the
+    task's first start. Cancel in PartFlow every deletion request found `APPROVED` that is no longer wanted before you
+    enable the task (Restores and the history archive job, above).
 
 Record the data-loss window: writes made after the backup's `dump_started_at` are not in the restored database.
 
@@ -933,13 +954,14 @@ The development form is in the root [`README.md`](../../README.md).
 | (e) Release evidence and Work Order status | Each demand's `released_quantity` follows from its `RECEIVED` evidence and from the carry-forward records of purged flows. |
 | (f) Allocations and Work Order completion | Each demand's `allocated_quantity` and each Work Order's `completed_at` follow from the active allocations, and no PN is allocated beyond its stocked quantity, the stocked quantity of purged flows included; an authorized allocation beyond the demand (`exceeds_demand`) is not a finding. |
 | (g) Retained Movements reference no purged row | The purge of Movement-history archival left whole flow components: no flow with a purged record still has a Movement, no lineage edge joins a purged flow and a retained one, every purged record belongs to a run whose purge started, every record of a finished purge was purged or skipped, and each run's purged counts equal its purged records. |
-| (h) Append-only guards and database-role privileges intact | The guard triggers and functions are present, enabled and unchanged, the row guard `trg_part_movements_guard_delete` of the purge included; `partflow_app` and `partflow_maintenance` hold exactly their grants (`partflow_app` has no `UPDATE`, `DELETE` or `TRUNCATE` on append-only history; `partflow_maintenance` has `DELETE` on `part_movements` only, which the row guard limits to the archived rows of a run in `PURGING`), keep their safe attributes and have no membership; `PUBLIC` and the default privileges hold nothing; and `session_replication_role` is not `replica`. It cannot see a change by a superuser who disabled a trigger and restored it afterwards (an accepted limit). |
+| (h) Append-only guards and database-role privileges intact | The guard triggers and functions are present, enabled and unchanged: the row guard `trg_part_movements_guard_delete` of the purge, the row guards `trg_<table>_guard_delete` of the other nine tables a permanent deletion deletes from, the guards of the deletion requests (`deletion_requests`, `deletion_request_rows`) and the statement guards that refuse the maintenance role's `UPDATE` of `work_orders` and `work_order_demands` included; `partflow_app` and `partflow_maintenance` hold exactly their grants (`partflow_app` has no `UPDATE`, `DELETE` or `TRUNCATE` on append-only history; `partflow_maintenance` has `DELETE` on exactly the ten tables a permanent deletion deletes from, and their row guards limit it to the archived Movements of a run in `PURGING` and to the stored rows of a `RUNNING` deletion request), keep their safe attributes and have no membership; `PUBLIC` and the default privileges hold nothing; and `session_replication_role` is not `replica`. It cannot see a change by a superuser who disabled a trigger and restored it afterwards (an accepted limit). |
 | (i) Hot list entries are active demand | The Hot list query of [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §5 returns no row. |
 | (j) Canonical identity under the running interpreter and database | Canonical PNs, case-insensitive Worker badges, the Asset Tag prefix rule and every canonical-form constraint hold under the running database's sorting rules, the collation version is unchanged, and no identity key is duplicated. |
 
 Check (h) reports `not_applicable` only on a database without the PartFlow roles (development, tests, staging); this
-is neutral for the exit code. In production, a missing role is a finding. Right after every purge, `archive.sh` runs
-the full reconciliation itself (§11); a finding then is an incident (§8, Reconcile finding after a purge).
+is neutral for the exit code. In production, a missing role is a finding. Right after every purge and every
+permanent deletion, `archive.sh` runs the full reconciliation itself (§11); a finding then is an incident (§8,
+Reconcile finding after a purge, or after a deletion).
 
 ### Repairing check (h) findings
 
@@ -1016,7 +1038,9 @@ emails. No tool deletes them; remove them by hand after review (§9).
 | `check.sh`: `FAIL backup_age` | The scheduled backup did not run or failed: check its task and its emails, then run a manual backup (§3). |
 | `check.sh`: `FAIL disk_...` | Database or storage pressure, below. |
 | `check.sh`: `FAIL archival_proposal`, or a failure email of the archive task | §11: the line and the email name the finding or the step. |
-| `archive.sh` exits with 4, or refuses with exit 1 because the incident record exists; or `check.sh`: `FAIL archival_proposal reconcile_after_purge` | The reconciliation after a purge has not ended clean: an incident, and the archive job works on no run until it is closed (Reconcile finding after a purge, below). |
+| `archive.sh` exits with 4, or refuses with exit 1 because the incident record exists; or `check.sh`: `FAIL archival_proposal reconcile_after_purge` | The reconciliation after a purge or a permanent deletion has not ended clean: an incident, and the archive job works on no run and carries out no deletion request until it is closed (Reconcile finding after a purge, or after a deletion, below). |
+| `check.sh`: `FAIL archival_proposal deletion_request_waiting` | A permanent deletion request is still open more than 15 minutes after it was requested (§10). `APPROVED`: the history archive task has not started `archive.sh`, every start fails, or the request waits behind the run that the line names, whose work comes first. `RUNNING`: a start stopped during the deletion, and no later start has made the request `FAILED`. Check that the task is enabled and read its failure emails, or run `deploy/production/pf archive` and read what it says. When the line says that archival is not set up, nothing carries the request out: set up the history archive task ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8) or cancel the request in PartFlow. |
+| `archive.sh` or `pf delete-permanently` exits with 3: a deletion request `FAILED` | Nothing was deleted. The reason names the cause: the data changed after the request, the requesting user is no longer active or no longer holds the permission, or the job stopped while the request was `RUNNING`. Request the deletion again if it is still wanted (§10). |
 | `archive.sh`: the pre-purge backup failed | Nothing was deleted; the next hourly start makes the run `FAILED`. Fix the cause (a backup that held the backup lock longer than `--backup-wait-minutes`, a stale backup lock (§3), too little space in the backup folder, a dump error), then request a new run (§11, The pre-purge backup). |
 | `archive.sh`: a run `FAILED while purging` | Whole flow components only were deleted, and the purge receipt lists them; the reconciliation ran after it. Request a new run for the rest (§11, A failed run). |
 | `archive.sh` exits with 2: "the purge of run N stopped", the run stays `PURGING` | A transient database error (a lost connection, a deadlock, a timeout, a server shutdown); the batch in progress was rolled back. Once the database answers, the next start resumes the purge and reconciles when it ends. If it keeps stopping, check the database (§2). |
@@ -1171,13 +1195,15 @@ clean (a finding, an error, or no complete report), `archive.sh` exits with 4, w
 the incident record `<records-dir>/archive/reconcile-after-purge`: the run, the result, the failing checks and the path
 of the report. `check.sh` then reports `FAIL archival_proposal reconcile_after_purge` until the record is removed. While
 the record exists, the job fails closed: every start runs only `recover` and `status`, works on no run (no export,
-verification, copy, pre-purge backup or purge, not even the resumed purge of a run left `PURGING`) and exits with 1,
-so the history archive task sends one failure email per hour until the incident is closed. The purge may have damaged
-history or quantities, so treat it as an incident:
+verification, copy, pre-purge backup or purge, not even the resumed purge of a run left `PURGING`), carries out no
+permanent deletion request and exits with 1, so the history archive task sends one failure email per hour until the
+incident is closed. The purge may have damaged history or quantities, so treat it as an incident:
 
-1. **Stop requesting runs.** The job itself works on no run while the record exists. Tell everyone who holds **Run
-   history archival and purge** not to request a run, and cancel a run that was requested meanwhile (Cancel in
-   Administration → History archival & purge, possible while a run is `APPROVED` or `WAITING_FOR_COPY`). To stop the
+1. **Stop requesting runs and deletions.** The job itself works on no run and carries out no deletion request while
+   the record exists. Tell everyone who holds **Run history archival and purge** or **Delete Work Orders and Part
+   Numbers permanently** not to request one, and cancel a run or a deletion request that was requested meanwhile
+   (Cancel in Administration → History archival & purge, possible while a run is `APPROVED` or `WAITING_FOR_COPY` and
+   while a deletion request is `APPROVED`): otherwise the job carries it out once the incident is closed. To stop the
    hourly failure emails, disable the history archive task in the host scheduler (on the NAS: untick **Enabled** in
    Task Scheduler). Keep the pre-purge backup, the archive folder and the purge receipt: they are the evidence and the
    way back.
@@ -1241,15 +1267,52 @@ history or quantities, so treat it as an incident:
    archives the same history again into a new folder. Run numbers can repeat after a restore; the time in a folder's
    name tells the folders apart.
 5. **Close the incident.** Once the owner's decision is carried out and the reconciliation (§7) is clean, check the
-   runs in Administration → History archival & purge (a run in `PURGING` resumes its purge at the next start), remove
-   the incident record, and only then enable the task again if you disabled it:
+   runs and the permanent deletion requests in Administration → History archival & purge (a run in `PURGING` resumes
+   its purge, and a deletion request in `APPROVED` is carried out, at the next start), remove the incident record, and
+   only then enable the task again if you disabled it:
 
    ```sh
    rm ~/partflow-deployments/archive/reconcile-after-purge
    ```
 
-   Only removing the record closes the incident: the next start works on runs again, for example the resumed purge of
-   a run left `PURGING`. The reports stay in their record folders.
+   Only removing the record closes the incident: the next start works on runs and deletion requests again, for
+   example the resumed purge of a run left `PURGING`. The reports stay in their record folders.
+
+### Reconcile finding after a deletion
+
+Right after every permanent deletion (§10), `archive.sh` runs the full reconciliation, as after a purge. When it does
+not end clean, it is the same incident as after a purge (Reconcile finding after a purge, above): `archive.sh` exits
+with 4 and writes the same incident record `<records-dir>/archive/reconcile-after-purge`, which names the deletion
+request (`request`) and its pre-purge backup instead of a run, `check.sh` reports `FAIL archival_proposal
+reconcile_after_purge`, and while the record exists the job works on no run and carries out no deletion request.
+`archive.sh` writes the same record when it was interrupted during a deletion or before the reconciliation after it
+ended: the deletion may have committed without being checked. Follow the steps of the purge incident, with these
+differences:
+
+1. **Stop requesting deletions and runs**, and cancel a deletion request that was made meanwhile (it is `APPROVED`):
+   otherwise the job carries it out once the incident is closed.
+2. **Read the state of the request**, read-only:
+   `$PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status` (the key
+   `last_finished_deletion_request`, or `open_deletion_request` while it is open). `COMPLETED` means that the deletion
+   committed, after the pre-purge backup that it names (`pre_purge_backup_name`). `RUNNING` means that it did not
+   (`archive.sh` was interrupted), so nothing was deleted, and the next start of the job makes it `FAILED`.
+3. **When the reconciliation could not run, ended in error or was interrupted**, run it again by hand (§7). When it is
+   clean, close the incident (step 6).
+4. **Compare the findings with the deletion.** The audit rows `DELETED` of the request name every deleted Work Order
+   and Part Number, and the request lists its row counts per table. A finding on a Part Number that the deletion did
+   not touch, and that the last scheduled reconciliation already reported, did not come from the deletion.
+5. **The owner decides: fix forward, or restore the pre-purge backup of the deletion**, the backup that the request
+   names, `<UTC time>-pre-purge-deletion-<request>-<UTC time>`. Restoring it brings the deleted records back and
+   **discards every change recorded since its dump started**, as for a purge; record the decision and the lost time
+   window. Restore it as the purge incident describes (step 4, How to restore it), with that backup instead of a run's.
+   **After the restore** the database holds the request `RUNNING`, as it was when the backup was taken. Run
+   `deploy/production/pf archive` once: its `recover` makes the request `FAILED`, so nothing is deleted again;
+   `archive.sh` exits with 3 for that request and says "Nothing was deleted by them in this database", which is true
+   of the restored database: it holds every deleted record again. Because the incident record still exists, that
+   start does nothing else.
+6. **Close the incident** as after a purge (step 5 of the purge incident): once the owner's decision is carried out
+   and the reconciliation is clean, check the runs and the deletion requests in Administration → History archival &
+   purge, remove the incident record, and only then enable the task again if you disabled it.
 
 ### Database or storage pressure
 
@@ -1264,7 +1327,8 @@ history or quantities, so treat it as an incident:
 - Expand the storage. History archival & purge (§11) deletes old Movement history from the database, but that frees
   rows inside the table for new Movements, so the database stops growing without its files getting smaller; the disk
   space comes back only with `VACUUM FULL part_movements`, which needs free space as large as the table (§11,
-  Returning disk space after a purge). A purge also adds a pre-purge backup to the backup folder.
+  Returning disk space after a purge). A purge, and a permanent deletion (§10), also adds a pre-purge backup to the
+  backup folder.
 - Run the reconciliation before reopening writes.
 
 ### Host failure
@@ -1285,7 +1349,7 @@ working examples.
 | When | Tasks |
 | --- | --- |
 | Every 15 minutes (automatic) | `check.sh`: health, restarts, disks, certificate, backup age, backend errors and the archival status (§2). An unchanged failure is repeated every 6 hours. |
-| Every 5 minutes (automatic) | `archive.sh --scheduled`: once an hour, at the Start minute of Administration → History archival & purge, the history archive job works on a requested run: export, verification, off-host copy, pre-purge backup, purge and the reconciliation after it (§11). |
+| Every 5 minutes (automatic) | `archive.sh --scheduled`: every start carries out an open permanent deletion request at once (pre-purge backup, deletion and the reconciliation after it, §10); once an hour, at the Start minute of Administration → History archival & purge, the history archive job works on a requested run: export, verification, off-host copy, pre-purge backup, purge and the reconciliation after it (§11). |
 | Daily | The scheduled backups (every hour) and the scheduled reconciliation at 04:00 run by themselves. Read every failure email, including those of the off-host copy; exit 4 of a backup includes a scheduled or pre-purge backup that fails verification, and exit 4 of the history archive job is an incident (§8). |
 | Weekly | Review the database growth (`~/partflow-monitoring/growth.tsv`) and `docker stats --no-stream`. Review failed sign-ins and refused permissions: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` and `refusal.code` tell a refused or locked sign-in, a permission refusal, `station_device_required`, `station_device_mismatch` and `csrf_rejected` apart). Check pending security updates of the host. |
 | Monthly | Confirm the off-host copy of every archival run that waits for it (§11). Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and scheduled or pre-purge backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
@@ -1296,7 +1360,8 @@ working examples.
 **Removing old backups and reports.** No tool deletes pre-release backups, manual backups, scheduled or pre-purge
 backups that fail verification, or reconciliation reports; the rotation keeps the newest pre-purge backups by
 itself (§3). After review, remove each one by name; never remove the newest verified scheduled backup, the pre-purge
-backup of an open incident (§8, Reconcile finding after a purge) or anything in an archive folder:
+backup of an open incident (§8, Reconcile finding after a purge, or after a deletion) or anything in an archive
+folder:
 
 ```sh
 rm -r "<backup-dir>/<NAME>"
@@ -1323,9 +1388,10 @@ log, §2).
   Then check health (§2). A plain `up -d backend` does not pick up the new password, because the container is not
   recreated, and running `db-roles` while `backend` serves makes its new connections fail. For
   `partflow_maintenance_password`, replace that file and run only the `db-roles` command while the history archive
-  job does not work (no `~/partflow-deployments/.archive.lock`), away from its Start minute: only that one-shot job uses
-  the role (§11), so no freeze is needed. A purge that can no longer reach the database stays `PURGING`, and the next
-  start resumes it.
+  job does not work (no `~/partflow-deployments/.archive.lock`), away from its Start minute and while no permanent
+  deletion request is open: only that one-shot job uses the role (§11), so no freeze is needed. A purge that can no
+  longer reach the database stays `PURGING`, and the next start resumes it; a deletion that can no longer reach it
+  deletes nothing, and its request becomes `FAILED` at the next start.
 - **The owner password** (`postgres_password`): change it in the database first, then replace the file. No restart
   is needed, because only the one-shot `migrate` and `db-roles` read it.
 
@@ -1344,17 +1410,62 @@ log, §2).
 
 ## 10. Deleting test data permanently
 
-Production history is append-only: PartFlow itself never deletes a Work Order that has production history or an
-allocation, and deletes Movements only through the purge of History archival & purge, which removes archived Movement
-history once its archive is copied off the host and a pre-purge backup is taken (§11;
-[`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md), Administrative Archival and Purge). The command
-`pf delete-permanently` is the other exception, and it is meant for one case only: Work Orders and Part Numbers
-that the owner entered **only for testing** in production. It deletes them as if they had never been entered and
-keeps one audit row for each deleted Work Order and Part Number. It is an interim tool: a delete inside PartFlow, for a
-Super User, will be designed later together with the history archival and purge. Never use it to correct real
-production data; use the corrections that PartFlow offers instead.
+Production history is append-only. PartFlow removes a Work Order that has production history or an allocation, or a
+Movement, in only two ways: the purge of History archival & purge removes archived Movement history once its archive is
+copied off the host and a pre-purge backup is taken (§11; [`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md),
+Administrative Archival and Purge), and a **permanent deletion request** removes Work Orders and Part Numbers that were
+entered **only for testing** in production, as if they had never been entered, keeping one audit row for each deleted
+Work Order and Part Number. Never use a deletion request to correct real production data; use the corrections that
+PartFlow offers instead.
+
+A deletion can be requested in two ways, and both lead to the same kind of request:
+
+- **In PartFlow**, by a user whose role holds the permission **Delete Work Orders and Part Numbers permanently**
+  (initially only the Super User role; Administration → Roles & permissions can grant it to another role): **Delete
+  permanently…** in Work Order Details requests the deletion of that Work Order, and in the Part Number dialog the
+  deletion of that Part Number with all its data ([`../GUI_DESIGN.md`](../GUI_DESIGN.md)).
+- **By the operator**, with `pf delete-permanently` (below), which can name several Work Orders and Part Numbers.
+
+The request is the approval. PartFlow shows the same preview and refusals in both ways, asks for a reason, and
+records the request together with every row it will delete; at most one request is open at a time. The **history
+archive job** (§11) carries the request out at its next start, within 5 minutes: it takes a pre-purge backup of the
+database, deletes the stored rows in **one** database transaction, and runs the full reconciliation. The web
+application never deletes anything itself. **A deletion therefore needs the history archive job set up:** the archive
+folder (`PARTFLOW_ARCHIVE_DIR`) and the history archive task that starts `archive.sh` every 5 minutes
+([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8). Without them, a request made in PartFlow only waits, and `pf
+delete-permanently --confirm` refuses before it records anything.
+
+### The request and its states
+
+| State | Shown in PartFlow | Meaning |
+| --- | --- | --- |
+| `APPROVED` | Waiting for the server | Recorded. The history archive task carries it out at its next start. It can still be cancelled in PartFlow: **Cancel** in the dialog, or in Administration → History archival & purge, **Permanent deletion requests**. |
+| `RUNNING` | Deleting… | The job started it: it takes the pre-purge backup and deletes. It cannot be cancelled. |
+| `COMPLETED` | Deleted | Deleted, after the pre-purge backup that the request names. |
+| `FAILED` | Failed — nothing was deleted | Nothing was deleted; the reason is shown. Request the deletion again if it is still wanted. |
+| `CANCELLED` | Cancelled | Cancelled before the job started it; nothing was deleted. |
+
+When the job starts the request and again right before it deletes, it checks that the user who requested it is still
+active and still holds the permission; otherwise the request becomes `FAILED`. An operator's request has no user to
+check: its authority is the database owner credential that recorded it. The deletion itself first takes the locks of
+its Part Numbers and of its rows and computes the plan again: when the data changed after the request (for example a
+scan of one of its flows, or one of its demand lines put on the Hot list), the request becomes `FAILED` ("The data
+changed after the request; nothing was deleted. Request it again."), with the difference. A request left `RUNNING` by a
+job that stopped, or by a pre-purge backup that failed, becomes `FAILED` at the next start, and nothing was deleted.
+PartFlow keeps working during the deletion; only a command on one of the same Part Numbers waits for its one
+transaction.
+
+`check.sh` reports `FAIL archival_proposal deletion_request_waiting` when a request is still open (`APPROVED` or
+`RUNNING`) more than 15 minutes after it was requested (`--deletion-wait-minutes`): the history archive task has not
+carried it out or has not finished it, so check that the task is enabled and read its failure emails. An `APPROVED`
+request that waits behind a run that is `RUNNING` or `PURGING` is named so: that run's work comes first. While
+archival is not set up, `check.sh` still finds such a request (through the cheap check of `archive.sh` in the running
+`backend` container) and says that nothing carries it out. A `FAILED` request is not a `check.sh` failure: its
+requester sees it in PartFlow.
 
 ### Preview, then confirm
+
+The operator's way, `pf delete-permanently`:
 
 1. Show what would be deleted. Nothing is changed:
 
@@ -1366,66 +1477,93 @@ production data; use the corrections that PartFlow offers instead.
    Repeat `--work-order` and `--part-number` for every record; give at least one of them. Write the Work Order Number
    exactly as PartFlow shows it, including spaces and capital letters: it is matched exactly. The Part Number is
    normalized as PartFlow normalizes every Part Number (surrounding spaces removed, capital letters). `--reason` is
-   required and is recorded; `--operator` defaults to your login name, as in the other `pf` commands.
+   required and is recorded; `--operator` defaults to your login name, as in the other `pf` commands. The preview also
+   works while archival is not set up.
 2. Read the report that the command prints on the standard output (one JSON document): `work_orders` and
    `part_numbers` name the records, `rows` gives how many rows of each table would be deleted, `kept_audit_rows` lists
    the audit rows that are kept because they also concern records that stay, and `refusals` lists every reason why
-   the deletion cannot run.
-3. Delete: run the same command again with `--confirm`. `pf` then runs these steps and stops at the first one that
+   the deletion cannot be requested.
+3. Request it: run the same command again with `--confirm`. `pf` then runs these steps and stops at the first one that
    fails:
-   1. the preview again; a refusal stops here, before any backup;
-   2. a verified manual backup, `backup.sh --kind manual` with the reason `before pf delete-permanently` (§3);
-   3. the deletion in **one** database transaction, with the name of that backup recorded in the audit rows.
+   1. it checks that the history archive job can carry the request out: `PARTFLOW_ARCHIVE_DIR` names an existing
+      folder, and no incident record of §8 exists; otherwise it exits with 2 and records nothing;
+   2. it records the request: the plan again and the request in one transaction (its JSON document, `result`
+      `requested`, goes to the standard output); a refusal stops here, with nothing recorded;
+   3. it runs the history archive job at once (`archive.sh`, as `pf archive` does), which starts the request, takes its
+      pre-purge backup, deletes and runs the reconciliation (§11);
+   4. it reads the request's final state from `history-archive status` and reports it (Exit codes, below).
 
-The command runs as the database owner role, in the one-shot `db-roles` service, because the application database
-role can never delete history. Without `pf`, take the backup first (§3), then run
-`$PF --profile ops run --rm --no-deps -T db-roles delete-permanently <the same options> --operator "<your name>" --confirm --backup-name <NAME>`.
-The deletion locks the tables it changes for a moment: PartFlow keeps showing pages, and a write that arrives meanwhile
-waits until the deletion has finished (`--lock-timeout`, 30 seconds by default, limits how long the deletion itself
-waits for a lock). Run it at a quiet moment.
+   When another `archive.sh` holds the archive lock (for example a run's long purge), the request stays `APPROVED`,
+   and the history archive task carries it out at its next start once the lock is free: `pf` says so and exits
+   with 2. A start that carried out a deletion does no archival run work; the next start does it.
+
+The command records the request as the database owner role, in the one-shot `db-roles` service: only the owner may
+record an operator's request (PartFlow records the requests of its users as the application database role, and only
+the history archive job's maintenance role deletes). Without `pf`, run
+`$PF --profile ops run --rm --no-deps -T db-roles delete-permanently <the same options> --operator "<your name>" --confirm`,
+then `deploy/production/pf archive`; `--backup-name` of earlier releases is refused, because the job takes the
+pre-purge backup itself. The command takes no table lock; `--lock-timeout` (30 seconds by default) limits how long
+recording the request waits for a lock. Request a deletion at a quiet moment all the same: a scan of one of its flows
+between the request and its deletion makes the request fail.
 
 ### What is deleted, and what stays
 
 | Deleted for a Work Order | Deleted for a Part Number |
 | --- | --- |
-| The Work Order, its demand lines, every allocation of those lines, every Quantity Flow released for those lines and every flow linked to them by a split or a combine, every Movement and lineage record of those flows, the Assigned Route copies of those flows with their steps, and the audit rows that concern only these records. | The Part Number record with its details and image, every Quantity Flow of the Part Number with the same closure, every demand line and allocation of the Part Number, and the audit rows that concern only these records. Every Work Order with a line of the Part Number must be deleted in the same command; an internal Work Order (one without a Work Order Number, created by a Scan Station receipt) whose every line is of a Part Number being deleted is deleted with it. |
+| The Work Order, its demand lines, every allocation of those lines, every Quantity Flow released for those lines and every flow linked to them by a split or a combine, every Movement and lineage record of those flows, the Assigned Route copies of those flows with their steps, and the audit rows that concern only these records. | The Part Number record with its details and image, every Quantity Flow of the Part Number with the same closure, every demand line and allocation of the Part Number, and the audit rows that concern only these records. Every Work Order with a line of the Part Number must be deleted in the same request; an internal Work Order (one without a Work Order Number, created by a Scan Station receipt) whose every line is of a Part Number being deleted is deleted with it. |
 
 Master data stays: Departments, Areas, Operations, Machines, Workers, Worker Sessions, Scan Stations, Route Templates
 and the Part Number records that were not named. A deleted Work Order Number can be entered again afterwards.
 
-**The one audit row.** For each deleted Work Order and Part Number the command adds one audit row (event `DELETED`)
-with the last values of the record, and in its metadata (`permanent_deletion`) the operator, the reason, the backup,
-the names of every record deleted together, and the number of rows deleted from each table; its time is the time of
-the deletion. An audit row that also concerns records that stay (for example a Hot list change that also moved a line
-that stays) is kept unchanged.
+**The one audit row.** For each deleted Work Order and Part Number the job adds one audit row (event `DELETED`) with
+the last values of the record; its actor is the user who requested the deletion (none for an operator's request), and
+its metadata (`permanent_deletion`) holds the request number, the operator of an operator's request, the reason, the
+pre-purge backup, the names of every record deleted together, and the number of rows deleted from each table; its time
+is the time of the deletion. Every change of a request's state adds an audit row of the request itself (who requested
+or cancelled it, and when). An audit row that also concerns records that stay (for example a Hot list change that
+also moved a line that stays) is kept unchanged. The audit rows that record an earlier permanent deletion (the
+`DELETED` rows) and the audit rows of deletion requests always stay: a later deletion never deletes them, also when a
+Work Order Number or Part Number that was deleted is entered again and deleted again.
 
-**The deleted data stays in the backups.** Every backup taken before the deletion, including the one `pf` takes
-first, and every off-host copy of those backups still holds the deleted data until it ages out under the retention of
-§3. Restoring such a backup brings the data back.
+**The deleted data stays in the backups.** Every backup taken before the deletion, including the pre-purge backup
+that the job takes right before it (`<UTC time>-pre-purge-deletion-<request>-<UTC time>`, §11, The pre-purge backup),
+and every off-host copy of those backups still holds the deleted data until it ages out under the retention of §3.
+Restoring such a backup brings the data back (§6, Restores and the history archive job).
 
 ### Refusals
 
-The command refuses, deletes nothing and names each link when the data to delete is linked to data that stays:
+The request is refused, nothing is recorded or deleted, and each link is named when the data to delete is linked to
+data that stays:
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `unknown_work_order`, `unknown_part_number` | No Work Order has this exact number, or the Part Number has neither a record nor any data. | Check the spelling. |
-| `part_number_used_by_work_order` | A Work Order that is not being deleted has a demand line of the Part Number. | Delete that Work Order in the same command too, or keep the Part Number. |
+| `part_number_used_by_work_order` | A Work Order that is not being deleted has a demand line of the Part Number. | Delete that Work Order in the same request too, or keep the Part Number. |
 | `on_hot_list` | A demand line to delete is on the Hot list; deleting it would leave a gap in the ranks of the lines that stay. | Take it off the Hot list in PartFlow first. |
-| `lineage_link` | A split or a combine links a flow to delete with a flow that stays (released for a Work Order that stays, or quantity added without a Work Order). | Delete that Work Order in the same command, or keep the data. |
+| `lineage_link` | A split or a combine links a flow to delete with a flow that stays (released for a Work Order that stays, or quantity added without a Work Order). | Delete that Work Order in the same request, or keep the data. |
 | `stock_needed` | The stocked quantity of the flows to delete is still needed by the allocations of Work Orders that stay. | Reverse those allocations in PartFlow first, or delete those Work Orders too. |
-| `allocation_command_shared`, `allocation_reversal_link` | One allocation, or its reversal, also concerns a demand line that stays. | Delete that Work Order in the same command, or keep the data. |
-| `movement_command_shared`, `movement_reversal_link`, `route_snapshot_shared`, `movement_references_deleted_data` | One production command, an Undo, an Assigned Route copy or the record of a Movement also concerns a flow that stays. | Delete the Work Order of that flow in the same command, or keep the data. |
-| `archived_history` | The history of a flow to delete was archived by an archival run (§11), and perhaps purged: the command never deletes archived history. | Keep the data. |
+| `allocation_command_shared`, `allocation_reversal_link` | One allocation, or its reversal, also concerns a demand line that stays. | Delete that Work Order in the same request, or keep the data. |
+| `movement_command_shared`, `movement_reversal_link`, `route_snapshot_shared`, `movement_references_deleted_data` | One production command, an Undo, an Assigned Route copy or the record of a Movement also concerns a flow that stays. | Delete the Work Order of that flow in the same request, or keep the data. |
+| `archived_history` | The history of a flow to delete was archived by an archival run (§11), and perhaps purged: a deletion never deletes archived history. | Keep the data. |
+| `request_open` | Another deletion request is still open (`APPROVED` or `RUNNING`): "Deletion request N is still open (STATE). Cancel it or wait until it finishes before requesting another deletion." | Wait until it finishes, or cancel it in PartFlow while it is `APPROVED`. |
 | `owner_role_required` | The command does not run as the database owner role. | Run it through `pf` or the `db-roles` service. |
+
+In PartFlow, the dialog shows the same refusals; another open request is an answer of its own there, with the same
+text, rather than a refusal of the preview.
 
 ### Exit codes
 
-| Exit | Meaning |
+| Exit | `pf delete-permanently` |
 | --- | --- |
-| 0 | The preview was shown, or (with `--confirm`) the records were deleted. |
-| 1 | Refused: nothing was deleted, and with `--confirm` no backup was taken. |
-| 2 | Could not run or failed: nothing was deleted (for example the backup failed, the database could not be reached, or a table lock was not granted in time). When the database connection failed while committing, the report says `outcome_unknown`: run the preview again to see which records still exist. |
+| 0 | The preview was shown, or (with `--confirm`) the request was carried out: the records are deleted (`COMPLETED`). |
+| 1 | Refused: nothing was requested or deleted (Refusals, above). |
+| 2 | Could not run, or the request is recorded but not carried out yet. Nothing was recorded when archival is not set up, the incident record exists, the database could not be reached or a lock was not granted in time. The request waits `APPROVED` when the job could not start it (another `archive.sh` holds the archive lock, a release runs): the history archive task carries it out at its next start. It stays `RUNNING` when the job stopped before the deletion committed (its pre-purge backup failed, a database error): nothing was deleted, and the next start makes it `FAILED`. When the database connection failed while the request was recorded, the request may or may not exist: read it in Administration → History archival & purge. |
+| 3 | The request `FAILED`: nothing was deleted, and the reason is printed. |
+| 4 | The records are deleted, but the reconciliation after the deletion did not end clean: an incident (§8, Reconcile finding after a deletion). |
+
+Without `pf`, the command `delete-permanently` itself exits with 0 (the preview was shown, or the request was
+recorded), 1 (refused, nothing recorded) or 2 (failed or a usage error, nothing recorded; or `outcome_unknown`, as
+above).
 
 ## 11. History archival
 
@@ -1436,7 +1574,8 @@ verifies the archive, copies it off the host, takes a pre-purge backup of the da
 deletes the archived Movements from the database and keeps one carry-forward record per archived flow, so that every
 quantity, status and check stays exact. Once purged, that history is in the archive folder and its off-host copy (and
 in the pre-purge backups that are still kept), no longer in the database; commands whose history was archived can no
-longer be undone. The automatic runs, the deletion and viewing requests and the optional groups are later build steps.
+longer be undone. The same job also carries out the permanent deletion requests of test data (§10). The automatic
+runs, the viewing requests and the optional groups are later build steps.
 
 A user who holds the permission **Run history archival and purge** sets the retention period and the other settings,
 looks at a preview and requests a run in **Administration → History archival & purge**; the request is the approval.
@@ -1445,25 +1584,48 @@ The web application never touches the archive folder. The **history archive job*
 ### What the archive job does
 
 A host task starts `deploy/production/archive.sh --scheduled` every 5 minutes ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md)
-§11.8). Once an hour, at the first start at or after the **Start minute** set in Administration (20 initially), it
-does the **hourly work**; every other start ends within seconds and prints `NOT_DUE`. The first start after the task
-is created only records the current hour, so the first hourly work comes at the next Start minute.
-`deploy/production/pf archive` runs the hourly work at once, whatever the time.
+§11.8). Every start first runs a cheap check: `python -m app.cli history-archive settings` with `docker compose exec` in
+the running `backend` container, two quick reads as the application database role that tell whether a permanent
+deletion request is open and give the Start minute. A start that finds an open request carries it out at once,
+whatever the time (the deletion steps below). Once an hour, at the first start at or after the **Start minute** set in
+Administration (20 initially), it does the **hourly work**; every other start ends within seconds and prints
+`NOT_DUE`. The first start after the task is created only records the current hour, so the first hourly work comes at
+the next Start minute. A start that carried out a deletion does no run work and leaves the hour to the next start,
+which does the hourly work 5 minutes later. When the check gives no answer (for example `backend` is stopped), the
+start counts it as no open request: the hourly work goes on as usual (the Start minute is then read in the
+`maintenance` service), and the request waits for a later start. `deploy/production/pf archive` runs at once, whatever
+the time: an open deletion request first, otherwise the hourly work.
 
-The hourly work runs these steps in the one-shot `maintenance` service, which connects as the maintenance database role
-(`partflow_maintenance`, which reads history, writes the archive records and may delete Movements only through the
-purge: the row guard `trg_part_movements_guard_delete` admits exactly the archived rows of a run in `PURGING`) and is
-the only service that mounts the archive folder:
+The steps run in the one-shot `maintenance` service, which connects as the maintenance database role
+(`partflow_maintenance`, which reads history, writes the archive records and deletes only what row guards admit: the
+archived Movements of a run in `PURGING`, and the stored rows of a deletion request that is `RUNNING`) and is the only
+service that mounts the archive folder:
 
 1. `recover`: a run left `RUNNING` by a job that stopped (a restart, a power loss), or whose pre-purge backup failed,
-   becomes `FAILED`; unfinished folders and receipt files of finished runs are removed from `.partial/`; and a purge
+   becomes `FAILED`, and so does a deletion request left `RUNNING` (nothing was deleted: a deletion is one
+   transaction); unfinished folders and receipt files of finished runs are removed from `.partial/`; and a purge
    receipt that is missing in the copy folder is copied there again. A run left `PURGING` is not touched: its purge
-   resumes below. When `recover` does not end with exit 0, no run is worked on in that start (only `status` runs).
-   Neither while the incident record `<records-dir>/archive/reconcile-after-purge` exists (§8, Reconcile finding after
-   a purge): the start then runs only `recover` and `status`, works on no run, not even the resumed purge of a run left
-   `PURGING`, and exits with 1 (with 3 when `recover` failed a run).
-2. `next`, again after every step: the run to work on and its next step. All of a run's steps can happen in one start.
-3. The step that `next` names:
+   resumes below. When `recover` does not end with exit 0, no run or request is worked on in that start (only
+   `status` runs). Neither while the incident record `<records-dir>/archive/reconcile-after-purge` exists (§8,
+   Reconcile finding after a purge, or after a deletion): the start then runs only `recover` and `status`, works on no
+   run, not even the resumed purge of a run left `PURGING`, carries out no deletion request, and exits with 1 (with 3
+   when `recover` failed a run or a request).
+2. `next`, again after every step: the work to do and its next step. An open deletion request comes first. A request
+   made while this start works on a run's steps waits until the run waits for its copy, purges or ends, and a later
+   start takes it. All of a run's steps can happen in one start.
+3. For a deletion request, the steps that `next` names:
+   - `start_deletion`: `start-deletion` makes the request `RUNNING`, at a whole second that names its pre-purge backup,
+     after checking the requesting user again (otherwise it becomes `FAILED`, nothing deleted, exit 3).
+   - `deletion_backup`: the pre-purge backup of the request, `backup.sh --kind pre-purge --label
+     deletion-<id>-<UTC time>` (The pre-purge backup, below), then `delete`, which deletes the request's stored rows in
+     one transaction and makes it `COMPLETED`. A failure makes it `FAILED` with nothing deleted (exit 3). A database
+     error that does not last (a lost connection, a deadlock, a timeout) rolls the transaction back and leaves the
+     request `RUNNING`, and `delete` exits with 2. Whenever `delete` exits with 2, also when the connection failed
+     while the deletion committed, or gives no valid report, the start reads `status`: a `COMPLETED` request is
+     reconciled at once, a `FAILED` one deleted nothing (exit 3), one still `RUNNING` deleted nothing and the next start
+     makes it `FAILED` (exit 2), and when `status` cannot tell, the reconciliation runs anyway.
+   - Then the full reconciliation (step 5), and the start ends.
+4. For a run, the step that `next` names:
    - `export` writes the archive into `<archive-dir>/.partial/`. With nothing eligible, the run ends as
      `NOTHING_ELIGIBLE`.
    - `verify` re-reads every file, compares it with the database and publishes the folder
@@ -1486,38 +1648,48 @@ the only service that mounts the archive folder:
      resumed by `purge` alone, without a new backup: only whole components are ever deleted. Every other failure while
      purging (a deleted count that differs from the records, a guard refusal, a changed published archive, an internal
      error) makes the run `FAILED`, with its receipt (A failed run, below).
-4. After a purge that ended, or failed once the run was `PURGING`: the full reconciliation (§7), in a one-off `backend`
-   container as the application database role. When it does not end clean, it is an incident (§8, Reconcile finding
-   after a purge). A purge that exits with 2 is not reconciled in that start: the next start resumes it and reconciles
-   when it ends. A start never begins another run after a purge.
-5. `status`: the open run, the last finished run and the free space, for the monitoring.
+5. After a purge that ended, or failed once the run was `PURGING`, and after a deletion: the full reconciliation (§7),
+   in a one-off `backend` container as the application database role. When it does not end clean, it is an incident
+   (§8, Reconcile finding after a purge, or after a deletion). A purge that exits with 2 is not reconciled in that
+   start: the next start resumes it and reconciles when it ends. A start never begins another run after a purge, and
+   does no run work after a deletion.
+6. `status`: the open run, the last finished run, the open and the last finished deletion request and the free space,
+   for the monitoring.
 
-Production goes on during a run: the export reads one database snapshot, and each purge batch holds the locks of its
-Part Numbers only for its own transaction. A first large run can take long; the next starts then wait. A changed
-Start minute applies from the next hourly work. **Choose the Start minute** away from the hourly backup at minute 0,
-because the pre-purge backup waits for a backup that is running, and away from the times you install releases: a
-release is refused while the job works, and a purge can take long.
+Production goes on during a run and a deletion: the export reads one database snapshot, each purge batch holds the
+locks of its Part Numbers only for its own transaction, and a deletion holds the locks of its Part Numbers and rows
+for its one transaction. A first large run can take long; the next starts then wait, and so does a deletion request.
+A changed Start minute applies from the next hourly work. **Choose the Start minute** away from the hourly backup at
+minute 0, because a pre-purge backup waits for a backup that is running, and away from the times you install
+releases: a release is refused while the job works, and a purge can take long.
 
 **Exit codes of `archive.sh`.** The host task's failure email is the alert. On success it prints one line:
-`NOT_DUE`, `DEFERRED archive_running` (the previous start still works on its hourly work), or
-`ARCHIVE <outcome> <run> <state>`, for example `ARCHIVE completed 3 COMPLETED`.
+`NOT_DUE`, `DEFERRED archive_running` (the previous start still works), `ARCHIVE <outcome> <run> <state>`, for example
+`ARCHIVE completed 3 COMPLETED`, or, for a start that worked on a deletion request,
+`DELETION <outcome> <request> <state>`, for example `DELETION deleted 7 COMPLETED`.
 
 | Exit | Meaning | What to do |
 | --- | --- | --- |
 | 0 | Done, or nothing was due. | Nothing. |
-| 1 | Refused, nothing changed: a release runs, another `archive.sh` holds the archive lock, another history-archive command runs, or the incident record of a reconciliation after a purge exists. | Nothing: the next hour's start tries again. Repeated refusals: Locks, below; the incident record: §8, Reconcile finding after a purge. |
-| 2 | Could not run: the configuration, Docker or the database, or a step whose outcome is unknown; or the pre-purge backup failed; or a purge stopped on a transient database error (the run stays `PURGING`). | Read the email; fix the cause. A run left `RUNNING` is failed by the next start's `recover` (then request a new run); a run left `PURGING` is resumed by the next start, which reconciles when the purge ends. |
-| 3 | A run failed: it is now `FAILED`. | A failed run, below. |
-| 4 | The reconciliation after a purge found a mismatch, ended in error or could not run. | An incident: §8, Reconcile finding after a purge. Until its record is removed, every start refuses to work on a run (exit 1). |
+| 1 | Refused, nothing changed: a release runs, another `archive.sh` holds the archive lock, another history-archive command runs, a step refused, or the incident record of a reconciliation after a purge or a deletion exists. | Nothing: the next start tries again. Repeated refusals: Locks, below; the incident record: §8. |
+| 2 | Could not run: the configuration, Docker or the database, or a step whose outcome is unknown; or a pre-purge backup failed; or a purge or a deletion stopped on a transient database error (the run stays `PURGING`, the deletion request `RUNNING`). | Read the email; fix the cause. A run or a deletion request left `RUNNING` is failed by the next start's `recover`, and nothing was deleted (then request it again); a run left `PURGING` is resumed by the next start, which reconciles when the purge ends. |
+| 3 | A run or a deletion request failed: it is now `FAILED`. A failed deletion request deleted nothing. | A failed run, below; request the deletion again if it is still wanted (§10). |
+| 4 | The reconciliation after a purge or a deletion found a mismatch, ended in error or could not run. | An incident: §8, Reconcile finding after a purge, or after a deletion. Until its record is removed, every start refuses to work on a run or a deletion request (exit 1). |
 
-`archive.sh --help` lists its options; `--backup-wait-minutes N` (0 to 1440, 60 by default) is how long the pre-purge
+`archive.sh --help` lists its options; `--backup-wait-minutes N` (0 to 1440, 60 by default) is how long a pre-purge
 backup waits for another backup. A scheduled start reports a refusal or a failure once for its hour, never at every
-5-minute start. The reports of an hourly work that did something or failed are in `<records-dir>/archive/<UTC>/` (§1).
+5-minute start, with one exception: while a deletion request is open, every start tries to carry it out, so a
+failure that keeps it from starting (for example the `maintenance` service cannot reach the database) is reported by
+every start until it is fixed or the request is cancelled. Until a start finds an open request, what keeps it from
+looking (a release that runs, the incident record, archival not set up, `backend` stopped) ends it quietly within the
+hour, and the hourly start reports it. The reports of a start that did something or failed are in
+`<records-dir>/archive/<UTC>/` (§1).
 
 **Locks.** `archive.sh` holds `<records-dir>/.archive.lock` (its file `owner` names the host, the process id (pid),
-the start time, `archive.sh`, the kernel's boot id and the process's start time as the kernel counts it) only during the hourly work, never while a run merely waits for its copy
-confirmation and never for a start that only checks the time. It holds it for the whole hourly work: the wait for the
-backup lock, the pre-purge backup, the purge and the reconciliation after it included. It refuses while a release runs
+the start time, `archive.sh`, the kernel's boot id and the process's start time as the kernel counts it) only during
+the hourly work and while it carries out a deletion request, never while a run merely waits for its copy confirmation
+and never for a start that only checks the time. It holds it for the whole work: the wait for the backup lock, the
+pre-purge backup, the purge or the deletion and the reconciliation after it included. It refuses while a release runs
 (`<records-dir>/.release.lock`), and `release.sh` refuses, changing nothing, while the archive lock is held: start the
 release again a few minutes later. Releases are best started a few minutes after the full hour and well before the
 Start minute. While the lock's owner still runs, a scheduled start ends with `DEFERRED archive_running` (exit 0) and
@@ -1541,14 +1713,20 @@ rm -r ~/partflow-deployments/.archive.lock
 - **Administration → History archival & purge** lists every run with its state, its counts and, once exported, the
   archive name and the manifest SHA-256.
 - `check.sh` prints the line `archival_proposal` (§2): `PASS` with the open run (a `PURGING` run with what it purged so
-  far), the last finished run (its result, what it purged and what it skipped) and the free space, or `FAIL` naming
-  each finding: `copy_confirmation_overdue` (a run has waited for its copy confirmation longer than the setting
-  **Report a waiting run after**), `last_run_failed` (the newest finished run is `FAILED`), `archive_dir_unusable` (the
-  archive folder is missing or not writable), `copy_dir_unusable` (the copy folder is set but not mounted, missing,
-  not writable or on the archive folder's own file system) or `receipt_not_copied` (the purge receipt of a run that the
-  job copied off the host is missing or differs in the copy folder; the next start copies it again). The incident of a
-  reconciliation after a purge comes first, as `reconcile_after_purge` (§8).
-- The full report, read-only:
+  far), the last finished run (its result, what it purged and what it skipped), the free space, and the open and the
+  last finished permanent deletion request (`deletion request 7 APPROVED for 2 min`, `last deletion request 6
+  COMPLETED`), or `FAIL` naming each finding: `copy_confirmation_overdue` (a run has waited for its copy confirmation
+  longer than the setting **Report a waiting run after**), `last_run_failed` (the newest finished run is `FAILED`),
+  `archive_dir_unusable` (the archive folder is missing or not writable), `copy_dir_unusable` (the copy folder is set
+  but not mounted, missing, not writable or on the archive folder's own file system), `receipt_not_copied` (the purge
+  receipt of a run that the job copied off the host is missing or differs in the copy folder; the next start copies
+  it again) or `deletion_request_waiting` (a deletion request is still open, `APPROVED` or `RUNNING`, more than 15
+  minutes after it was requested, `--deletion-wait-minutes`: the history archive task has not carried it out or has not
+  finished it, so check that the task is enabled; an `APPROVED` request behind a run that is `RUNNING` or `PURGING`
+  names that run). A `FAILED` deletion request is no finding. The incident of a reconciliation after a purge or a
+  deletion comes first, as `reconcile_after_purge` (§8).
+- The full report, read-only; it also names the open deletion request (`open_deletion_request`, with its age) and the
+  last finished one (`last_finished_deletion_request`):
 
   ```sh
   $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status
@@ -1570,20 +1748,26 @@ rm -r ~/partflow-deployments/.archive.lock
 
 Right before a purge, `archive.sh` takes a backup of the kind `pre-purge`:
 `deploy/production/backup.sh --kind pre-purge --label <archive name> --operator archive.sh` (§3), named
-`<UTC stamp>-pre-purge-<archive name>`. It is published and verified like every backup, and the purge records its
-name and the time its dump started. Restoring it brings back the history that the purge deleted (§8, Reconcile
-finding after a purge).
+`<UTC stamp>-pre-purge-<archive name>`. Right before a deletion it takes one with the deletion request's label,
+`--label deletion-<id>-<UTC time> --reason "pre-purge backup for deletion request <id>"`, named
+`<UTC stamp>-pre-purge-deletion-<id>-<UTC time>`, where the UTC time is the second at which the request was started. It
+is published and verified like every backup, and the purge or the deletion records its name and the time its dump
+started. Restoring it brings back the history that the purge deleted, or the records that the deletion deleted (§8,
+Reconcile finding after a purge, or after a deletion).
 
 - When another backup holds the backup lock (the hourly backup, a manual one), the pre-purge backup waits for it,
   checking every 15 seconds, for at most `--backup-wait-minutes` of `archive.sh` (60 minutes by default; `0` refuses
   at once). A stale backup lock is refused at once (§3, Backup lock and release lock).
 - When it fails (a backup that held the lock for longer, a stale lock, too little space, a dump error), nothing was
-  deleted: the run stays `RUNNING`, the next hourly start makes it `FAILED` (`recover`), and a new run must be requested
-  in Administration. `archive.sh` exits with 2. This is on purpose: a database restored from a pre-purge backup also
-  holds its run in `RUNNING`, and `recover` must fail it so that it is never purged again.
+  deleted: the run or the deletion request stays `RUNNING`, the next start makes it `FAILED` (`recover`), and a new
+  run, or the deletion, must be requested again. `archive.sh` exits with 2. This is on purpose: a database restored
+  from a pre-purge backup also holds its run or its deletion request in `RUNNING`, and `recover` must fail it so that
+  it is never purged or deleted again.
 - Pre-purge backups take space in the backup folder, one dump each. The rotation of the scheduled backups keeps the
-  newest **Pre-purge backups kept** of Administration → Backups (3 initially, 1 to 100) and deletes the older ones (§3,
-  Retention).
+  newest **Pre-purge backups kept** of Administration → Backups (3 initially, 1 to 100), those of runs and of deletion
+  requests together, and deletes the older ones (§3, Retention). Because deletions share that number, a series of
+  deletions after a purge can rotate the purge's pre-purge backup out: raise the number before a session of test-data
+  deletions if that backup matters.
 - The off-host copy of the backup folder (Hyper Backup on the NAS) must cover them like every backup.
 - Once a run is purged, its archive folder and the archive's off-host copy are the only copies of that history, apart
   from the pre-purge backups that are still kept: keep both copies as carefully as the backups.
@@ -1706,8 +1890,9 @@ host ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8), and remove it on the old h
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §6 and §8: disable the history archive task before any restore, because a restored `PURGING` run resumes its purge; §8 and §11: a transient database error leaves a purge `PURGING` for the next start, which reconciles when it ends. |
-| 2026-11-18 | uncommitted | §11: the history archive job purges archived Movement history after the off-host copy and a pre-purge backup, then reconciles; the states `PURGING` and `COMPLETED_WITH_SKIPS`, the results `PURGED` and `NOTHING_PURGED`, the purge receipt, the resumed purge, the pre-purge backup and its wait, and returning disk space with `VACUUM FULL`; §8: the incident of a reconcile finding after a purge, during which the archive job works on no run; §3: the `pre-purge` backup kind, its rotation and `--lock-wait-minutes`; §1, §2, §7, §9, §10 and the `pf` table for the purge. |
+| 2026-11-18 | uncommitted | §10: permanent deletion requests, made in PartFlow by a holder of Delete Work Orders and Part Numbers permanently or with `pf delete-permanently`, which the history archive job carries out within 5 minutes after a pre-purge backup, and which need that job set up; the audit rows of earlier deletions stay; §11: the cheap check at every start, the deletion steps, the backup label `deletion-<id>-<UTC time>`, the `DELETION` line and every exit 2 of `delete` resolved through `status`; §8: the incident of a reconcile finding after a deletion, and `deletion_request_waiting`; §3 and §11: deletions and purges share Pre-purge backups kept; §6: cancel the unwanted `APPROVED` requests after a restore; §2, §7, §9 and the `pf` table for the requests. |
+| 2026-11-18 | `d094f5e` | §6 and §8: disable the history archive task before any restore, because a restored `PURGING` run resumes its purge; §8 and §11: a transient database error leaves a purge `PURGING` for the next start, which reconciles when it ends. |
+| 2026-11-18 | `d094f5e` | §11: the history archive job purges archived Movement history after the off-host copy and a pre-purge backup, then reconciles; the states `PURGING` and `COMPLETED_WITH_SKIPS`, the results `PURGED` and `NOTHING_PURGED`, the purge receipt, the resumed purge, the pre-purge backup and its wait, and returning disk space with `VACUUM FULL`; §8: the incident of a reconcile finding after a purge, during which the archive job works on no run; §3: the `pre-purge` backup kind, its rotation and `--lock-wait-minutes`; §1, §2, §7, §9, §10 and the `pf` table for the purge. |
 | 2026-11-17 | `2f12d33` | §11 and the `pf` table: the history archive job (`archive.sh`, `pf archive`), which exports and copies archives and never deletes anything; §1, §2, §6, §8 and §9 for its records, check lines, move, problems and schedule. |
 | 2026-11-17 | `4539a2b` | The recovery command refuses a password that breaks the password rules, and the sign-in settings moved to Administration → Security. |
 | 2026-11-17 | `01ce427` | §10 and the `pf` table: `pf delete-permanently` deletes Work Orders and Part Numbers entered only for testing, after a preview and a verified backup. |

@@ -19,7 +19,8 @@
 # OPERATIONS_RUNBOOK §6); 4 started_needs_review (a check after the switch failed and the re-freeze failed too).
 # Ctrl-C/TERM records "interrupted" with the last step and never starts or stops a service. Before any record, it refuses
 # (exit 1) while <records-dir>/.release.lock exists or archive.sh holds <records-dir>/.archive.lock (OPERATIONS_RUNBOOK
-# §11); a run that merely waits for its archive copy confirmation never holds that lock.
+# §11: its hourly work, or a permanent deletion request it carries out); a run that merely waits for its archive copy
+# confirmation never holds that lock.
 # Every step's output and record.json are written to <records-dir>/<UTC>-<tag>/ (mode 0700).
 set -eu
 
@@ -268,8 +269,9 @@ owner_alive() {
     fi
     return 0
 }
-# The archive lock (OPERATIONS_RUNBOOK §11): archive.sh holds it only while it does its hourly work, never while a run
-# merely waits for its copy confirmation. Refused unless its owner provably no longer exists (same host, no
+# The archive lock (OPERATIONS_RUNBOOK §11): archive.sh holds it only while it does its hourly work or carries out a
+# permanent deletion request (its pre-purge backup, the deletion and the reconcile), never while a run merely waits for
+# its copy confirmation. Refused unless its owner provably no longer exists (same host, no
 # `maintenance` container running, and its pid gone, or the boot id or the pid's start time differs from the recorded
 # one); archive.sh itself removes such a stale lock at its next start. archive.sh takes its
 # lock first and then checks the release lock, so one of two concurrent starts always refuses.

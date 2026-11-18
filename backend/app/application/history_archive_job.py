@@ -1,5 +1,6 @@
 """The host job of Movement-history archival (Phase 16, history archival design §5, §7;
-build step 1: runs without deletion; build step 2: the purge).
+build step 1: runs without deletion; build step 2: the purge; build step 3: permanent
+deletion requests, design §6.3 and D17).
 
 ``python -m app.cli history-archive <command>`` runs these steps for the host
 script ``deploy/production/archive.sh``, as the maintenance database role
@@ -10,22 +11,44 @@ host script takes the pre-purge backup and passes its name and dump start.
 
 Commands (each prints one JSON report; ``JobReport``):
 
-- ``settings`` — what the host script needs (the Start minute of the hourly
-  work), read-only;
+- ``settings`` — what the host script needs at every start: the Start minute
+  of the hourly work, and whether a permanent deletion request is open
+  (``deletion_pending``: the cheap check that lets a start outside the hourly
+  window carry it out), read-only and bounded by the connect, statement and
+  lock timeouts of ``status`` (a timeout: exit 2);
 - ``recover`` — called right after the host script took its lock: a run
   found ``RUNNING`` is stale (no other command holds the job's advisory
   lock; also after a restore of the pre-purge backup, which is taken while
-  the run is RUNNING) and becomes ``FAILED`` with that reason; a ``PURGING``
-  run is never failed here — the next ``purge`` resumes it; unfinished
-  ``.partial`` entries of finished runs are removed; the purge receipt of a
-  finished run the job copied off the host is copied again where the copy
-  is missing;
-- ``next`` — the run the job must work on and its next step: ``export``
-  (APPROVED), ``verify`` (exported), ``copy`` (verified, not yet copied or
-  confirmed; or WAITING_FOR_COPY that is confirmed or whose copy folder is
-  usable now), ``backup`` (copied or confirmed: the host script takes the
+  the run is RUNNING) and becomes ``FAILED`` with that reason, and so does a
+  deletion request found ``RUNNING`` (its pre-purge backup is taken while
+  it is RUNNING, so nothing is ever deleted again after a restore); a
+  ``PURGING`` run is never failed here — the next ``purge`` resumes it;
+  unfinished ``.partial`` entries of finished runs are removed; the purge
+  receipt of a finished run the job copied off the host is copied again
+  where the copy is missing;
+- ``next`` — the work the job must do now. An open deletion request comes
+  first: ``start_deletion`` (APPROVED; it waits while a run is RUNNING in
+  this start) or ``deletion_backup`` (RUNNING: the host script takes its
+  pre-purge backup, then runs ``delete``). Then the run the job must work
+  on and its next step: ``export`` (APPROVED),
+  ``verify`` (exported), ``copy`` (verified, not yet copied or confirmed;
+  or WAITING_FOR_COPY that is confirmed or whose copy folder is usable
+  now), ``backup`` (copied or confirmed: the host script takes the
   pre-purge backup — after the requester was re-checked), ``purge``
   (PURGING: resume), ``wait``, ``running`` or ``none``;
+- ``start-deletion --request N`` — an APPROVED deletion request whose
+  requester (a User) is still active and still holds Delete Work Orders and
+  Part Numbers permanently becomes RUNNING at a whole second, with the label
+  of its pre-purge backup ``deletion-<id>-<that second, UTC>``; otherwise it
+  becomes FAILED;
+- ``delete --request N --backup NAME --backup-started-at UTC`` — a RUNNING
+  request with its pre-purge backup (kind ``pre-purge``, the request's label,
+  the dump started at or after the request started, not in the future):
+  after the requester is re-checked, ``permanent_deletion.carry_out`` deletes
+  its stored rows in ONE transaction and the request is COMPLETED; any
+  failure makes it FAILED with nothing deleted, except a database error that
+  does not last (``is_transient``), which leaves it RUNNING (exit 2
+  ``interrupted``) for the next start's ``recover`` to fail;
 - ``export --run N`` — ``APPROVED`` → ``RUNNING``; then, in ONE ``REPEATABLE
   READ`` snapshot, the eligible components (``history_archive``), the files
   into ``<archive dir>/.partial/run-<id>-<UTC stamp>/``, and the
@@ -85,20 +108,22 @@ person confirmed gets no copy: the off-host copy of the archive folder
 carries the receipt with it).
 
 Exit codes: 0 the step is done (``result`` says what happened); 1 refused,
-nothing changed (an unknown run, a run in another state, another
-history-archive command running, a missing or wrong pre-purge backup); 2
-could not run (configuration, database unreachable, an internal error
-before the run changed), its outcome is unknown, or a purge was interrupted
-and stays PURGING; 3 the run failed — it is now ``FAILED`` with its reason
-(never reported for a run that had ended otherwise).
+nothing changed (an unknown run or request, a run or request in another
+state, another history-archive command running, a missing or wrong
+pre-purge backup); 2 could not run (configuration, database unreachable, an
+internal error before the run or request changed), its outcome is unknown,
+or a purge or deletion was interrupted and stays PURGING or RUNNING; 3 the
+run or request failed — it is now ``FAILED`` with its reason (never
+reported for one that had ended otherwise).
 
 Every command that works on a run sets the transaction-local setting
-``partflow.archive_run_id`` to it: the run and record guard triggers admit
+``partflow.archive_run_id`` to it, and every command that works on a
+deletion request ``partflow.deletion_request_id``: the guard triggers admit
 the job's changes only then (and only from a role that may write archive
 records). Every change of state, and the off-host copy, appends one
-``HistoryArchiveRun`` audit row (no actor; ``metadata.source``
-``maintenance``). Audit rows are inserted without ``RETURNING``: the
-maintenance role may append them, never read them.
+``HistoryArchiveRun`` or ``DeletionRequest`` audit row (no actor;
+``metadata.source`` ``maintenance``). These are inserted without
+``RETURNING``.
 
 The archive folder (design §5): ``movements.jsonl.gz`` (every column of every
 archived Movement, one canonical JSON object per line, ordered by id),
@@ -139,21 +164,27 @@ from pathlib import Path
 from typing import Any, Final, NamedTuple, cast
 
 from sqlalchemy import Connection, Engine, RowMapping, Table, insert, select, text, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
-from app.application import backups, history_archive
+from app.application import backups, history_archive, permanent_deletion, system_status
 from app.application.migration import RunError, is_connection_failure
 from app.application.part_numbers import acquire_part_number_locks
 from app.core.config import get_settings
 from app.domain.enums import (
     AuditEventType,
+    DeletionRequestState,
     HistoryArchiveRunResult,
     HistoryArchiveRunState,
     MovementType,
     Permission,
 )
 from app.infrastructure import archive_files, backup_files
-from app.infrastructure.models import HistoryArchivedFlow, HistoryArchiveRun
+from app.infrastructure.models import (
+    DELETION_REQUEST_FINAL_STATES,
+    DeletionRequest,
+    HistoryArchivedFlow,
+    HistoryArchiveRun,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +232,7 @@ EXIT_RUN_FAILED: Final = 3
 
 _RUNS: Final = cast(Table, HistoryArchiveRun.__table__)
 _RECORDS: Final = cast(Table, HistoryArchivedFlow.__table__)
+_REQUESTS: Final = cast(Table, DeletionRequest.__table__)
 _STREAM: Final = {"stream_results": True, "yield_per": 5000}
 _STATE = HistoryArchiveRunState
 
@@ -250,6 +282,8 @@ class JobReport:
     finished_at: datetime.datetime | None = None
     #: The command changed the run, so an unexpected error makes it FAILED.
     run_started: bool = False
+    #: The permanent deletion request the command worked on (build step 3).
+    request_id: int | None = None
 
 
 class _Refused(Exception):
@@ -299,6 +333,7 @@ def job_document(report: JobReport) -> dict[str, object]:
         "finished_at": iso(report.finished_at),
         "duration_ms": int((finished - report.started_at).total_seconds() * 1000),
         "run_id": report.run_id,
+        "request_id": report.request_id,
         "state": report.state,
         **report.details,
         "error": (
@@ -311,6 +346,8 @@ def job_document(report: JobReport) -> dict[str, object]:
 
 def job_summary(report: JobReport) -> str:
     run = f" run {report.run_id}" if report.run_id is not None else ""
+    if report.request_id is not None:
+        run += f" deletion request {report.request_id}"
     state = f" ({report.state})" if report.state is not None else ""
     message = f": {report.error.message}" if report.error is not None else ""
     return f"history-archive {report.command}:{run} {report.result}{state}{message}"
@@ -493,14 +530,16 @@ def _command(
     work: Callable[[Engine, JobReport], None],
     *,
     run_id: int | None = None,
+    request_id: int | None = None,
     fail_run: FailRun = _fail_run,
 ) -> JobReport:
     """Run one command; a refusal, a failed run and any error become a complete report.
 
-    ``fail_run`` makes the run FAILED (the purge's also writes the receipt
-    of what it deleted so far).
+    ``fail_run`` makes the run — or, for a command on a deletion request
+    (``request_id``), the request — FAILED (the purge's also writes the
+    receipt of what it deleted so far).
     """
-    report = JobReport(command=command, started_at=_now(), run_id=run_id)
+    report = JobReport(command=command, started_at=_now(), run_id=run_id, request_id=request_id)
     if engine is None:
         return _fail(
             report, "configuration_invalid", _MESSAGES["configuration_invalid"], EXIT_COULD_NOT_RUN
@@ -514,12 +553,12 @@ def _command(
     except _RunFailed as failure:
         return _record_failure(engine, report, failure.reason, None, fail_run)
     except Exception as exc:
-        if report.state == _STATE.PURGING and is_transient(exc):
+        if _stays_open(report) and is_transient(exc):
             return _interrupted(report, exc)
         if report.run_started:
             deleted = (
                 "Whole components only were deleted; the purge receipt lists them."
-                if report.state == _STATE.PURGING
+                if report.state == _STATE.PURGING and report.request_id is None
                 else "Nothing was deleted."
             )
             return _record_failure(
@@ -549,23 +588,25 @@ def _record_failure(
     exc: BaseException | None,
     fail_run: FailRun,
 ) -> JobReport:
-    if report.run_id is None:  # pragma: no cover - every failing command names its run
+    subject = report.run_id if report.run_id is not None else report.request_id
+    if subject is None:  # pragma: no cover - every failing command names its run or request
         return _fail(report, "internal_error", reason, EXIT_COULD_NOT_RUN, exc)
     try:
-        state = fail_run(engine, report.run_id, reason, report.command)
+        state = fail_run(engine, subject, reason, report.command)
     except Exception as marking:
-        # The run stays as it is: the next recover makes a stale RUNNING run
-        # FAILED, and the next purge resumes a PURGING one.
+        # The run or request stays as it is: the next recover makes a stale
+        # RUNNING one FAILED, and the next purge resumes a PURGING run.
         return _fail(report, "outcome_unknown", reason, EXIT_COULD_NOT_RUN, exc or marking)
     report.state = state
     if state is None or state == _STATE.FAILED:
         return _fail(report, "run_failed", reason, EXIT_RUN_FAILED, exc)
     # The run had already ended on its own (a purge that completed before its
     # lock connection was lost, say): it did not fail.
+    what = f"Run {subject}" if report.run_id is not None else f"Deletion request {subject}"
     logger.warning(
-        "history-archive %s: run %s is %s; the error after it is not its failure: %s",
+        "history-archive %s: %s is %s; the error after it is not its failure: %s",
         report.command,
-        report.run_id,
+        what,
         state,
         reason,
     )
@@ -574,7 +615,7 @@ def _record_failure(
     return _fail(
         report,
         "outcome_unknown",
-        f"Run {report.run_id} is {state}; the command stopped after that on an error. {reason}",
+        f"{what} is {state}; the command stopped after that on an error. {reason}",
         EXIT_COULD_NOT_RUN,
         exc,
     )
@@ -608,12 +649,34 @@ def is_transient(exc: BaseException) -> bool:
     return False
 
 
-def _interrupted(report: JobReport, exc: BaseException) -> JobReport:
-    """A purge stopped by a transient database error: the run stays PURGING (exit 2).
+def _stays_open(report: JobReport) -> bool:
+    """A transient error leaves the work open: a PURGING run, or a deletion under way."""
+    if report.request_id is not None:
+        return report.run_started and report.state == DeletionRequestState.RUNNING
+    return report.state == _STATE.PURGING
 
-    The batch in progress was rolled back; ``purged`` and ``skipped`` say what
-    the committed batches did, and the next start resumes the purge.
+
+def _interrupted(report: JobReport, exc: BaseException) -> JobReport:
+    """A purge or deletion stopped by a transient database error (exit 2).
+
+    A purge: the run stays PURGING; the batch in progress was rolled back;
+    ``purged`` and ``skipped`` say what the committed batches did, and the
+    next start resumes the purge. A deletion: the request stays RUNNING;
+    its one transaction was rolled back, so nothing was deleted, and the
+    next start's ``recover`` makes it FAILED (it cannot be told apart from a
+    request restored from its pre-purge backup, after which nothing may be
+    deleted again).
     """
+    if report.request_id is not None:
+        report.error = RunError(
+            "deletion_interrupted",
+            f"Deletion request {report.request_id} stopped on a database error that does not"
+            f" last ({type(exc).__name__}). It stays RUNNING: its one transaction was rolled"
+            " back, so nothing was deleted, and the next start of the job makes it FAILED."
+            " Request the deletion again.",
+            exc,
+        )
+        return _finish(report, "interrupted", EXIT_COULD_NOT_RUN)
     report.error = RunError(
         "purge_interrupted",
         f"Run {report.run_id} stopped purging on a database error that does not last"
@@ -629,18 +692,67 @@ def _interrupted(report: JobReport, exc: BaseException) -> JobReport:
 # ---------------------------------------------------------------------------
 
 
+def _timed_out(exc: DBAPIError) -> bool:
+    """A statement or lock timeout: 55P03, or 57014 caused by a timeout (not a person)."""
+    original = exc.orig
+    sqlstate = getattr(original, "sqlstate", None)
+    if sqlstate == "55P03":
+        return True
+    if sqlstate == "57014":
+        diagnostic = getattr(original, "diag", None)
+        primary = getattr(diagnostic, "message_primary", None) or str(original)
+        return "timeout" in primary
+    return False
+
+
 def settings(engine: Engine | None, folders: JobFolders) -> JobReport:
-    """What the host script needs: the Start minute of the hourly work."""
+    """What the host script needs at every start: the Start minute of the hourly
+    work, and whether a deletion request is open (the cheap check of every
+    start: no job lock, no hash, no file).
+
+    ``archive.sh`` runs it every 5 minutes, so it is bounded as ``python -m
+    app.cli status`` is (``system_status``): the CLI's engine has its connect
+    timeout, and the two reads run in one READ ONLY transaction with its
+    statement and lock timeouts. A database that does not answer in time ends
+    the command as could not run (exit 2, ``database_unavailable``), so the
+    starts of a hung or locked database never pile up.
+    """
 
     def work(engine: Engine, report: JobReport) -> None:
-        with engine.connect() as connection:
-            stored = history_archive.read_settings(connection)
+        try:
+            with engine.connect() as connection, connection.begin():
+                connection.execute(text("SET TRANSACTION READ ONLY"))
+                connection.execute(
+                    text(
+                        "SET LOCAL statement_timeout ="
+                        f" '{system_status.DEFAULT_STATEMENT_TIMEOUT_SECONDS}s'"
+                    )
+                )
+                connection.execute(
+                    text(f"SET LOCAL lock_timeout = '{system_status.LOCK_TIMEOUT_SECONDS}s'")
+                )
+                stored = history_archive.read_settings(connection)
+                request = permanent_deletion.open_request(connection)
+        except DBAPIError as exc:
+            if not _timed_out(exc):
+                raise
+            raise _CouldNotRun(
+                "database_unavailable",
+                "PartFlow's database did not answer the settings read in time (statement"
+                f" timeout {system_status.DEFAULT_STATEMENT_TIMEOUT_SECONDS} s, lock timeout"
+                f" {system_status.LOCK_TIMEOUT_SECONDS} s): it is busy, locked or hung."
+                " Nothing was changed.",
+            ) from exc
         report.details.update(
             {
                 "start_minute": stored.start_minute,
                 "archive_dir": None if folders.archive_dir is None else str(folders.archive_dir),
                 "copy_dir": None if folders.copy_dir is None else str(folders.copy_dir),
                 "site_timezone": get_settings().site_timezone,
+                "deletion_pending": request is not None,
+                "deletion_request": (
+                    None if request is None else permanent_deletion.request_summary(request)
+                ),
             }
         )
         report.result, report.exit_code = "read", EXIT_DONE
@@ -667,6 +779,19 @@ _OPEN_STATES: Final = (
     _STATE.WAITING_FOR_COPY,
     _STATE.PURGING,
 )
+
+
+def _last_finished_request(connection: Connection) -> RowMapping | None:
+    return (
+        connection.execute(
+            select(_REQUESTS)
+            .where(_REQUESTS.c.finished_at.is_not(None))
+            .order_by(_REQUESTS.c.finished_at.desc(), _REQUESTS.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .one_or_none()
+    )
 
 
 def _copy_dir_usable(folders: JobFolders) -> bool:
@@ -735,16 +860,55 @@ def _requester_problem(connection: Connection, run: RowMapping) -> str | None:
     return None
 
 
-def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
-    """The run the job must work on, and what to run for it.
+#: What ``next`` answers for the open deletion request, by its state.
+_DELETION_ACTIONS: Final = {
+    DeletionRequestState.APPROVED.value: "start_deletion",
+    DeletionRequestState.RUNNING.value: "deletion_backup",
+}
 
-    Before it hands out the ``backup`` step it re-checks the requester (so no
-    backup is taken for a run that may not purge): a requester who is no
-    longer active or no longer holds the archival key makes the run FAILED
-    (exit 3).
+
+def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
+    """The work the job must do now: an open deletion request first, then the
+    run the job must work on, and what to run for it.
+
+    A deletion request: ``start_deletion`` while it is APPROVED, and
+    ``deletion_backup`` (with the backup's kind and label) once this start
+    made it RUNNING — the host script runs ``recover`` first, so a RUNNING
+    request or run found later than that is always this start's own. An
+    APPROVED request waits while the open run is RUNNING: that run's next
+    steps belong to the same start, and the next start's ``recover`` would
+    fail a run left RUNNING; ``request`` then names the waiting request.
+    Before it hands out the ``backup`` step of a run it re-checks the
+    requester (so no backup is taken for a run that may not purge): a
+    requester who is no longer active or no longer holds the archival key
+    makes the run FAILED (exit 3).
     """
 
     def work(engine: Engine, report: JobReport) -> None:
+        with engine.connect() as connection:
+            request = permanent_deletion.open_request(connection)
+            open_run = _open_run(connection)
+        waits = (
+            request is not None
+            and request["state"] == DeletionRequestState.APPROVED
+            and open_run is not None
+            and open_run["state"] == _STATE.RUNNING
+        )
+        if request is not None and not waits:
+            report.request_id, report.state = int(request["id"]), str(request["state"])
+            action = _DELETION_ACTIONS[str(request["state"])]
+            report.details["run"] = None
+            report.details["request"] = permanent_deletion.request_summary(request)
+            if action == "deletion_backup":
+                report.details["backup"] = {
+                    "kind": PRE_PURGE_KIND,
+                    "label": request["backup_label"],
+                }
+            report.result, report.exit_code = action, EXIT_DONE
+            return
+        report.details["request"] = (
+            None if request is None else permanent_deletion.request_summary(request)
+        )
         with engine.connect() as connection:
             run = _open_run(connection)
             action = _next_action(run, folders)
@@ -823,6 +987,18 @@ def status(engine: Engine | None, folders: JobFolders) -> JobReport:
         report.details["receipts_not_copied"] = missing
         if missing:
             findings.append("receipt_not_copied")
+        # Permanent deletion requests (build step 3): reported, never a finding
+        # (a refused or failed deletion is the requester's to see and repeat).
+        with engine.connect() as connection:
+            request = permanent_deletion.open_request(connection)
+            last_request = _last_finished_request(connection)
+        open_request = None if request is None else permanent_deletion.request_summary(request)
+        if request is not None and open_request is not None:
+            open_request["age_seconds"] = int((moment - request["requested_at"]).total_seconds())
+        report.details["open_deletion_request"] = open_request
+        report.details["last_finished_deletion_request"] = (
+            None if last_request is None else permanent_deletion.request_summary(last_request)
+        )
         report.details["max_wait_days"] = max_wait_days
         report.details["findings"] = findings
         report.result = "finding" if findings else "ok"
@@ -856,24 +1032,57 @@ def _folder_status(path: Path | None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+#: Why ``recover`` fails a deletion request it finds RUNNING.
+_STALE_REQUEST_REASON: Final = (
+    "The host job stopped while the deletion request was RUNNING (found by the next start of the"
+    " job, also after a restore of its pre-purge backup). Nothing was deleted: the deletion is"
+    " one transaction. Request the deletion again."
+)
+
+
 def recover(engine: Engine | None, folders: JobFolders) -> JobReport:
-    """Fail stale RUNNING runs; clean up after finished runs; never touch a PURGING run.
+    """Fail stale RUNNING runs and deletion requests; clean up after finished runs;
+    never touch a PURGING run.
 
     A RUNNING run found here is stale: nothing else holds the job's lock (or
     the database was restored from the pre-purge backup, which is taken while
-    the run is RUNNING). A PURGING run stays as it is: the next ``purge``
-    resumes it. Unfinished ``.partial`` entries (archive folders and receipt
-    files) of finished runs are removed; a name the job does not know is
-    kept and listed. The purge receipt of a finished run whose archive the job
-    copied off the host is copied again when it is missing or differs beside
-    the archive's copy in a usable copy folder.
+    the run is RUNNING). So is a RUNNING deletion request: its one deletion
+    transaction did not commit (a stopped job, a database error that does not
+    last), or the database was restored from its pre-purge backup — which
+    holds it RUNNING — and nothing may be deleted again after a restore. A
+    PURGING run stays as it is: the next ``purge`` resumes it. Unfinished
+    ``.partial`` entries (archive folders and receipt files) of finished runs
+    are removed; a name the job does not know is kept and listed. The purge
+    receipt of a finished run whose archive the job copied off the host is
+    copied again when it is missing or differs beside the archive's copy in a
+    usable copy folder.
     """
 
     def work(engine: Engine, report: JobReport) -> None:
         archive_dir = _require_archive_dir(folders)
         with _job_lock(engine):
             failed: list[int] = []
+            failed_requests: list[int] = []
             with engine.connect() as connection, connection.begin():
+                for request in (
+                    connection.execute(
+                        select(_REQUESTS)
+                        .where(_REQUESTS.c.state == DeletionRequestState.RUNNING.value)
+                        .order_by(_REQUESTS.c.id)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .all()
+                ):
+                    permanent_deletion.change_request(
+                        connection,
+                        request,
+                        "recover",
+                        state=DeletionRequestState.FAILED.value,
+                        failure_reason=_STALE_REQUEST_REASON,
+                        finished_at=_now(),
+                    )
+                    failed_requests.append(int(request["id"]))
                 stale = (
                     connection.execute(
                         select(_RUNS)
@@ -920,13 +1129,16 @@ def recover(engine: Engine | None, folders: JobFolders) -> JobReport:
         report.details.update(
             {
                 "failed_run_ids": failed,
+                "failed_request_ids": failed_requests,
                 "removed_partial": removed,
                 "kept_partial": kept,
                 "copied_receipts": copied,
                 "receipt_problems": problems,
             }
         )
-        report.result = "recovered" if failed or removed or copied else "nothing_to_recover"
+        report.result = (
+            "recovered" if failed or failed_requests or removed or copied else "nothing_to_recover"
+        )
         report.exit_code = EXIT_DONE
 
     return _command("recover", engine, work)
@@ -3020,6 +3232,230 @@ def purge(
             report.exit_code = EXIT_DONE
 
     return _command("purge", engine, work, run_id=run_id, fail_run=_fail_purging(folders))
+
+
+# ---------------------------------------------------------------------------
+# Permanent deletion requests (build step 3; design §6.3, D17)
+# ---------------------------------------------------------------------------
+
+#: The key the requesting User must still hold when the job starts and carries out a request.
+_DELETION_KEY: Final = Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY.value
+#: The label of a deletion request's pre-purge backup: ``deletion-<id>-<stamp of its start>``.
+_DELETION_LABEL: Final = "deletion-{id}-{stamp}"
+
+
+def _deletion_requester_problem(connection: Connection, request: RowMapping) -> str | None:
+    """Why the User who requested the deletion may no longer have it carried out.
+
+    None: they may — or the request is an operator's (``pf delete-permanently``),
+    whose authority is the database owner's credential that recorded it.
+    """
+    user_id = request["requested_by_user_id"]
+    if user_id is None:
+        return None
+    row = (
+        connection.execute(
+            text(
+                "SELECT u.display_name, u.is_active, EXISTS (SELECT 1 FROM role_permissions p"
+                " WHERE p.role_id = u.role_id AND p.permission = :key) AS holds"
+                " FROM users u WHERE u.id = :id"
+            ),
+            {"id": int(user_id), "key": _DELETION_KEY},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    who = f"user {int(user_id)}" if row is None else f"{row['display_name']} (user {int(user_id)})"
+    if row is None or not row["is_active"]:
+        return (
+            f"The User who requested deletion request {int(request['id'])}, {who}, is no longer"
+            " active, so nothing was deleted. A holder of Delete Work Orders and Part Numbers"
+            " permanently may request the deletion again."
+        )
+    if not row["holds"]:
+        return (
+            f"The User who requested deletion request {int(request['id'])}, {who}, no longer"
+            " holds Delete Work Orders and Part Numbers permanently, so nothing was deleted. A"
+            " holder of the key may request the deletion again."
+        )
+    return None
+
+
+def _fail_request(backup: tuple[str, datetime.datetime] | None = None) -> FailRun:
+    """A deletion command's ``fail_run``: the request becomes FAILED, nothing deleted.
+
+    ``backup``: the pre-purge backup of a RUNNING request, recorded with the failure.
+    """
+
+    def fail(engine: Engine, request_id: int, reason: str, command: str) -> str | None:
+        with engine.connect() as connection, connection.begin():
+            request = permanent_deletion.request_row(connection, request_id, lock=True)
+            if request is None:
+                return None
+            if str(request["state"]) in DELETION_REQUEST_FINAL_STATES:
+                return str(request["state"])
+            values: dict[str, object] = {
+                "state": DeletionRequestState.FAILED.value,
+                "failure_reason": reason[:2000],
+                "finished_at": _now(),
+            }
+            if backup is not None and request["state"] == DeletionRequestState.RUNNING:
+                values["pre_purge_backup_name"], values["pre_purge_backup_started_at"] = backup
+            after = permanent_deletion.change_request(connection, request, command, **values)
+            return str(after["state"])
+
+    return fail
+
+
+def _request_for(engine: Engine, report: JobReport, request_id: int) -> RowMapping:
+    with engine.connect() as connection:
+        request = permanent_deletion.request_row(connection, request_id, lock=False)
+    if request is None:
+        raise _Refused(
+            "unknown_request", f"There is no deletion request {request_id}. Nothing was changed."
+        )
+    report.state = str(request["state"])
+    return request
+
+
+def start_deletion(engine: Engine | None, folders: JobFolders, request_id: int) -> JobReport:
+    """APPROVED → RUNNING before the pre-purge backup is taken (or FAILED: the requester).
+
+    The request starts at a whole second, and the label of its backup names
+    the request and that second. A restore of the backup therefore holds a
+    RUNNING request, which the next ``recover`` makes FAILED.
+    """
+
+    def work(engine: Engine, report: JobReport) -> None:
+        with _job_lock(engine):
+            request = _request_for(engine, report, request_id)
+            if request["state"] != DeletionRequestState.APPROVED:
+                raise _Refused(
+                    "wrong_state",
+                    f"Deletion request {request_id} is {request['state']}; only an APPROVED"
+                    " request can be started. Nothing was changed.",
+                )
+            with engine.connect() as connection, connection.begin():
+                current = permanent_deletion.request_row(connection, request_id, lock=True)
+                if current is None or current["state"] != DeletionRequestState.APPROVED:
+                    raise _Refused(  # pragma: no cover - a cancel racing the job lock
+                        "wrong_state",
+                        f"Deletion request {request_id} changed meanwhile. Nothing was changed.",
+                    )
+                problem = _deletion_requester_problem(connection, current)
+                if problem is None:
+                    started = _now().replace(microsecond=0)
+                    after = permanent_deletion.change_request(
+                        connection,
+                        current,
+                        "start-deletion",
+                        state=DeletionRequestState.RUNNING.value,
+                        started_at=started,
+                        backup_label=_DELETION_LABEL.format(id=request_id, stamp=_stamp(started)),
+                    )
+                else:
+                    after = permanent_deletion.change_request(
+                        connection,
+                        current,
+                        "start-deletion",
+                        state=DeletionRequestState.FAILED.value,
+                        failure_reason=problem,
+                        finished_at=_now(),
+                    )
+            report.state = str(after["state"])
+            report.details["request"] = permanent_deletion.request_summary(after)
+            if problem is not None:
+                report.error = RunError("run_failed", problem)
+                report.result, report.exit_code = "failed", EXIT_RUN_FAILED
+                return
+            report.details["backup"] = {"kind": PRE_PURGE_KIND, "label": after["backup_label"]}
+            report.result, report.exit_code = "started", EXIT_DONE
+
+    return _command("start-deletion", engine, work, request_id=request_id, fail_run=_fail_request())
+
+
+def _parsed_request_backup(request: RowMapping, backup: PurgeBackup) -> datetime.datetime:
+    """The dump start of a valid pre-purge backup of this request; refuses any other."""
+    label = str(request["backup_label"])
+    parsed = backups.parse_name(backup.name)
+    if parsed is None or parsed.kind != PRE_PURGE_KIND or parsed.label != label:
+        raise _Refused(
+            "backup_invalid",
+            f"The backup {backup.name!r} is not the pre-purge backup of deletion request"
+            f" {request['id']}: its name must be <YYYYMMDDTHHMMSSZ>-{PRE_PURGE_KIND}-{label}."
+            " Nothing was changed.",
+        )
+    started = backups.parse_utc(backup.started_at)
+    if started is None:
+        raise _Refused(
+            "backup_invalid",
+            f"The dump start {backup.started_at!r} is not a UTC time YYYY-MM-DDTHH:MM:SSZ."
+            " Nothing was changed.",
+        )
+    if started < request["started_at"]:
+        raise _Refused(
+            "backup_invalid",
+            f"The dump of {backup.name} started at {backups.utc_text(started)}, before deletion"
+            f" request {request['id']} started ({iso(request['started_at'])}): it may not hold"
+            " the RUNNING request. Take a new pre-purge backup. Nothing was changed.",
+        )
+    if started > _now() + _BACKUP_FUTURE_TOLERANCE:
+        raise _Refused(
+            "backup_invalid",
+            f"The dump of {backup.name} started at {backups.utc_text(started)}, in the future"
+            " (a clock error). Nothing was changed.",
+        )
+    return started
+
+
+def delete_request(
+    engine: Engine | None, folders: JobFolders, request_id: int, backup: PurgeBackup
+) -> JobReport:
+    """Carry out a RUNNING deletion request after its pre-purge backup (design §6.3)."""
+    evidence: list[tuple[str, datetime.datetime]] = []
+
+    def work(engine: Engine, report: JobReport) -> None:
+        with _job_lock(engine):
+            request = _request_for(engine, report, request_id)
+            if request["state"] != DeletionRequestState.RUNNING:
+                raise _Refused(
+                    "wrong_state",
+                    f"Deletion request {request_id} is {request['state']} and not ready to be"
+                    " carried out (it needs a RUNNING request: start it with start-deletion)."
+                    " Nothing was changed.",
+                )
+            started = _parsed_request_backup(request, backup)
+            evidence.append((backup.name, started))
+            report.details["backup"] = {"name": backup.name, "dump_started_at": iso(started)}
+            report.run_started = True
+            with engine.connect() as connection:
+                problem = _deletion_requester_problem(connection, request)
+            if problem is not None:
+                raise _RunFailed(problem)
+            try:
+                carried = permanent_deletion.carry_out(
+                    engine, request_id, backup_name=backup.name, backup_started_at=started
+                )
+            except permanent_deletion.DeletionChangedError as changed:
+                raise _RunFailed(changed.reason) from changed
+            except permanent_deletion.CommitOutcomeUnknownError as unknown:
+                report.state = None
+                raise _CouldNotRun(
+                    "outcome_unknown",
+                    f"The database connection failed while committing deletion request"
+                    f" {request_id}: it is COMPLETED (deleted) or still RUNNING (nothing deleted;"
+                    " the next start makes it FAILED). Run history-archive status to see it.",
+                ) from unknown
+            report.state = str(carried.request["state"])
+            report.details["request"] = permanent_deletion.request_summary(carried.request)
+            report.details["deleted"] = carried.deleted
+            report.details["audit_rows"] = carried.audit_rows
+            report.result, report.exit_code = "deleted", EXIT_DONE
+
+    def fail(engine: Engine, subject: int, reason: str, command: str) -> str | None:
+        return _fail_request(evidence[-1] if evidence else None)(engine, subject, reason, command)
+
+    return _command("delete", engine, work, request_id=request_id, fail_run=fail)
 
 
 def environment_folders() -> JobFolders:

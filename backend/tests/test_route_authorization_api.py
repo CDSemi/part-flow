@@ -88,6 +88,7 @@ MCP = Permission.MANAGE_CORRECTION_PERMISSIONS
 CSS = Permission.CONFIGURE_SYSTEM_SETTINGS
 MUAR = Permission.MANAGE_USERS_AND_ROLES
 RHAP = Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE
+DWPP = Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -196,6 +197,7 @@ def _concrete(path: str) -> str:
         .replace("{allocation_id}", "1")
         .replace("{quantity_flow_id}", "1")
         .replace("{run_id}", "1")
+        .replace("{request_id}", "1")
     )
 
 
@@ -563,6 +565,43 @@ def _run_waiting_for_copy(client: TestClient) -> tuple[str, dict[str, Any]]:
     )
 
 
+# Permanent deletion requests (Phase 16, design B step 3): one open at a time.
+_DELETIONS = "/api/permanent-deletion/requests"
+
+
+def _close_open_deletions(client: TestClient) -> None:
+    for request in cast(list[dict[str, Any]], _ok(admin_of(client).get(_DELETIONS))):
+        if request["state"] == "APPROVED":
+            _ok(admin_of(client).post(f"{_DELETIONS}/{request['id']}/cancel"))
+
+
+def _deletion_request(client: TestClient) -> tuple[str, dict[str, Any]]:
+    _close_open_deletions(client)
+    number = f"DEL-{_suffix()}"
+    _ok(
+        admin_of(client).post(
+            "/api/work-orders",
+            json={
+                "work_order_number": number,
+                "lines": [{"part_number": f"DEL-{_suffix().upper()}", "requested_quantity": 1}],
+            },
+        ),
+        201,
+    )
+    body = {
+        "work_order_numbers": [number],
+        "reason": "authorization test",
+        "confirmation": [number],
+    }
+    return _DELETIONS, {"json": body}
+
+
+def _deletion_to_cancel(client: TestClient) -> tuple[str, dict[str, Any]]:
+    path, kwargs = _deletion_request(client)
+    request_id = int(_ok(admin_of(client).post(path, **kwargs), 201)["id"])
+    return f"{_DELETIONS}/{request_id}/cancel", {}
+
+
 _WRITES: list[_Write] = [
     _Write(
         "department-create",
@@ -868,6 +907,24 @@ _WRITES: list[_Write] = [
         _key(RHAP),
         _run_waiting_for_copy,
         "history_archive_runs",
+    ),
+    _Write(
+        "deletion-request",
+        "POST",
+        "/api/permanent-deletion/requests",
+        _key(DWPP),
+        _key(DWPP),
+        _deletion_request,
+        "deletion_requests",
+    ),
+    _Write(
+        "deletion-cancel",
+        "POST",
+        "/api/permanent-deletion/requests/{request_id}/cancel",
+        _key(DWPP),
+        _key(DWPP),
+        _deletion_to_cancel,
+        "deletion_requests",
     ),
     _Write(
         "backup-policy",
@@ -1177,7 +1234,25 @@ _MANAGEMENT_WRITES = {
 _NON_WRITING_ROUTES = {
     ("POST", "/api/policies/mail-server/test"),
     ("GET", "/api/history-archive/preview"),
+    ("GET", "/api/permanent-deletion/preview"),
+    ("GET", "/api/permanent-deletion/requests"),
 }
+
+
+def test_the_deletion_reads_need_the_deletion_key(client: TestClient, db_engine: Engine) -> None:
+    """Phase 16 step 3: the preview and the list of deletion requests read only; each
+    needs Delete Work Orders and Part Numbers permanently."""
+    lacking = client_as(client, *(key for key in ALL_PERMISSIONS if key is not DWPP))
+    holder = client_as(client, DWPP)
+    count = _audit_count(db_engine)
+    for path, params in (
+        ("/api/permanent-deletion/preview", {"part_number": f"NONE-{_suffix().upper()}"}),
+        (_DELETIONS, {}),
+    ):
+        assert anonymous_client(client).get(path, params=params).status_code == 401
+        _denied(lacking.get(path, params=params), [DWPP], _A2)
+        assert holder.get(path, params=params).status_code == 200
+    assert _audit_count(db_engine) == count
 
 
 def test_the_archive_preview_needs_the_archival_key(client: TestClient, db_engine: Engine) -> None:

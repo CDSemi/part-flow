@@ -149,6 +149,21 @@ class HotListChangedError(ConflictError):
         self.entries = entries
 
 
+class DeletionRefusedError(ConflictError):
+    """A permanent deletion would be refused, so nothing was requested
+    (Phase 16, history archival design D17).
+
+    The plan of the deletion (``app.application.permanent_deletion``) found
+    links to data that stays, or a record that does not exist; the response
+    carries every refusal (``code`` and ``message``) so the dialog can name
+    each link, exactly as the preview does.
+    """
+
+    def __init__(self, message: str, refusals: list[dict[str, str]]) -> None:
+        super().__init__(message)
+        self.refusals = refusals
+
+
 class AuthenticationRequiredError(ApplicationError):
     """No signed-in User, or the sign-in has ended (Phase 14, 401).
 

@@ -8,16 +8,22 @@
 #   backup   a manual deploy/production/backup.sh (OPERATIONS_RUNBOOK §3)
 #   restore  the new-instance restore of a backup into an empty database (OPERATIONS_RUNBOOK §6)
 #   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
-#   archive  the hourly work of Movement-history archival now: deploy/production/archive.sh (§11): the export, check
+#   archive  the history archive job now: deploy/production/archive.sh (§11): an open permanent deletion request
+#            (its pre-purge backup and the deletion), or the hourly work of Movement-history archival: the export, check
 #            and off-host copy of a requested run, its pre-purge backup and the purge of the archived Movement history
-#            from the database, then the reconcile after the purge
+#            from the database; then the reconcile after the purge or the deletion
 #   delete-permanently
-#            the preview, or with --confirm a verified manual backup and then the deletion, of Work Orders and Part
-#            Numbers entered only for testing (`app.cli delete-permanently` in the owner's one-shot db-roles service;
-#            OPERATIONS_RUNBOOK §10)
+#            the preview of deleting Work Orders and Part Numbers entered only for testing, or with --confirm a
+#            permanent deletion request (`app.cli delete-permanently` in the owner's one-shot db-roles service) that
+#            archive.sh carries out at once: the pre-purge backup, the deletion in one transaction and the reconcile
+#            (OPERATIONS_RUNBOOK §10). It needs the history archival set up (the archive folder and the history archive
+#            task, SYNOLOGY_NAS §11.8), and it then reports the request's final state from `history-archive status`.
 # `deploy/production/pf --help` prints the usage. Exit status: 0 done, 1 refused or a check failed (nothing was
 # changed by the refusal), 2 could not run; update, backup and archive end with the exit status of release.sh,
-# backup.sh and archive.sh, delete-permanently with the exit status of `app.cli delete-permanently`.
+# backup.sh and archive.sh. delete-permanently: 0 the preview was shown, or the request was carried out (the records are
+# deleted); 1 refused, nothing requested; 2 could not run, or the request was recorded but is not carried out yet; 3
+# the request FAILED (nothing was deleted; its reason is printed); 4 the records are deleted, but the reconcile after
+# the deletion did not end clean (an incident, OPERATIONS_RUNBOOK §8).
 set -eu
 
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -43,21 +49,28 @@ Commands:
                             restore the backup NAME into this host's empty database, then start PartFlow on it
                             (OPERATIONS_RUNBOOK §6, New-instance restore); the checkout must be at the backup's release
   status [--url URL]        the containers, /api/health and the status report; with --url the full check.sh
-  archive                   run the hourly work of Movement-history archival now (archive.sh; OPERATIONS_RUNBOOK
-                            §11): export, verify and copy a requested run, take its pre-purge backup and PURGE its
-                            archived Movement history from the database, then reconcile; or continue a run that
-                            waits for its copy confirmation or was left purging
+  archive                   run the history archive job now (archive.sh; OPERATIONS_RUNBOOK §11): carry out an open
+                            permanent deletion request (its pre-purge backup, then the deletion), or the hourly work
+                            of Movement-history archival: export, verify and copy a requested run, take its pre-purge
+                            backup and PURGE its archived Movement history from the database; then reconcile; or
+                            continue a run that waits for its copy confirmation or was left purging. A start that
+                            carried out a deletion does no run work: run it again for that
   delete-permanently (--work-order NUMBER | --part-number PN)... --reason TEXT [--confirm]
                             show what would be deleted of Work Orders and Part Numbers entered only for testing; with
-                            --confirm take a verified manual backup, then delete them in one transaction
-                            (OPERATIONS_RUNBOOK §10); --work-order and --part-number may be repeated
+                            --confirm record a permanent deletion request and run the history archive job at once
+                            (archive.sh), which takes the pre-purge backup and deletes them in one transaction, then
+                            report the request's final state (OPERATIONS_RUNBOOK §10); --confirm needs the archive
+                            folder and the history archive task (SYNOLOGY_NAS §11.8); --work-order and --part-number
+                            may be repeated
 Options of every command:
   --env-file FILE           default .env.production
   --operator NAME           recorded as the operator (default: the login name)
 Text values: 1-500 characters, no control characters, no " or \. A Work Order Number or Part Number: 1-500
 characters, no control characters, given exactly as PartFlow shows it.
 Exit: 0 done, 1 refused or a check failed, 2 could not run; update, backup and archive end with the exit status of
-      release.sh, backup.sh and archive.sh, delete-permanently with the exit status of the deletion command.
+      release.sh, backup.sh and archive.sh. delete-permanently: 0 preview shown or records deleted, 1 refused (nothing
+      requested), 2 could not run or not carried out yet, 3 the request FAILED (nothing deleted), 4 deleted, but the
+      reconcile after the deletion did not end clean (an incident).
 EOF
 }
 
@@ -243,6 +256,18 @@ pf_compose() {
 # json_field FILE KEY: a top-level string value of an indented app.cli report (empty for null or absent).
 json_field() {
     sed -n 's/^  "'"$2"'": "\([^"]*\)",\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# json_nested FILE OBJECT KEY: the string value KEY of the top-level object OBJECT, as written (escapes kept).
+json_nested() {
+    sed -n '/^  "'"$2"'": {$/,/^  }/s/^    "'"$3"'": "\(.*\)",\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# json_nested_number FILE OBJECT KEY: the whole-number value KEY of the top-level object OBJECT.
+json_nested_number() {
+    sed -n '/^  "'"$2"'": {$/,/^  }/s/^    "'"$3"'": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# report_valid FILE RC: the report holds exactly the line of its exit code (OPERATIONS_RUNBOOK §7 rule).
+report_valid() {
+    grep -qx "  \"exit_code\": $2," "$1" 2>/dev/null
 }
 
 # checkout_at_release: the checked-out commit is the one of the tag PARTFLOW_RELEASE names.
@@ -483,42 +508,105 @@ delete_command() {
     pf_compose --profile ops run --rm --no-deps -T db-roles delete-permanently "$@"
 }
 
+# archival_set_up: the history archive job can carry a deletion request out: PARTFLOW_ARCHIVE_DIR names an existing
+# folder (archive.sh refuses without it), and no incident record stops the job (OPERATIONS_RUNBOOK §8). Otherwise it
+# sets WHY_NOT and returns 1. The history archive task itself (SYNOLOGY_NAS §11.8) cannot be seen from here.
+archival_set_up() {
+    archive_dir=$(env_value PARTFLOW_ARCHIVE_DIR)
+    missing=
+    if [ -z "$archive_dir" ]; then
+        missing="PARTFLOW_ARCHIVE_DIR in $ENV_FILE is empty"
+    else
+        case "$archive_dir" in
+            /*) [ -d "$archive_dir" ] || missing="the archive folder $archive_dir (PARTFLOW_ARCHIVE_DIR) does not exist" ;;
+            *) missing="PARTFLOW_ARCHIVE_DIR in $ENV_FILE is not an absolute path" ;;
+        esac
+    fi
+    if [ -n "$missing" ]; then
+        WHY_NOT="$missing. Nothing was requested or deleted: a permanent deletion request is carried out only by the history archive job, which needs the archive folder and the history archive task (SYNOLOGY_NAS §11.8)."
+        return 1
+    fi
+    incident=${HOME:-/root}/partflow-deployments/archive/reconcile-after-purge
+    if [ -e "$incident" ]; then
+        WHY_NOT="the incident record $incident of a reconcile after a purge or a deletion exists: the history archive job carries out no deletion until the incident is closed (OPERATIONS_RUNBOOK §8). Nothing was requested or deleted."
+        return 1
+    fi
+    return 0
+}
+
 cmd_delete_permanently() {
     eval "set -- $TARGETS"
     if [ -z "$CONFIRM" ]; then
-        step "preview only: nothing is changed (add --confirm to delete)"
+        step "preview only: nothing is changed (add --confirm to request the deletion)"
         rc=0
         delete_command "$@" --operator "$OPERATOR" --reason "$REASON" || rc=$?
         exit "$rc"
     fi
+    # The history archive job carries the request out: without it, a request would only wait (OPERATIONS_RUNBOOK §10).
+    WHY_NOT=
+    archival_set_up || could_not_run "$WHY_NOT"
     WORK=$(mktemp -d)
     trap 'rm -rf "$WORK"' EXIT
-    step "checking what would be deleted (preview)"
+    step "recording the deletion request (the history archive job carries it out after a pre-purge backup)"
     rc=0
-    delete_command "$@" --operator "$OPERATOR" --reason "$REASON" >"$WORK/preview.json" || rc=$?
+    delete_command "$@" --operator "$OPERATOR" --reason "$REASON" --confirm >"$WORK/request.json" || rc=$?
+    cat "$WORK/request.json"
     case "$rc" in
-        0) cat "$WORK/preview.json" >&2 ;;
-        1)
-            cat "$WORK/preview.json"
-            refuse "the deletion would be refused (see the refusals above). No backup was taken and nothing was deleted."
-            ;;
+        0) ;;
+        1) refuse "the deletion is refused (see the refusals above). Nothing was requested or deleted." ;;
         *)
-            cat "$WORK/preview.json"
-            could_not_run "the preview failed (exit $rc, see above). No backup was taken and nothing was deleted."
+            if [ "$(json_field "$WORK/request.json" result)" = outcome_unknown ]; then
+                could_not_run "the database connection failed while the request was recorded: it may or may not exist. Read the open deletion request in Administration → History archival & purge, or with history-archive status (OPERATIONS_RUNBOOK §11); the history archive task carries a recorded request out at its next start."
+            fi
+            could_not_run "the deletion request could not be recorded (exit $rc, see above). Nothing was requested or deleted."
             ;;
     esac
-    step "taking a verified manual backup first (backup.sh --kind manual)"
-    rc=0
-    sh deploy/production/backup.sh --kind manual --operator "$OPERATOR" --reason "before pf delete-permanently" \
-        --env-file "$ENV_FILE" >"$WORK/backup.out" || rc=$?
-    [ "$rc" -eq 0 ] || could_not_run "the backup failed (backup.sh exit $rc, see above). Nothing was deleted."
-    name=$(sed -n 's/^BACKUP \([^ ]*\) .*$/\1/p' "$WORK/backup.out" | tail -n 1)
-    printf '%s' "$name" | grep -Eq "$BACKUP_NAME_PATTERN" \
-        || could_not_run "backup.sh did not name the backup it published. Nothing was deleted."
-    step "deleting in one transaction (the backup $name holds the data until it ages out)"
-    rc=0
-    delete_command "$@" --operator "$OPERATOR" --reason "$REASON" --confirm --backup-name "$name" || rc=$?
-    exit "$rc"
+    request=$(json_nested_number "$WORK/request.json" request id)
+    printf '%s' "$request" | grep -Eq '^[0-9]+$' \
+        || could_not_run "delete-permanently reported success but named no deletion request ($WORK/request.json). Read the open deletion request in Administration → History archival & purge."
+    step "deletion request $request is recorded (APPROVED); running the history archive job now (archive.sh), as pf archive does"
+    arc=0
+    sh deploy/production/archive.sh --env-file "$ENV_FILE" >&2 || arc=$?
+    step "reading the state of deletion request $request (history-archive status)"
+    src=0
+    pf_compose --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status >"$WORK/status.json" \
+        2>"$WORK/status.err" || src=$?
+    if ! report_valid "$WORK/status.json" "$src"; then
+        tail -n 3 "$WORK/status.err" >&2 2>/dev/null || true
+        could_not_run "the state of deletion request $request could not be read (history-archive status exit $src; archive.sh exit $arc). Read it in Administration → History archival & purge."
+    fi
+    finished=$(json_nested_number "$WORK/status.json" last_finished_deletion_request id)
+    open=$(json_nested_number "$WORK/status.json" open_deletion_request id)
+    if [ "$finished" = "$request" ]; then
+        state=$(json_nested "$WORK/status.json" last_finished_deletion_request state)
+        backup=$(json_nested "$WORK/status.json" last_finished_deletion_request pre_purge_backup_name)
+        case "$state" in
+            COMPLETED)
+                if [ "$arc" -eq 4 ]; then
+                    echo "pf: deletion request $request is COMPLETED: the records were deleted (pre-purge backup ${backup:-unknown}), but the reconcile after the deletion did not end clean: an incident (OPERATIONS_RUNBOOK §8, Reconcile finding after a deletion)." >&2
+                    exit 4
+                fi
+                echo "pf: deletion request $request is COMPLETED: the records were deleted in one transaction, after the pre-purge backup ${backup:-unknown}." >&2
+                exit 0
+                ;;
+            FAILED)
+                reason=$(json_nested "$WORK/status.json" last_finished_deletion_request failure_reason)
+                echo "pf: deletion request $request FAILED, and nothing was deleted: ${reason:-no reason recorded}" >&2
+                exit 3
+                ;;
+            *)
+                could_not_run "deletion request $request is ${state:-finished} and was not carried out: nothing was deleted (cancelled in Administration → History archival & purge before the job started it)."
+                ;;
+        esac
+    fi
+    if [ "$open" = "$request" ]; then
+        state=$(json_nested "$WORK/status.json" open_deletion_request state)
+        if [ "$state" = RUNNING ]; then
+            could_not_run "deletion request $request is RUNNING: the history archive job stopped before its deletion committed (archive.sh exit $arc, see above). Nothing was deleted, and the job's next start makes it FAILED; then request the deletion again."
+        fi
+        could_not_run "deletion request $request is ${state:-open} and not carried out yet (archive.sh exit $arc, see above; when another archive.sh holds the archive lock, the request waits). The history archive task carries it out at its next start, within 5 minutes once the archive lock is free and nothing stops it (SYNOLOGY_NAS §11.8); cancel it in Administration → History archival & purge if it is no longer wanted."
+    fi
+    could_not_run "history-archive status names deletion request $request neither open nor finished last (archive.sh exit $arc). Read its state in Administration → History archival & purge."
 }
 
 case "$COMMAND" in

@@ -96,6 +96,7 @@ _MRT: Final = Permission.MANAGE_ROUTE_TEMPLATES
 _MPNM: Final = Permission.MANAGE_PART_NUMBER_MASTER
 _VPD: Final = Permission.VIEW_PRODUCTION_DATA
 _RHAP: Final = Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE
+_DWPP: Final = Permission.DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY
 
 # The Management views' read sets (OD-P7).
 _WO_VIEW: Final = _keys(_VPD, _MWO, _EWOD, _EWOA)
@@ -220,6 +221,12 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/history-archive/runs"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs/{run_id}/cancel"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs/{run_id}/copy-confirmation"): _permission(_RHAP),
+    # Permanent deletion requests (Phase 16, design B step 3; D17): the preview,
+    # the list, the request and its cancellation.
+    ("GET", "/api/permanent-deletion/preview"): _permission(_DWPP),
+    ("GET", "/api/permanent-deletion/requests"): _permission(_DWPP),
+    ("POST", "/api/permanent-deletion/requests"): _permission(_DWPP),
+    ("POST", "/api/permanent-deletion/requests/{request_id}/cancel"): _permission(_DWPP),
     ("PUT", "/api/policies/sign-in"): _permission(_CSS),
     ("PUT", "/api/policies/backups"): _permission(_CSS),
     ("PUT", "/api/policies/mail-server"): _permission(_CSS),

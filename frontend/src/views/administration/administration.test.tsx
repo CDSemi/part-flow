@@ -779,6 +779,10 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   if (url === '/api/history-archive/runs') {
     return json([]);
   }
+  if (url === '/api/permanent-deletion/requests') {
+    // Read-only here: the requests card has its own suite.
+    return json([]);
+  }
   if (url === '/api/policies/backups') {
     if (backupFailure) {
       return json({ detail: backupFailure.detail }, backupFailure.status);
@@ -4335,7 +4339,7 @@ test('Settings shows the other general settings as disabled previews of what Par
 
 const BACKUP_PATH = '/api/policies/backups';
 const BACKUP_HELP =
-  "The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Of the pre-purge backups, which the history archival job takes before each purge, it keeps the newest number set here and removes the older ones. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
+  "The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Of the pre-purge backups, which the history archival job takes before each purge and each permanent deletion, it keeps the newest number set here and removes the older ones. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
 const BACKUP_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Check the backup settings before trying again; saving the same values again is safe.';
 
@@ -4999,12 +5003,12 @@ test('FA-RO1: Roles & permissions lists the seeded roles with permission and use
   seedJane();
   await openRoles();
 
-  expect(roleRow('Administrator')).toEqual(['Administrator', '18 of 36', '0']);
-  expect(roleRow('Manager')).toEqual(['Manager', '10 of 36', '1']);
+  expect(roleRow('Administrator')).toEqual(['Administrator', '18 of 37', '0']);
+  expect(roleRow('Manager')).toEqual(['Manager', '10 of 37', '1']);
   // The role applied at Scan Stations carries its badge (slice 4).
   expect(roleRow('Operator')).toEqual([
     'Operator Applied at Scan Stations',
-    '10 of 36',
+    '10 of 37',
     '0',
   ]);
   const managerRow = screen
@@ -5047,7 +5051,7 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
     'Work Orders, priority and reports',
     'Scan Station',
   ]);
-  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(32);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(33);
   for (const label of [
     'Undo recent eligible scans',
     'Perform quantity corrections',
@@ -5140,7 +5144,7 @@ test('FA-RO3: a new role posts its name and checked permissions; a duplicate kee
   ]);
   expect(await roleRowWhenShown('Process Engineer')).toEqual([
     'Process Engineer',
-    '1 of 36',
+    '1 of 37',
     '0',
   ]);
 
@@ -6466,7 +6470,7 @@ test('FA-4: the Roles editor hides Manage correction permissions from a user who
   await openRoles();
   fireEvent.click(screen.getByRole('button', { name: 'Edit Administrator' }));
   const dialog = screen.getByRole('dialog', { name: 'Edit role' });
-  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(31);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(32);
   expect(
     within(dialog).queryByRole('checkbox', {
       name: 'Manage correction permissions',

@@ -16,6 +16,7 @@ from app.api.history_archive import router as history_archive_router
 from app.api.hot_list import router as hot_list_router
 from app.api.machines import router as machines_router
 from app.api.part_numbers import router as part_numbers_router
+from app.api.permanent_deletion import router as permanent_deletion_router
 from app.api.policies import router as policies_router
 from app.api.production_board import router as production_board_router
 from app.api.production_release import router as production_release_router
@@ -115,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(roles_router)
     app.include_router(policies_router)
     app.include_router(history_archive_router)
+    app.include_router(permanent_deletion_router)
     app.include_router(machines_router)
     app.include_router(part_numbers_router)
     app.include_router(work_orders_router)

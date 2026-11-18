@@ -292,9 +292,15 @@ class AuditEntityType(StrEnum):
     ASSIGNED_ROUTE = "AssignedRoute"
     # Phase 16 (history archival, design B step 1): every change of state of
     # a Movement-history archival run — administrative maintenance, never
-    # production activity. The only entity type the maintenance database role
-    # may append (trigger ``trg_audit_events_maintenance_scope``).
+    # production activity. The maintenance database role may append these
+    # (trigger ``trg_audit_events_maintenance_scope``).
     HISTORY_ARCHIVE_RUN = "HistoryArchiveRun"
+    # Phase 16 (history archival, design B step 3, D17): every change of
+    # state of a permanent deletion request — administrative maintenance,
+    # never production activity. The maintenance database role appends these
+    # for the request it works on, and the one DELETED row per Work Order and
+    # Part Number that request deletes.
+    DELETION_REQUEST = "DeletionRequest"
 
 
 class WorkerIdentificationMode(StrEnum):
@@ -434,6 +440,14 @@ class Permission(StrEnum):
     # purge, the retention period included. Appended last, so the CHECK
     # literal of every earlier revision stays a prefix of this vocabulary.
     RUN_HISTORY_ARCHIVAL_AND_PURGE = "RUN_HISTORY_ARCHIVAL_AND_PURGE"
+    # Data maintenance (Phase 16, history archival design D17, migration
+    # 0042): request the permanent deletion of Work Orders and Part Numbers
+    # (Delete permanently… in Work Order Details and the Part Number dialog),
+    # see what a deletion would delete, and cancel a request; the host job
+    # carries a request out. Appended last, like the key before it.
+    DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY = (
+        "DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY"
+    )
 
 
 class UserSessionEndReason(StrEnum):
@@ -626,3 +640,25 @@ class HistoryArchiveRunResult(StrEnum):
     EXPORT_ONLY = "EXPORT_ONLY"
     PURGED = "PURGED"
     NOTHING_PURGED = "NOTHING_PURGED"
+
+
+class DeletionRequestState(StrEnum):
+    """Where a permanent deletion request stands (Phase 16, history archival
+    design D17 and §6.3; build step 3).
+
+    APPROVED — recorded with its exact rows (the request is the approval) and
+    waiting for the host job, which takes it at its next start; RUNNING — the
+    job started it: the pre-purge backup is taken now, then the deletion runs
+    in one transaction; COMPLETED — the stored rows were deleted and one
+    DELETED audit row written per deleted Work Order and Part Number;
+    FAILED — the job stopped it and recorded why (nothing was deleted: the
+    deletion is one transaction); CANCELLED — cancelled before the job
+    started it. The last three are final. At most one request is open
+    (APPROVED or RUNNING).
+    """
+
+    APPROVED = "APPROVED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"

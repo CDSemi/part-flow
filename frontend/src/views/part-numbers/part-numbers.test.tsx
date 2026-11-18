@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -15,6 +16,7 @@ import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import { prepareImageUpload } from '../../components/image-upload';
+import { DELETION_POLL_MS } from '../../components/permanent-deletion';
 import { PartNumbersView } from './PartNumbersView';
 
 // Management → Part Numbers (GUI_DESIGN §14): a REAL view since Phase
@@ -152,6 +154,9 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       ],
     });
   }
+  if (path.startsWith('/api/permanent-deletion')) {
+    return deletionRoute(method, path, params, init);
+  }
   const key = routeKey(method, path);
   if (key === null) {
     return json({ detail: `Unhandled fake route: ${method} ${url}` }, 500);
@@ -258,6 +263,78 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
   }
 }
 
+/** A permanent deletion request of one Part Number (archival step 3,
+ * D17) as the API answers it. */
+function deletionRequestWire(id: number, pn: string, reason: string) {
+  return {
+    id,
+    state: 'APPROVED',
+    scope: { work_order_numbers: [] as string[], part_numbers: [pn] },
+    reason,
+    requested_by: { user_id: 90, display_name: 'Mia Manager' },
+    requested_by_operator: null,
+    requested_at: '2026-11-18T10:00:00Z',
+    work_orders: [],
+    part_numbers: [{ part_number: pn, master: true }],
+    rows: {
+      audit_events: 1,
+      part_movements: 0,
+      quantity_flow_lineage: 0,
+      quantity_flows: 0,
+      assigned_route_steps: 0,
+      assigned_routes: 0,
+      work_order_allocations: 0,
+      work_order_demands: 0,
+      work_orders: 0,
+      part_numbers: 1,
+    },
+    started_at: null as string | null,
+    backup_label: null as string | null,
+    pre_purge_backup: null as { name: string; dump_started_at: string } | null,
+    finished_at: null as string | null,
+    cancelled_by: null,
+    failure_reason: null,
+  };
+}
+
+let deletionRequests: ReturnType<typeof deletionRequestWire>[];
+
+/** The permanent deletion routes: the preview of one Part Number, the
+ * request, and the requests the dialog reads again. */
+function deletionRoute(
+  method: string,
+  path: string,
+  params: URLSearchParams,
+  init?: RequestInit,
+): Response {
+  if (path === '/api/permanent-deletion/preview') {
+    const pn = canonical(params.get('part_number') ?? '');
+    return json({
+      scope: { work_order_numbers: [], part_numbers: [pn] },
+      work_orders: [],
+      part_numbers: [{ part_number: pn, master: true }],
+      rows: deletionRequestWire(0, pn, '').rows,
+      kept_audit_rows: [],
+      refusals: [],
+      open_request: null,
+    });
+  }
+  if (path === '/api/permanent-deletion/requests' && method === 'POST') {
+    const body = JSON.parse(String(init?.body)) as Record<string, string>;
+    const created = deletionRequestWire(
+      deletionRequests.length + 1,
+      canonical(body.part_number),
+      body.reason,
+    );
+    deletionRequests.unshift(created);
+    return json(created, 201);
+  }
+  if (path === '/api/permanent-deletion/requests' && method === 'GET') {
+    return json(deletionRequests);
+  }
+  return json({ detail: `Unhandled fake route: ${method} ${path}` }, 500);
+}
+
 /** A promise the test resolves to release a held request. */
 function deferred(): { promise: Promise<void>; release: () => void } {
   let release = () => {};
@@ -271,6 +348,7 @@ beforeEach(() => {
   window.history.replaceState({}, '', '/management/part-numbers');
   session = signedInSession();
   records = seedRecords();
+  deletionRequests = [];
   calls = [];
   writes = [];
   failures = {};
@@ -1366,4 +1444,119 @@ test('the toolbar keeps + New Part Number with its full accessible name beside P
     'Print barcodes…',
   ]);
   expect(buttons[0].querySelector('.lbl-short')?.textContent).toBe('+ New');
+});
+
+/* ============ Archival step 3 (D17) — Delete permanently… ============ */
+
+test('PD-3: Delete permanently… is apart from Delete details…; once the Part Number is deleted the dialog closes and the list reloads', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    await renderPartNumbers();
+    const dialog = await openEdit('214-406');
+    const details = dialog.querySelector('.pnm-dangerzone') as HTMLElement;
+    const permanent = dialog.querySelector('.pdel-zone') as HTMLElement;
+    expect(details.textContent).toContain('Delete Part Number Details');
+    expect(
+      within(details).queryByRole('button', { name: 'Delete permanently…' }),
+    ).toBeNull();
+    expect(permanent.textContent).toContain('Delete permanently');
+    expect(permanent.textContent).toContain(
+      'This removes Part Number 214-406 with all its data, including its production history, from the database, as if it had never been entered, after a pre-purge backup.',
+    );
+    expect(
+      within(permanent).queryByRole('button', { name: 'Delete details…' }),
+    ).toBeNull();
+
+    fireEvent.click(
+      within(permanent).getByRole('button', { name: 'Delete permanently…' }),
+    );
+    const deletion = screen.getByRole('dialog', {
+      name: 'Delete Part Number permanently',
+    });
+    await within(deletion).findByText('What is deleted');
+    fireEvent.change(within(deletion).getByLabelText(/^Reason/), {
+      target: { value: 'Test part' },
+    });
+    fireEvent.change(within(deletion).getByLabelText(/to confirm$/), {
+      target: { value: '214-406' },
+    });
+    fireEvent.click(
+      within(deletion).getByRole('button', { name: 'Request deletion' }),
+    );
+    expect(
+      await within(deletion).findByText('Waiting for the server'),
+    ).toBeInTheDocument();
+    expect(writeSummary()).toEqual(['POST /api/permanent-deletion/requests']);
+
+    // The server's history archive task deletes the Part Number.
+    Object.assign(deletionRequests[0], {
+      state: 'COMPLETED',
+      started_at: '2026-11-18T10:05:00Z',
+      backup_label: 'deletion-1-20261118T100500Z',
+      pre_purge_backup: {
+        name: '20261118T100501Z-pre-purge-deletion-1-20261118T100500Z',
+        dump_started_at: '2026-11-18T10:05:01Z',
+      },
+      finished_at: '2026-11-18T10:06:00Z',
+    });
+    records = records.filter((r) => r.part_number !== '214-406');
+    const reads = pageReads();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DELETION_POLL_MS);
+    });
+    expect(
+      await within(deletion).findByText(
+        'Part Number 214-406 and all its data no longer exist.',
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(deletion).getByRole('button', { name: 'Back to Part Numbers' }),
+    );
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() => expect(pageReads()).toBe(reads + 1));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Edit 214-406' })).toBeNull(),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('PD-4: Delete permanently… needs its key, and a holder finds it in the read-only details too; a new Part Number has none', async () => {
+  // Without the key.
+  session = signedInSession(
+    PERMISSIONS.filter(
+      (key) => key !== 'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+    ),
+  );
+  await renderPartNumbers();
+  let dialog = await openEdit('214-406');
+  expect(dialog.querySelector('.pnm-dangerzone')).not.toBeNull();
+  expect(dialog.querySelector('.pdel-zone')).toBeNull();
+  cleanup();
+
+  // The key without Manage Part Numbers: the read-only details offer it.
+  session = signedInSession([
+    'VIEW_PRODUCTION_DATA',
+    'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+  ]);
+  await renderPartNumbers();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Part Number 214-406 details' }),
+  );
+  dialog = screen.getByRole('dialog', { name: 'Part Number details' });
+  await waitFor(() =>
+    expect(dialog.querySelector('.pdel-zone')).not.toBeNull(),
+  );
+  expect(dialog.querySelector('.pnm-dangerzone')).toBeNull();
+  cleanup();
+
+  // + New Part Number names no Part Number to delete.
+  session = signedInSession();
+  await renderPartNumbers();
+  dialog = openNew();
+  expect(dialog.querySelector('.pdel-zone')).toBeNull();
+  expect(calls.some((call) => call.includes('/api/permanent-deletion'))).toBe(
+    false,
+  );
 });

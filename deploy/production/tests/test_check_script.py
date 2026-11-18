@@ -24,7 +24,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_backup_scripts import ScriptHarness  # noqa: E402
-from test_monitor_report import status_doc  # noqa: E402
+from test_monitor_report import settings_doc, status_doc  # noqa: E402
 from test_release_scripts import FAKE_TOOL, SH_REQUIRED, find_sh, out, rule, sh_path  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[3]
@@ -42,6 +42,8 @@ STATUS_RUN = r"--profile ops run --rm --no-deps -T --user 1000:1000 status(?: --
 LOGS = r"logs --no-log-prefix --since (\S+) --until (\S+) backend$"
 # Git Bash converts an absolute POSIX argument for a native (Windows) fake: "/var/..." may arrive as "C:/.../var/...".
 EXEC_DF = r"exec -T db df -Pk .*/var/lib/postgresql/data$"
+# The cheap check of archive.sh, which check.sh runs while archival is not set up (an open deletion request waits).
+SETTINGS_EXEC = r"exec -T backend python -m app\.cli history-archive settings$"
 DOCKER_ROOT = "/var/lib/docker"
 EPOCH = 1791460800  # 2026-10-08T12:00:00Z
 STARTED = "2026-10-08T00:00:00.000000000Z"
@@ -131,6 +133,7 @@ class CheckHarness(ScriptHarness):
             rule(LOGS, out(log_line("INFO", "aaa"))),
             rule(EXEC_DF, out(df_text(30 * 1048576, 70 * 1048576, "/var/lib/postgresql/data"))),
             rule(r"^info --format \{\{\.DockerRootDir\}\}$", out(DOCKER_ROOT + "\n")),
+            rule(SETTINGS_EXEC, out(settings_doc())),
         ]
         return rules
 
@@ -200,6 +203,8 @@ class Check(CheckHarness):
             r"^docker exec -T db df -Pk .*/var/lib/postgresql/data$", r"^df -Pk .*backups$", r"^docker info ",
             r"^df -Pk .*/var/lib/docker$", r"^docker ps .*service=status --filter label=com\.docker\.compose\.oneoff=True$",
             r"^docker --profile ops run --rm --no-deps -T --user 1000:1000 status$",
+            # Archival is not set up: the cheap check still looks for a deletion request that nothing carries out.
+            r"^docker exec -T backend python -m app\.cli history-archive settings$",
         ]
         self.assertEqual(len(order), len(patterns), order)
         for text, pattern in zip(order, patterns):

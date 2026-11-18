@@ -15,8 +15,8 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0041_phase16_history_purge`. The slice's own tables
-were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
+The schema described here is the current schema at migration head `0042_phase16_deletion_requests`. The slice's own
+tables were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
 Abbreviations used throughout: Part Number (PN); primary key (PK); foreign key (FK); enterprise resource planning (ERP);
@@ -123,10 +123,11 @@ separate from both.
 6. A flow occupies exactly one current Area. When a PN is spread over several Areas, each Area holds its own flow.
 7. Release never merges with existing active quantity and never creates additional quantity implicitly. Releasing a PN
    that has active quantity requires an explicit UI confirmation of intent (§8).
-8. Movement history is immutable and append-only: a Movement is never updated, and only the purge of Movement-history
-   archival deletes Movements, the archived Movements of whole closed flow components (§11, §17). Current state must
-   be reconstructable from the retained Movements, with the carry-forward records of purged flows standing in for
-   their history (§15, §17 History archival tables).
+8. Movement history is immutable and append-only: a Movement is never updated, and only two maintenance tasks of the
+   host job delete Movements: the purge of Movement-history archival, the archived Movements of whole closed flow
+   components (§11, §17), and a permanent deletion request, the Movements of the flows it stored (§17 Permanent
+   deletion requests). Current state must be reconstructable from the retained Movements, with the carry-forward
+   records of purged flows standing in for their history (§15, §17 History archival tables).
 9. The QuantityFlow creation (carrying its initial `current_area_id` projection), the AssignedRoute snapshot and the
    Movement insert commit atomically or not at all (§13).
 10. A duplicate release submission with the same `device_event_id` and the same normalized request returns the original
@@ -441,14 +442,18 @@ The columns follow PROJECT_PROFILE §8.11. A release writes the `RECEIVED` Movem
   existed carry none) and the initiating WorkOrderDemand as `context.work_order_demand_id` for audit display. None of
   this creates ownership: WorkOrderDemand never owns Movement (§3).
 - The row is immutable and insert-only. UPDATE and DELETE are revoked from the application role, and guard triggers
-  refuse every UPDATE and TRUNCATE and the DELETE of any row that the purge of a `PURGING` archival run does not admit
-  (§17), following the rule that PostgreSQL constraints come first. The revocation is applied by `apply-grants` on the
-  production stack; development and test databases keep one owner role (§17). This guard binds the application at all
-  times. The only path that deletes Movements is the purge of Movement-history archival (PROJECT_PROFILE §28), a
-  separate, privileged maintenance path outside this slice: a User who holds Run history archival and purge
-  (`RUN_HISTORY_ARCHIVAL_AND_PURGE`) requests a run in Administration, and the host job, as the maintenance role,
-  deletes the archived Movements of whole closed flow components after the archive's verification, its off-host copy
-  and a pre-purge backup (§17 History archival tables).
+  refuse every UPDATE and TRUNCATE and the DELETE of any row that neither the purge of a `PURGING` archival run nor a
+  `RUNNING` permanent deletion request admits (§17), following the rule that PostgreSQL constraints come first. The
+  revocation is applied by `apply-grants` on the production stack; development and test databases keep one owner role
+  (§17). This guard binds the application at all times. Only two separate, privileged maintenance paths outside this
+  slice delete Movements (PROJECT_PROFILE §28), both carried out by the host job as the maintenance role. In the purge
+  of Movement-history archival, a User who holds Run history archival and purge (`RUN_HISTORY_ARCHIVAL_AND_PURGE`)
+  requests a run in Administration, and the job deletes the archived Movements of whole closed flow components after the
+  archive's verification, its off-host copy and a pre-purge backup (§17 History archival tables). In a permanent
+  deletion request, a User who holds Delete Work Orders and Part Numbers permanently
+  (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), or an operator on the host, requests the deletion of named Work
+  Orders or of one Part Number, and the job deletes exactly the rows the request stored after a pre-purge backup (§17
+  Permanent deletion requests).
 
 ---
 
@@ -626,7 +631,7 @@ The constraints are listed in §17.
 |---|---|
 | `id` | `bigint` identity primary key; its order is the write order. |
 | `event_type` | `CREATED`, `UPDATED`, `DELETED` (hard deletes of master and configuration records) or `ROUTE_ADJUSTED`. |
-| `entity_type` | The audited entity: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`, `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`, `RouteTemplate`, `User`, `Role`, `ScanStationDevice` or `AssignedRoute`. |
+| `entity_type` | The audited entity: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`, `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`, `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun` or `DeletionRequest`. |
 | `entity_id` | The audited row's key, stored as text. It is polymorphic by design, so it has no foreign key. For `WorkOrder` and `WorkOrderDemand` it is the internal primary key; for `PartNumber` it is the canonical PN string (the master's natural key); the other entity types are described below. Integrity is guaranteed by writing the audit row in the same transaction as the audited change. |
 | `actor_reference` | Nullable legacy text, kept for history and never backfilled. No converted writer writes it any more, so it is NULL on every new row. On older rows it holds an explicitly configured development or system actor identifier, or NULL. |
 | `actor_user_id` | Nullable integer foreign key to `users (id)` (`fk_audit_events_actor_user_id_users`): the signed-in User, **derived by the server from the session principal only and never from a request body**. See "The acting User" below. |
@@ -811,6 +816,11 @@ The constraints are listed in §17.
   `UPDATED` row per role it changes, with no actor and the metadata `{"source": "migration", "revision":
   "0040_phase16_history_archive"}`. Its downgrade revokes the key the same way, with `"downgrade": true` added to the
   metadata.
+- `0042_phase16_deletion_requests` grants its new key Delete Work Orders and Part Numbers permanently
+  (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`) to every role that holds every other key, and to no role by its
+  name, and appends one `UPDATED` row per role it changes, with no actor and the metadata `{"source": "migration",
+  "revision": "0042_phase16_deletion_requests"}`. Its downgrade revokes the key from every role that holds it, with
+  `"downgrade": true` added to the metadata.
 - The User theme preference (`users.theme_preference`) is a display preference written only by the User's own toggle
   (`PUT /api/session/theme-preference`). It is never audited, never in the `User` snapshot, and does not change
   `users.updated_at`. Its write locks only the User row (`FOR NO KEY UPDATE`) and does not take the user-administration
@@ -936,8 +946,32 @@ Hot list removals it triggers are audited as described above.
   metadata `{"source": "web", "command": "request" | "cancel" | "copy_confirmation"}`. Rows written by the host job carry
   no actor and the metadata `{"source": "maintenance", "command": "export" | "verify" | "copy" | "next" | "purge" |
   "recover"}` (`next` fails a run whose requester no longer may run it).
-- The maintenance database role inserts these rows without `RETURNING`, because it may append audit rows but never
-  read them, and the trigger `trg_audit_events_maintenance_scope` refuses any other entity type from it (§17).
+- The maintenance database role inserts these rows without `RETURNING`, and the trigger
+  `trg_audit_events_maintenance_scope` limits what it may append (§17).
+
+### Permanent deletion requests
+
+- Every change of state of a permanent deletion request appends one row with `entity_type` `DeletionRequest` and
+  `entity_id` the request id as text, in the same transaction as the change. The request is `CREATED` (`before_data`
+  NULL); every later change is `UPDATED`. The snapshot is every column of `deletion_requests` (times as UTC ISO-8601
+  text); the stored rows are not in it.
+- A request recorded through the API, and its cancellation, carry `actor_user_id` and the metadata `{"source": "web",
+  "command": "request" | "cancel"}`. A request recorded by the operator command `pf delete-permanently --confirm`
+  carries no actor and the metadata `{"source": "cli", "command": "request", "operator": "<name>"}`. The host job's
+  changes carry no actor and the metadata `{"source": "maintenance", "command": "start-deletion" | "delete" |
+  "recover"}`.
+- The deletion writes, in its own transaction, one `DELETED` row per deleted Work Order (`entity_id` its id,
+  `before_data` its snapshot) and per deleted Part Number (`entity_id` the canonical PN, `before_data` the master's
+  snapshot, or NULL when it had no master), with `after_data` NULL, `actor_user_id` the requesting User (NULL for an
+  operator's request) and the metadata `{"permanent_deletion": {"source", "run_id", "request_id", "operator",
+  "reason", "backup", "work_orders", "part_numbers", "deleted"}}` (`backup` is the request's pre-purge backup,
+  `deleted` the rows per table).
+- The same transaction deletes the audit rows that concern only the deleted records (a Work Order, a demand line, a
+  Part Number master or an Assigned Route that it deletes, when every record their data names is deleted too and every
+  other row of the same command goes with them); every other audit row stays unchanged.
+- The audit rows that record an earlier permanent deletion (metadata key `permanent_deletion`) and every
+  `DeletionRequest` row always stay: a deletion never plans, deletes or lists them, also when a Part Number it deleted
+  was entered again and is deleted once more.
 
 ### The acting User
 
@@ -970,10 +1004,12 @@ Hot list removals it triggers are audited as described above.
 
 - Every audit row commits in the **same transaction** as the change it records. An audited write without its audit row,
   or an audit row without its write, must be impossible.
-- Audit rows are append-only. UPDATE and DELETE are revoked from the application role, and a raise-on-write trigger
-  refuses them, as for `part_movements`; unlike Movements, no audit row is ever purged. The trigger exists since the
-  table was created; the application-role revocation is applied by `apply-grants` on the production stack, where the
-  backend connects as `partflow_app` (§17). The development and test databases keep one owner role.
+- Audit rows are append-only. UPDATE and DELETE are revoked from the application role; a statement trigger refuses
+  every UPDATE and TRUNCATE and a row trigger every DELETE, as for `part_movements`. The archival purge never removes
+  an audit row; only a permanent deletion request deletes the audit rows that concern only the records it deletes
+  (above). The guard exists since the table was created (`0042_phase16_deletion_requests` split it into the two
+  triggers); the application-role revocation is applied by `apply-grants` on the production stack, where the backend
+  connects as `partflow_app` (§17). The development and test databases keep one owner role.
 - An edit appends a new `UPDATED` row; prior rows are never rewritten.
 
 ---
@@ -1032,7 +1068,9 @@ nullable; `default_expected_duration` nullable; `is_external boolean NOT NULL DE
 - The PN barcode is derived (`'PF:PN:' || part_number`, PROJECT_PROFILE §10). There is no stored `barcode_value` column
   and there are no `lower(...)` expression indexes; canonical uppercase makes them unnecessary.
 - No production table references this table by foreign key, so a master row can be hard-deleted (and recreated later
-  for the same canonical PN) per PROJECT_PROFILE §28.
+  for the same canonical PN) per PROJECT_PROFILE §28. The row guard `trg_part_numbers_guard_delete` keeps that
+  deletion of Management, and admits the host job's deletion of a master only as a stored row of a permanent deletion
+  request (§17 Permanent deletion requests).
 
 ### Business demand tables
 
@@ -1107,7 +1145,9 @@ sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duratio
 - Past steps are immutable in the database (`0032_phase14_route_adjusted`). The statement-level trigger
   `trg_assigned_route_steps_forbid_update` (function `partflow_assigned_route_steps_forbid_update`) refuses every
   UPDATE, and a step that a Movement references is never deleted (the `part_movements.assigned_route_step_id` foreign
-  key is `NO ACTION`). DELETE stays allowed for the unreferenced future steps an adjustment replaces.
+  key is `NO ACTION`). DELETE stays allowed for the unreferenced future steps an adjustment replaces; the row guard
+  `trg_assigned_route_steps_guard_delete` keeps that delete and admits the host job's only for the stored rows of a
+  permanent deletion request (§17 Permanent deletion requests).
 
 ### Production tables
 
@@ -1170,17 +1210,20 @@ sequence)`; `area_id NOT NULL` FK; `operation_id` FK nullable; `expected_duratio
 - `ix_part_movements_assigned_route_step_id` on `(assigned_route_step_id)`, which serves the foreign key's check when an
   adjustment deletes an unreferenced future step and the edit's "is this step referenced" boundary.
 - Immutability guard: UPDATE and DELETE revoked from the application role, plus two triggers that bind every role,
-  the owner included (`0041_phase16_history_purge`):
+  the owner included (`0041_phase16_history_purge`, `0042_phase16_deletion_requests`):
   - the statement-level trigger `trg_part_movements_forbid_mutation` (`BEFORE UPDATE OR TRUNCATE`, function
     `partflow_part_movements_forbid_mutation`) refuses every UPDATE and TRUNCATE;
   - the row-level trigger `trg_part_movements_guard_delete` (`BEFORE DELETE`, function
-    `partflow_part_movements_guard_delete`) raises for every row, so a DELETE never skips a row silently, unless all of
-    these hold: the transaction-local setting `partflow.archive_run_id` names a run in `PURGING`; the row's flow has a
-    record of that run that is neither purged nor skipped; the row's id is not above the record's `last_movement_id`;
-    and the row's `occurred_at` and `server_received_at` are both before the run's cutoff. It reads the run and the
-    record by primary key for each row, so a purge batch of 50,000 Movements stays fast. Of the two application roles,
-    only the maintenance role holds DELETE on the table (§17 Database roles and grants), and only the purge of archived
-    history sets the marker (§17 History archival tables).
+    `partflow_part_movements_guard_delete`) raises for every row, so a DELETE never skips a row silently. While the
+    transaction-local setting `partflow.deletion_request_id` is set, a row is admitted only as a stored row of that
+    permanent deletion request, which must be `RUNNING`, by a role that may write archive records (§17 Permanent
+    deletion requests). Otherwise all of these must hold: the transaction-local setting `partflow.archive_run_id`
+    names a run in `PURGING`; the row's flow has a record of that run that is neither purged nor skipped; the row's id
+    is not above the record's `last_movement_id`; and the row's `occurred_at` and `server_received_at` are both before
+    the run's cutoff. It reads the run and the record by primary key for each row, so a purge batch of 50,000
+    Movements stays fast. Of the two application roles, only the maintenance role holds DELETE on the table (§17
+    Database roles and grants), and only the purge of archived history and the host job carrying out a deletion
+    request set a marker.
 
 **`part_movements.scan_session_id`** (`0020_phase13_worker_sessions`): `bigint` nullable (history keeps NULL and is
 never backfilled); `ck_part_movements_session_requires_worker` (`scan_session_id IS NULL OR worker_id IS NOT NULL`) and
@@ -1197,8 +1240,8 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
 - `event_type NOT NULL` with `ck_audit_events_event_type`: `CREATED`, `UPDATED`, `DELETED`, `ROUTE_ADJUSTED`.
 - `entity_type NOT NULL` with `ck_audit_events_entity_type`: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`,
   `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`,
-  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun`. Both lists widen
-  additively.
+  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun`, `DeletionRequest`.
+  Both lists widen additively.
 - `entity_id NOT NULL` (no foreign key: polymorphic, §16).
 - `actor_reference` nullable; `actor_user_id` nullable FK `fk_audit_events_actor_user_id_users` to `users (id)`.
 - `occurred_at timestamptz NOT NULL`; `before_data jsonb` nullable; `after_data jsonb` nullable; `metadata jsonb`.
@@ -1210,11 +1253,16 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   `(metadata['route_adjustment'] ->> 'device_event_id') WHERE entity_type = 'AssignedRoute'` (the JSONB subscript
   form, created as raw SQL so the stored expression is the one the Application emits). It makes the adjustment's
   idempotency race-free.
-- Append-only guard: UPDATE and DELETE revoked, plus the raise trigger `trg_audit_events_forbid_mutation` (§16).
-- `trg_audit_events_maintenance_scope` (`0040_phase16_history_archive`): a row-level `BEFORE INSERT` trigger with `WHEN
-  (NEW.entity_type <> 'HistoryArchiveRun')` that refuses the row when the inserting role may write archive records
-  (INSERT on `history_archived_flows`) and does not own `audit_events`: the maintenance role appends only
-  `HistoryArchiveRun` rows.
+- Append-only guard: UPDATE and DELETE revoked from the application role, plus the statement-level trigger
+  `trg_audit_events_forbid_mutation` (`BEFORE UPDATE OR TRUNCATE`) and the row guard `trg_audit_events_guard_delete`,
+  which admits a DELETE only as a stored row of a `RUNNING` permanent deletion request (§16, §17 Permanent deletion
+  requests).
+- `trg_audit_events_maintenance_scope` (`0040_phase16_history_archive`, function replaced by
+  `0042_phase16_deletion_requests`): a row-level `BEFORE INSERT` trigger with `WHEN (NEW.entity_type <>
+  'HistoryArchiveRun')` that judges the row when the inserting role may write archive records (INSERT on
+  `history_archived_flows`) and does not own `audit_events`. The maintenance role appends `HistoryArchiveRun` rows, the
+  `DeletionRequest` rows of the request that `partflow.deletion_request_id` names, and, while that request is
+  `RUNNING`, a `DELETED` row of a Work Order it stored or of a Part Number of its scope; any other row raises.
 
 ### Policy and Worker Session tables
 
@@ -1319,11 +1367,12 @@ their names.
 
 **`role_permissions`** (`0028_phase13_users_roles`): one row per grant. PK `pk_role_permissions` `(role_id,
 permission)`; `role_id` FK `fk_role_permissions_role_id_roles` to `roles (id)`; `permission text NOT NULL` with
-`ck_role_permissions_permission_known`, which admits exactly the 36-key vocabulary (one key per PROJECT_PROFILE §20
+`ck_role_permissions_permission_known`, which admits exactly the 37-key vocabulary (one key per PROJECT_PROFILE §20
 capability: `Permission` in `app/domain/enums.py`, repeated as a literal in the migration that last widened it and pinned
 equal by a schema test). `0040_phase16_history_archive` appended `RUN_HISTORY_ARCHIVAL_AND_PURGE` and granted it to the
-role named Administrator and to every role holding every other key (§16). A later capability widens the CHECK; a key is
-never renamed.
+role named Administrator and to every role holding every other key; `0042_phase16_deletion_requests` appended
+`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY` and granted it to every role holding every other key, and to no role
+by its name (§16). A later capability widens the CHECK; a key is never renamed.
 
 **`users`** (`0028_phase13_users_roles`): application accounts, never Workers.
 
@@ -1550,6 +1599,96 @@ differs from its default; otherwise it restores the guards, CHECKs, indexes and 
 tables, the guards and the settings, restores the previous CHECKs and revokes `RUN_HISTORY_ARCHIVAL_AND_PURGE` (§16).
 The retention period stays as it is.
 
+### Permanent deletion requests
+
+Migration `0042_phase16_deletion_requests` adds the permanent deletion requests (Phase 16, archival design step 3,
+decision D17): a User who holds Delete Work Orders and Part Numbers permanently
+(`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), or an operator with `pf delete-permanently --confirm`, records a
+request; the host job carries it out as the maintenance role. What a deletion deletes, and what makes it refuse, are the
+plan of `app.application.permanent_deletion` (OPERATIONS_RUNBOOK §10).
+
+**`deletion_requests`**: one row per request.
+
+- PK `pk_deletion_requests` `id` (integer identity). `state text NOT NULL` with `ck_deletion_requests_state`: the open
+  states `APPROVED` and `RUNNING`, and the final states `COMPLETED`, `FAILED` and `CANCELLED`.
+- The request, which never changes: `work_order_numbers text[]` and `part_numbers text[]` (both `NOT NULL DEFAULT
+  '{}'`; the scope as requested: Work Order Numbers exactly as stored and canonical Part Numbers; at least one entry
+  and no NULL element, `ck_deletion_requests_scope_shape`); `reason` (`ck_deletion_requests_reason_length`, 1–500
+  characters); exactly one of `requested_by_user_id` (FK to `users (id)`) and `requested_by_operator` (the operator's
+  name, 1–500 characters) (`ck_deletion_requests_requester_shape`); `requested_at timestamptz NOT NULL DEFAULT now()`;
+  and what its plan takes, `row_counts jsonb` (the rows per table) and `records jsonb` (the Work Orders and Part
+  Numbers it names), both JSON objects (`ck_deletion_requests_plan_shape`).
+- The host job's progress, all nullable: `started_at`, a whole second, and `backup_label`, set together, the label of
+  the request's pre-purge backup `deletion-<id>-<started_at, UTC, YYYYMMDDTHHMMSSZ>`
+  (`ck_deletion_requests_progress_shape`: an `APPROVED` or `CANCELLED` request has neither, a `RUNNING` or `COMPLETED`
+  one both); `pre_purge_backup_name` and `pre_purge_backup_started_at`, set together, only on a `COMPLETED` request,
+  which needs them, or a `FAILED` one (`ck_deletion_requests_backup_shape`: the name is `<UTC stamp>-pre-purge-` and
+  the request's label, and the dump started at or after the request's `started_at`); `finished_at`, set exactly in the
+  final states, and `cancelled_by_user_id` FK to `users (id)`, set exactly when `CANCELLED`
+  (`ck_deletion_requests_finish_shape`); `failure_reason`, set exactly when `FAILED`, at most 2,000 characters
+  (`ck_deletion_requests_failure_shape`).
+- The partial UNIQUE expression index `uq_deletion_requests_open` on `((true)) WHERE state IN ('APPROVED',
+  'RUNNING')`: at most one request is open, even when two requests race.
+- The guard trigger `trg_deletion_requests_guard_mutation` (row-level, `BEFORE INSERT OR DELETE OR UPDATE`) and
+  `trg_deletion_requests_forbid_truncate` (function `partflow_deletion_requests_guard_mutation`):
+  - an insert must be `APPROVED` with no progress, its `requested_at` the start of its transaction; an operator's
+    request (no User) only by the owner of the table;
+  - the request columns never change, a finished request never changes, and no request is deleted or truncated;
+  - the application role may only cancel an `APPROVED` request;
+  - every other change needs a role that may write archive records (the maintenance role, or the owner) while the
+    transaction-local setting `partflow.deletion_request_id` names the request: `APPROVED` to `RUNNING` (the start)
+    or `FAILED` (its requester may no longer have it carried out), and `RUNNING` to `COMPLETED` or `FAILED`, keeping
+    `started_at` and `backup_label`; the job never cancels, and the maintenance role changes a request in no other
+    way.
+
+**`deletion_request_rows`**: every row a request deletes.
+
+- PK `pk_deletion_request_rows` `(request_id, table_name, row_key)`; `request_id` FK to `deletion_requests (id)`.
+- `table_name` is one of the ten tables a deletion deletes from (`ck_deletion_request_rows_table_name`): `audit_events`,
+  `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `assigned_route_steps`, `assigned_routes`,
+  `work_order_allocations`, `work_order_demands`, `work_orders`, `part_numbers`. `row_key` is the row's primary key as
+  text: the canonical PN of a `part_numbers` row, the decimal id of any other row
+  (`ck_deletion_request_rows_row_key_shape`).
+- The guard trigger `trg_deletion_request_rows_guard_mutation` (row-level, `BEFORE INSERT OR DELETE OR UPDATE`) and
+  `trg_deletion_request_rows_forbid_truncate` (function `partflow_deletion_request_rows_guard_mutation`): a row is
+  inserted only by the transaction that recorded its request, while the request is `APPROVED`; no row is changed,
+  deleted or truncated.
+
+**The row guards.** Every table a deletion deletes from has a row-level `BEFORE DELETE` trigger: `part_movements` its
+`trg_part_movements_guard_delete` (§17 Production tables), and the nine others `trg_<table>_guard_delete` (function
+`partflow_guard_delete`). It raises (`P0001`) for every row, so a DELETE never skips a row silently, unless:
+
+- the transaction-local setting `partflow.deletion_request_id` names a request in `RUNNING`, its stored rows list the
+  row (by table and primary key), and the deleting role may write archive records; or
+- the setting is not set and the delete is one the table allowed before: on `assigned_route_steps`,
+  `work_order_demands` and `part_numbers` any role but the maintenance role may delete (the future steps of a route
+  adjustment, the removal of a demand line, the deletion of a Part Number master), and on `part_movements` the purge of
+  an archival run.
+
+Every other delete raises, for every role, the owner included: nothing deletes a Work Order, a flow, an Assigned
+Route, an allocation, a lineage edge or an audit row but a permanent deletion request. The append-only tables keep
+refusing UPDATE and TRUNCATE for everyone through their statement triggers `trg_<table>_forbid_mutation` (`BEFORE
+UPDATE OR TRUNCATE` on `audit_events`, `quantity_flow_lineage`, `work_order_allocations` and `part_movements`;
+`machine_lifecycle_events` keeps refusing DELETE too). The statement-level triggers
+`trg_work_orders_maintenance_forbid_update` and `trg_work_order_demands_maintenance_forbid_update` (function
+`partflow_maintenance_forbid_update`) refuse every UPDATE by the maintenance role, which holds UPDATE on these two
+tables only to lock their rows during a deletion.
+
+**The deletion** (`python -m app.cli history-archive delete`, run by the host job as the maintenance role after
+`start-deletion` and the pre-purge backup): one `READ COMMITTED` transaction sets `partflow.deletion_request_id`,
+locks the request row (it must be `RUNNING`), checks that its stored rows match its `row_counts`, takes the advisory
+locks of every PN its stored rows and scope name in sorted order and then the row locks of its stored demand lines and
+Work Orders in ascending order (the order every command takes them in), computes the plan again and requires it to
+equal the stored rows, deletes in dependency order (each table exactly its stored count), writes the `DELETED` audit
+rows (§16) and makes the request `COMPLETED` with its pre-purge backup. Any difference or failure rolls everything back
+and the request becomes `FAILED` with nothing deleted; a database error that does not last leaves it `RUNNING`, and
+the next start of the host job makes it `FAILED` (as after a restore of its pre-purge backup, which holds it
+`RUNNING`).
+
+The downgrade of `0042_phase16_deletion_requests` refuses while a request or a `DeletionRequest` audit row exists;
+otherwise it revokes the key (one `Role` `UPDATED` audit row per role it changes) and restores the guards, functions
+and CHECKs of `0041_phase16_history_purge`.
+
 ### Migration boundary of the slice
 
 The migrations that created this slice's schema (`0002_phase3_domain`, `0004_phase4_audit` and
@@ -1584,24 +1723,28 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (37 at head `0041_phase16_history_purge`) |
+| Class | `partflow_app` privileges | Tables (39 at head `0042_phase16_deletion_requests`) |
 |---|---|---|
-| `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end), `history_archive_runs` (the row trigger lets the application role only request, cancel and confirm a copy) |
+| `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations`, `deletion_request_rows` (written only with their request) |
+| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end), `history_archive_runs` (the row trigger lets the application role only request, cancel and confirm a copy), `deletion_requests` (the row trigger lets the application role only request and cancel) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
 | `READ_ONLY` | SELECT | `alembic_version`, `history_archived_flows` |
 | `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
-- `partflow_maintenance` holds exactly what the archive export, the purge and the host job need
-  (`MAINTENANCE_PRIVILEGES`): SELECT on `alembic_version`, `application_policy`, `areas`, `assigned_route_steps`,
-  `assigned_routes`, `machines`, `operations`, `part_numbers`, `quantity_flow_lineage`, `quantity_flows`,
-  `role_permissions`, `roles`, `scan_stations`, `users`, `work_order_demands`, `work_orders`, `worker_sessions` and
-  `workers`; SELECT and DELETE on `part_movements`, where `trg_part_movements_guard_delete` admits only the archived
-  Movements of the run it is purging (§17 Production tables); SELECT and UPDATE on `history_archive_runs` (no INSERT:
-  only a person requests a run, in Administration) and SELECT, INSERT and UPDATE on `history_archived_flows`, whose
-  guard triggers decide which changes it may make; and INSERT, without SELECT, on `audit_events`, which
-  `trg_audit_events_maintenance_scope` limits to `HistoryArchiveRun` rows. `part_movements` is the only table on which
-  it holds DELETE, and it never reads credentials, sign-in sessions, mail or Scan Station device tables.
+- `partflow_maintenance` holds exactly what the archive export, the purge, the permanent deletion and the host job
+  need (`MAINTENANCE_PRIVILEGES`): SELECT on `alembic_version`, `application_policy`, `areas`, `machines`,
+  `operations`, `role_permissions`, `roles`, `scan_stations`, `users`, `worker_sessions` and `workers`; SELECT and
+  DELETE on the tables a deletion deletes from — `assigned_route_steps`, `assigned_routes`, `part_movements`,
+  `part_numbers`, `quantity_flow_lineage`, `quantity_flows` and `work_order_allocations` — where the row guards admit
+  only the archived Movements of the run it is purging and the stored rows of the `RUNNING` deletion request it
+  carries out (§17 Permanent deletion requests); SELECT, UPDATE and DELETE on `work_order_demands` and `work_orders`
+  (the UPDATE only for the row locks of a deletion: their statement triggers refuse every change by it); SELECT,
+  INSERT and DELETE on `audit_events`, whose triggers limit what it appends (`HistoryArchiveRun` rows, and the
+  `DeletionRequest` and `DELETED` rows of the request it carries out) and what it deletes (the stored audit rows of
+  that request); SELECT and UPDATE on `history_archive_runs` and `deletion_requests` (no INSERT: only a person
+  requests a run or a deletion, or the owner records an operator's deletion request) and SELECT, INSERT and UPDATE on
+  `history_archived_flows`, whose guard triggers decide which changes it may make; and SELECT on
+  `deletion_request_rows`. It never reads credentials, sign-in sessions, mail or Scan Station device tables.
 - Neither role holds any sequence privilege (identity columns), or `CREATE` on schema `public` or on the database.
   PUBLIC holds nothing on any PartFlow table or sequence, and default privileges for PUBLIC and both roles are removed.
   PUBLIC keeps the `TEMPORARY` privilege on the database, which the archive export and its verification use for the
@@ -1652,6 +1795,7 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 | File-based Work Order import | none: new Work Orders, and changes to Open and Released Work Orders through the ordinary demand edit, reusing the §5 validation idempotently | PROJECT_PROFILE §13; §5, §14 and §16 here; IMPLEMENTATION_ROADMAP Phase 15 |
 | Worker identification and ScanSession persistence | the `workers` table (badge UNIQUE over the canonical form, avatar on the row) and the audit vocabulary widening (`0014_phase13_workers`); `part_movements.worker_id`, `work_order_allocations.allocated_by_worker_id`, `areas.worker_identification_mode` and `areas.fixed_worker_id` (`0019_phase13_worker_identity`); `part_movements.scan_session_id`, `worker_sessions`, `application_policy` and `areas.worker_session_timeout_minutes` (`0020_phase13_worker_sessions`); the three badge-confirmation columns of `application_policy` (`0021_phase13_badge_confirmation`) | PROJECT_PROFILE §8.13 and §19; §11, §16 and §17 here |
 | Movement-history archival and purge | the run table `history_archive_runs` and the carry-forward table `history_archived_flows` with their guards, the maintenance role's privileges and the settings of History archival & purge (`0040_phase16_history_archive`); the purge states and evidence of a run, the row guard `trg_part_movements_guard_delete` with the maintenance role's DELETE on `part_movements`, the purge batch settings, the pre-purge backups kept and the indexes of the readers of purged records (`0041_phase16_history_purge`) | PROJECT_PROFILE §28; §8a, §11 and §17 here; IMPLEMENTATION_ROADMAP Phase 16 |
+| Permanent deletion requests | the key Delete Work Orders and Part Numbers permanently (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), the tables `deletion_requests` and `deletion_request_rows` with their guards, the row guard of every table a deletion deletes from, the `DeletionRequest` audit rows and the maintenance role's privileges to carry a request out (`0042_phase16_deletion_requests`) | PROJECT_PROFILE §20 and §28; §16 and §17 here; IMPLEMENTATION_ROADMAP Phase 16 |
 
 ### Still deferred
 
@@ -1660,7 +1804,7 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 | ERP fields and synchronization | deferred and not approved (IMPLEMENTATION_ROADMAP Deferred) | an isolated integration boundary; `device_event_id` stays compatible |
 | Offline scan synchronization | not planned (owner decision of 2026-11-13, PROJECT_PROFILE §32); production writes stay blocked while disconnected | `device_event_id` was chosen so that a future approved offline design needs no renaming (§20) |
 | Return of stocked quantity to active production | not part of PartFlow (owner decision of 2026-11-13, PROJECT_PROFILE §18) | none |
-| Further steps of Movement-history archival | IMPLEMENTATION_ROADMAP Phase 16, steps 3 to 7: permanent deletion requests, automatic runs, viewing an archive, optional groups and the final expiry of archived records | the same privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
+| Further steps of Movement-history archival | IMPLEMENTATION_ROADMAP Phase 16, steps 4 to 7: automatic runs, viewing an archive, optional groups and the final expiry of archived records | the same privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
 | Further file-import capabilities | deferred until an owner decision asks for them (IMPLEMENTATION_ROADMAP Deferred) | no schema change is planned |
 
 ---
@@ -1695,7 +1839,7 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 10. Editing a RouteTemplate after release does not change any AssignedRoute snapshot, and template edits never alter
     the route context recorded by any existing Movement.
 11. The projection rebuild procedure reproduces `current_area_id` for every active flow from Movement history alone.
-12. `part_movements` and `audit_events` rows cannot be updated or deleted by the application role. The trigger is
+12. `part_movements` and `audit_events` rows cannot be updated or deleted by the application role. The triggers are
     verified by the schema tests; the permission is verified by the database-role tests
     (`tests/test_database_roles.py`) and by running the test suite under the application role.
 13. Every WorkOrder and WorkOrderDemand creation or edit appends an `audit_events` row (`CREATED` or `UPDATED`, with
@@ -1739,7 +1883,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-18 | uncommitted | Migration head `0041_phase16_history_purge`: the purge of archived Movement history, with the run states `PURGING` and `COMPLETED_WITH_SKIPS`, the results `PURGED` and `NOTHING_PURGED`, the pre-purge backup evidence and purge counts of a run, the Movement row guard `trg_part_movements_guard_delete`, the maintenance role's DELETE on `part_movements`, the purge batch settings, the pre-purge backups kept, and the released quantity read from the purged records too. |
+| 2026-11-18 | uncommitted | Migration head `0042_phase16_deletion_requests`: permanent deletion requests, with the key Delete Work Orders and Part Numbers permanently (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), the tables `deletion_requests` and `deletion_request_rows`, the row guard of every table a deletion deletes from, the `DeletionRequest` audit rows and the maintenance role's privileges to carry a request out. |
+| 2026-11-18 | `d094f5e` | Migration head `0041_phase16_history_purge`: the purge of archived Movement history, with the run states `PURGING` and `COMPLETED_WITH_SKIPS`, the results `PURGED` and `NOTHING_PURGED`, the pre-purge backup evidence and purge counts of a run, the Movement row guard `trg_part_movements_guard_delete`, the maintenance role's DELETE on `part_movements`, the purge batch settings, the pre-purge backups kept, and the released quantity read from the purged records too. |
 | 2026-11-17 | `2f12d33` | Migration head `0040_phase16_history_archive`: the history archival runs and their carry-forward records, their guards, the settings of History archival & purge with the 24-month retention default, the `HistoryArchiveRun` audit rows, the key `RUN_HISTORY_ARCHIVAL_AND_PURGE` and the maintenance role's privileges. |
 | 2026-11-17 | `1490927` | `GET /api/part-numbers/resolve` answers the server's canonical form of an entered PN for Add Part. |
 | 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: the password rules and Remember me columns of `application_policy`, their audit sections and `user_sessions.remembered`. |

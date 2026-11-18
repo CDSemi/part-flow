@@ -1,6 +1,8 @@
 """The minimal pf (owner decision of 2026-11-13): deploy/production/pf against the fake executables of
 test_backup_scripts.py (docker, df, ps, uname, id, curl, sleep) plus fake git and sha256sum. pf runs from a copy in
-the fake release root, beside stub backup.sh, release.sh, check.sh and smoke.sh that only record their arguments.
+the fake release root, beside stub backup.sh, release.sh, check.sh, smoke.sh and archive.sh that only record their
+arguments. Permanent deletion requests (history archival step 3): `pf delete-permanently --confirm` records a request,
+runs archive.sh at once and reports the request's final state from `history-archive status`.
 Nothing touches a Docker daemon, a database, a git repository or the network.
 
 Run with the other production tests:
@@ -17,12 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_backup_scripts import (  # noqa: E402
     BACKUP_NAME, RELEASE, REPO, ScriptHarness, drill_reconcile_doc, report, verify_doc,
 )
-from test_release_scripts import find_sh, health_body, out, rule  # noqa: E402
+from test_release_scripts import find_sh, health_body, out, rule, sh_path  # noqa: E402
 
 PF = REPO / "deploy" / "production" / "pf"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 NEW_TAG = "v1.1.0"
-STUBS = ("backup.sh", "release.sh", "check.sh", "smoke.sh")
+STUBS = ("backup.sh", "release.sh", "check.sh", "smoke.sh", "archive.sh")
 PREFIX = "compose -f compose.production.yaml --env-file .env.production "
 BUILD_PREFIX = "compose -f compose.production.yaml -f compose.production.build.yaml --env-file .env.production "
 PSQL_COUNT = r" exec -T db sh -c psql .*pg_class"
@@ -307,17 +309,41 @@ class Restore(PfHarness):
 
 
 # ---------------------------------------------------------------------------
-# delete-permanently (OPERATIONS_RUNBOOK §10)
+# delete-permanently (OPERATIONS_RUNBOOK §10; history archival step 3)
 # ---------------------------------------------------------------------------
 
 DELETE_RUN = ["--profile", "ops", "run", "--rm", "--no-deps", "-T", "db-roles", "delete-permanently"]
 DELETE_RULE = r" --profile ops run --rm --no-deps -T db-roles delete-permanently "
-MANUAL_BACKUP = "20261117T010203Z-manual"
+STATUS_RUN = r" --profile ops run --rm --no-deps -T --user 1000:1000 maintenance status$"
+REQUEST = 7
+DELETION_BACKUP = "20261117T010203Z-pre-purge-deletion-7-20261117T010200Z"
 
 
-def deletion_doc(result, exit_code):
+def deletion_doc(result, exit_code, request=None):
+    """The JSON document of `app.cli delete-permanently` (contract B3 §6): `request` once a request is recorded."""
     return out(json.dumps({"report_version": 1, "command": "delete-permanently", "result": result,
-                           "exit_code": exit_code}, indent=2) + "\n", rc=exit_code)
+                           "exit_code": exit_code, "mode": "delete" if result == "requested" else "preview",
+                           "backup": None, "request": request, "audit_rows": [], "guard_triggers": [],
+                           "error": None}, indent=2) + "\n", rc=exit_code)
+
+
+def request_summary(state, request_id=REQUEST, **fields):
+    document = {"id": request_id, "state": state, "scope": {"work_order_numbers": ["WO-2"], "part_numbers": []},
+                "requested_at": "2026-11-17T01:01:00Z", "requested_by_user_id": None, "requested_by_operator": "ops",
+                "rows": {"work_orders": 1}, "started_at": None, "backup_label": None, "pre_purge_backup_name": None,
+                "finished_at": None, "failure_reason": None}
+    document.update(fields)
+    return document
+
+
+def archive_status(open_request=None, last_request=None, exit_code=0):
+    """`history-archive status` with the deletion requests (exit 1: a finding of the archive, still a valid report)."""
+    return out(json.dumps({"report_version": 1, "command": "history-archive status",
+                           "result": "finding" if exit_code else "ok", "exit_code": exit_code, "run_id": None,
+                           "request_id": None, "state": None, "open_run": None, "last_finished_run": None,
+                           "open_deletion_request": open_request, "last_finished_deletion_request": last_request,
+                           "findings": ["copy_dir_unusable"] if exit_code else [], "error": None},
+                          indent=2) + "\n", rc=exit_code)
 
 
 class DeletePermanently(PfHarness):
@@ -326,9 +352,14 @@ class DeletePermanently(PfHarness):
 
     def setUp(self):
         super().setUp()
-        self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("deleted", 0)),
-                     rule(DELETE_RULE, deletion_doc("preview", 0)))
-        self.prepend("backup.sh", rule(r".*", out(f"BACKUP {MANUAL_BACKUP} /backups/{MANUAL_BACKUP}\n")))
+        self.archive_dir = self.tmp / "archive"
+        self.archive_dir.mkdir()
+        self.write_env([*self.env_lines, f"PARTFLOW_ARCHIVE_DIR={sh_path(self.archive_dir)}"])
+        self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("requested", 0, request_summary("APPROVED"))),
+                     rule(DELETE_RULE, deletion_doc("preview", 0)),
+                     rule(STATUS_RUN, archive_status(last_request=request_summary(
+                         "COMPLETED", pre_purge_backup_name=DELETION_BACKUP, finished_at="2026-11-17T01:03:00Z"))))
+        self.rules["archive.sh"] = [rule(r".*", out(f"DELETION deleted {REQUEST} COMPLETED\n"))]
 
     def deletions(self):
         calls = []
@@ -340,50 +371,144 @@ class DeletePermanently(PfHarness):
                 calls.append(argv[start + len(DELETE_RUN):])
         return calls
 
+    def order(self):
+        """docker (the request, then status) and archive.sh, in order."""
+        found = []
+        for entry in self.calls():
+            text = " ".join(entry["argv"])
+            if entry["tool"] == "archive.sh":
+                found.append("archive.sh")
+            elif entry["tool"] == "docker" and "db-roles delete-permanently" in text:
+                found.append("request" if "--confirm" in entry["argv"] else "preview")
+            elif entry["tool"] == "docker" and text.endswith("maintenance status"):
+                found.append("status")
+            elif entry["tool"] in ("docker", "backup.sh"):
+                found.append(entry["tool"] + " " + text)
+        return found
+
     def test_preview_passes_every_value_verbatim_and_changes_nothing(self):
         self.pf("delete-permanently", *self.TARGETS, "--reason", "typo test data")
         self.assertExit(0)
         self.assertEqual(self.deletions(), [[*self.TARGETS, "--operator", "ops", "--reason", "typo test data"]])
         self.assertIn('"result": "preview"', self.result.stdout)
-        self.assertEqual(self.stub_calls("backup.sh"), [])
+        self.assertEqual(self.order(), ["preview"])
+        # The preview works without archival.
+        self.reset()
+        self.prepend("docker", rule(DELETE_RULE, deletion_doc("preview", 0)))
+        self.pf("delete-permanently", "--work-order", "WO-2", "--reason", "typo")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["preview"])
 
-    def test_confirm_takes_a_backup_then_deletes(self):
+    # Requested, then carried out at once by archive.sh: exit 0 once status shows the request COMPLETED. No manual
+    # backup and no --backup-name: the job takes the pre-purge backup.
+    def test_confirm_records_the_request_and_runs_the_job(self):
         self.pf("delete-permanently", *self.TARGETS, "--reason", "typo", "--operator", "Ops Person", "--confirm")
         self.assertExit(0)
-        common = [*self.TARGETS, "--operator", "Ops Person", "--reason", "typo"]
-        self.assertEqual(self.deletions(), [common, [*common, "--confirm", "--backup-name", MANUAL_BACKUP]])
-        self.assertEqual(self.stub_calls("backup.sh"), [["--kind", "manual", "--operator", "Ops Person", "--reason",
-                                                        "before pf delete-permanently", "--env-file",
-                                                        ".env.production"]])
-        order = [entry["tool"] for entry in self.calls() if entry["tool"] in ("docker", "backup.sh")]
-        self.assertEqual(order, ["docker", "backup.sh", "docker"])
-        self.assertIn('"result": "deleted"', self.result.stdout)
-        self.assertNotIn('"result": "preview"', self.result.stdout)
+        self.assertEqual(self.deletions(), [[*self.TARGETS, "--operator", "Ops Person", "--reason", "typo",
+                                             "--confirm"]])
+        self.assertEqual(self.order(), ["request", "archive.sh", "status"])
+        self.assertEqual(self.stub_calls("archive.sh"), [["--env-file", ".env.production"]])
+        self.assertEqual(self.stub_calls("backup.sh"), [])
+        self.assertNotIn("--backup-name", " ".join(" ".join(call) for call in self.deletions()))
+        self.assertIn('"result": "requested"', self.result.stdout)
+        self.assertNotIn("DELETION deleted", self.result.stdout)
+        self.assertIn(f"pf: deletion request {REQUEST} is COMPLETED: the records were deleted in one transaction, after"
+                      f" the pre-purge backup {DELETION_BACKUP}.", self.result.stderr)
+        self.assertIn(f"DELETION deleted {REQUEST} COMPLETED", self.result.stderr)
 
-    def test_a_refused_preview_takes_no_backup(self):
-        self.prepend("docker", rule(DELETE_RULE, deletion_doc("refused", 1)))
+    # Without archival set up (or with the incident record), --confirm refuses before it records anything: exit 2.
+    def test_confirm_needs_archival(self):
+        cases = (
+            ("no archive folder setting", [line for line in self.env_lines if not line.startswith("PARTFLOW_ARCHIVE_DIR=")],
+             None, "pf: PARTFLOW_ARCHIVE_DIR in .env.production is empty. Nothing was requested or deleted: a permanent"
+                   " deletion request is carried out only by the history archive job, which needs the archive folder"
+                   " and the history archive task (SYNOLOGY_NAS §11.8)."),
+            ("no archive folder", [*self.env_lines, f"PARTFLOW_ARCHIVE_DIR={sh_path(self.tmp)}/missing"], None,
+             "(PARTFLOW_ARCHIVE_DIR) does not exist. Nothing was requested or deleted"),
+            ("the incident record", None, "incident",
+             "of a reconcile after a purge or a deletion exists: the history archive job carries out no deletion until"
+             " the incident is closed (OPERATIONS_RUNBOOK §8). Nothing was requested or deleted."),
+        )
+        for name, lines, extra, message in cases:
+            with self.subTest(case=name):
+                self.reset()
+                if lines is not None:
+                    self.write_env(lines)
+                if extra:
+                    record = self.tmp / "partflow-deployments" / "archive" / "reconcile-after-purge"
+                    record.parent.mkdir(parents=True)
+                    record.write_text("result=mismatch\nrun=3\n", encoding="utf-8")
+                self.pf("delete-permanently", "--work-order", "WO-2", "--reason", "typo", "--confirm")
+                self.assertExit(2)
+                self.assertIn(message, self.result.stderr)
+                self.assertEqual(self.calls("docker"), [])
+                self.assertEqual(self.stub_calls("archive.sh"), [])
+
+    def test_a_refusal_records_nothing(self):
+        self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("refused", 1)))
         self.pf("delete-permanently", "--work-order", "WO-1", "--reason", "typo", "--confirm")
         self.assertExit(1)
         self.assertIn('"result": "refused"', self.result.stdout)
-        self.assertIn("No backup was taken and nothing was deleted", self.result.stderr)
-        self.assertEqual(len(self.deletions()), 1)
-        self.assertEqual(self.stub_calls("backup.sh"), [])
+        self.assertIn("pf: refused — the deletion is refused (see the refusals above). Nothing was requested or deleted.",
+                      self.result.stderr)
+        self.assertEqual(self.order(), ["request"])
 
-    def test_a_failed_backup_deletes_nothing(self):
-        for name, answer in (("backup fails", out("", rc=3)), ("no backup named", out("", rc=0))):
+    # archive.sh could not take the archive lock (another start works): the request stays APPROVED and waits for the
+    # history archive task's next start: exit 2.
+    def test_the_lock_held(self):
+        self.rules["archive.sh"] = [rule(r".*", out("", rc=1, stderr="archive: refused — the history archive job is"
+                                                               " running (archive.sh on bs-host, pid 4242).\n"))]
+        self.prepend("docker", rule(STATUS_RUN, archive_status(open_request=request_summary("APPROVED"), exit_code=1)))
+        self.pf("delete-permanently", "--work-order", "WO-2", "--reason", "typo", "--confirm")
+        self.assertExit(2)
+        self.assertEqual(self.order(), ["request", "archive.sh", "status"])
+        self.assertIn(f"pf: deletion request {REQUEST} is APPROVED and not carried out yet (archive.sh exit 1, see above;"
+                      " when another archive.sh holds the archive lock, the request waits). The history archive task"
+                      " carries it out at its next start", self.result.stderr)
+
+    def test_a_failed_request(self):
+        reason = "The data changed after the request; nothing was deleted. Request it again."
+        self.rules["archive.sh"] = [rule(r".*", out("", rc=3))]
+        self.prepend("docker", rule(STATUS_RUN, archive_status(last_request=request_summary(
+            "FAILED", failure_reason=reason, finished_at="2026-11-17T01:03:00Z"))))
+        self.pf("delete-permanently", "--work-order", "WO-2", "--reason", "typo", "--confirm")
+        self.assertExit(3)
+        self.assertIn(f"pf: deletion request {REQUEST} FAILED, and nothing was deleted: {reason}", self.result.stderr)
+
+    def test_other_outcomes(self):
+        completed = request_summary("COMPLETED", pre_purge_backup_name=DELETION_BACKUP)
+        cases = (
+            ("an incident after the deletion", out("", rc=4), archive_status(last_request=completed), 4,
+             f"pf: deletion request {REQUEST} is COMPLETED: the records were deleted (pre-purge backup"
+             f" {DELETION_BACKUP}), but the reconcile after the deletion did not end clean: an incident"
+             " (OPERATIONS_RUNBOOK §8, Reconcile finding after a deletion)."),
+            ("left RUNNING", out("", rc=2), archive_status(open_request=request_summary("RUNNING")), 2,
+             f"pf: deletion request {REQUEST} is RUNNING: the history archive job stopped before its deletion committed"
+             " (archive.sh exit 2, see above). Nothing was deleted, and the job's next start makes it FAILED"),
+            ("cancelled", out("", rc=0), archive_status(last_request=request_summary("CANCELLED")), 2,
+             f"pf: deletion request {REQUEST} is CANCELLED and was not carried out: nothing was deleted"),
+            ("status unreadable", out("", rc=0), out("Error response from daemon\n", rc=2), 2,
+             f"pf: the state of deletion request {REQUEST} could not be read (history-archive status exit 2; archive.sh"
+             " exit 0)."),
+            ("another request", out("", rc=0), archive_status(last_request=request_summary("COMPLETED", request_id=6)), 2,
+             f"pf: history-archive status names deletion request {REQUEST} neither open nor finished last"),
+        )
+        for name, archive, status, code, message in cases:
             with self.subTest(case=name):
                 self.reset()
-                self.prepend("backup.sh", rule(r".*", answer))
-                self.pf("delete-permanently", "--part-number", "PN-1", "--reason", "typo", "--confirm")
-                self.assertExit(2)
-                self.assertIn("Nothing was deleted", self.result.stderr)
-                self.assertEqual([call[-1] for call in self.deletions()], ["typo"])
-
-    def test_the_deletion_exit_status_is_pf_exit_status(self):
-        self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("failed", 2)))
-        self.pf("delete-permanently", "--work-order", "WO-1", "--reason", "typo", "--confirm")
-        self.assertExit(2)
-        self.assertEqual(len(self.deletions()), 2)
+                self.rules["archive.sh"] = [rule(r".*", archive)]
+                self.prepend("docker", rule(STATUS_RUN, status))
+                self.pf("delete-permanently", "--work-order", "WO-2", "--reason", "typo", "--confirm")
+                self.assertExit(code)
+                self.assertIn(message, self.result.stderr)
+        with self.subTest(case="the recording's outcome is unknown"):
+            self.reset()
+            self.prepend("docker", rule(DELETE_RULE + r".*--confirm", deletion_doc("outcome_unknown", 2)))
+            self.pf("delete-permanently", "--work-order", "WO-2", "--reason", "typo", "--confirm")
+            self.assertExit(2)
+            self.assertIn("pf: the database connection failed while the request was recorded: it may or may not exist.",
+                          self.result.stderr)
+            self.assertEqual(self.order(), ["request"])
 
     def test_usage_errors(self):
         for arguments, message in (
@@ -403,6 +528,10 @@ class DeletePermanently(PfHarness):
                 self.assertExit(2)
                 self.assertIn(message, self.result.stderr)
                 self.assertEqual(self.calls(), [])
+        help_text = self.pf("--help").stdout
+        self.assertIn("--confirm record a permanent deletion request and run the history archive job at once", help_text)
+        self.assertIn("3 the request FAILED (nothing deleted)", help_text)
+        self.assertNotIn("take a verified manual backup", help_text)
 
 
 # ---------------------------------------------------------------------------

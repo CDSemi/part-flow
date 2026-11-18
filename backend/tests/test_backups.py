@@ -1208,6 +1208,12 @@ def _pre_purges(backup_dir: Path, first: datetime.datetime, count: int) -> list[
     ("name", "kind", "label"),
     [
         (f"20271110T050102Z-pre-purge-{_ARCHIVE}", "pre-purge", _ARCHIVE),
+        # History archival step 3: the backup before a permanent deletion request.
+        (
+            "20271110T050102Z-pre-purge-deletion-7-20271110T050100Z",
+            "pre-purge",
+            "deletion-7-20271110T050100Z",
+        ),
         ("20271110T050102Z-pre-release-v2.5.0", "pre-release", "v2.5.0"),
         ("20271110T050102Z-manual", "manual", None),
     ],
@@ -1222,12 +1228,15 @@ def test_backup_names_parse_with_their_labels(name: str, kind: str, label: str |
 @pytest.mark.parametrize(
     "name",
     [
-        # A pre-purge backup is named after its run's archive, and only that.
+        # A pre-purge backup is named after its run's archive or its deletion
+        # request's label, and only that.
         "20271110T050102Z-pre-purge",
         "20271110T050102Z-pre-purge-v2.5.0",
         "20271110T050102Z-pre-purge-run-3-20271110T042000",
         "20271110T050102Z-pre-purge-run--20271110T042000Z",
         "20271110T050102Z-pre-purge-run-3-20271110T042000Z-x",
+        "20271110T050102Z-pre-purge-deletion-7",
+        "20271110T050102Z-pre-purge-delete-7-20271110T050100Z",
         # The other kinds keep their rules.
         "20271110T050102Z-pre-release",
         f"20271110T050102Z-manual-{_ARCHIVE}",

@@ -14,6 +14,7 @@ import { ConnectivityContext } from '../../app/connectivity-context';
 import type { ConnectivityStatus } from '../../app/connectivity-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
+import { formatInstant } from './archive-runs';
 import { HistoryArchivalSection } from './HistoryArchivalSection';
 
 // Administration → History archival & purge (Phase 16, archival design B
@@ -21,13 +22,16 @@ import { HistoryArchivalSection } from './HistoryArchivalSection';
 // purge batch limits), the preview with its progress and the server's
 // refusals, the request of a run (and a request whose answer was lost),
 // what a run purges, and the runs table with the purge's states, results,
-// counts and evidence, Cancel and Confirm off-host copy. The /api surface
-// is faked in memory with the contracts' routes and shapes; the server's
-// messages are shown as given.
+// counts and evidence, Cancel and Confirm off-host copy; and (step 3,
+// D17) the Permanent deletion requests card, shown only to holders of its
+// key, with Cancel. The /api surface is faked in memory with the
+// contracts' routes and shapes; the server's messages are shown as given.
 
 const T0 = '2026-11-17T08:00:00Z';
 const SHA = 'a'.repeat(64);
 const RECEIPT_SHA = 'b'.repeat(64);
+/** The pre-purge backup disclosure, its hyphen non-breaking (U+2011). */
+const PRE_PURGE = 'Pre‑purge backup';
 
 interface RunWire {
   id: number;
@@ -171,11 +175,86 @@ interface Policy {
   archive_purge_batch_part_numbers: number;
 }
 
+/** A permanent deletion request (archival step 3, D17) as the API
+ * answers it. */
+interface DeletionWire {
+  id: number;
+  state: string;
+  scope: { work_order_numbers: string[]; part_numbers: string[] };
+  reason: string;
+  requested_by: { user_id: number; display_name: string } | null;
+  requested_by_operator: string | null;
+  requested_at: string;
+  work_orders: {
+    id: number;
+    work_order_number: string | null;
+    internal: boolean;
+    named: boolean;
+    part_numbers: string[];
+    demand_lines: number;
+  }[];
+  part_numbers: { part_number: string; master: boolean }[];
+  rows: Record<string, number>;
+  started_at: string | null;
+  backup_label: string | null;
+  pre_purge_backup: { name: string; dump_started_at: string } | null;
+  finished_at: string | null;
+  cancelled_by: { user_id: number; display_name: string } | null;
+  failure_reason: string | null;
+}
+
+function deletion(
+  id: number,
+  overrides: Partial<DeletionWire> = {},
+): DeletionWire {
+  return {
+    id,
+    state: 'APPROVED',
+    scope: { work_order_numbers: ['007201'], part_numbers: [] },
+    reason: 'Test data entered by mistake',
+    requested_by: { user_id: 9, display_name: 'Sam Super' },
+    requested_by_operator: null,
+    requested_at: '2026-11-18T10:00:00Z',
+    work_orders: [
+      {
+        id: 1,
+        work_order_number: '007201',
+        internal: false,
+        named: true,
+        part_numbers: ['A-100'],
+        demand_lines: 1,
+      },
+    ],
+    part_numbers: [],
+    rows: {
+      audit_events: 4,
+      part_movements: 12,
+      quantity_flow_lineage: 0,
+      quantity_flows: 2,
+      assigned_route_steps: 6,
+      assigned_routes: 2,
+      work_order_allocations: 0,
+      work_order_demands: 1,
+      work_orders: 1,
+      part_numbers: 0,
+    },
+    started_at: null,
+    backup_label: null,
+    pre_purge_backup: null,
+    finished_at: null,
+    cancelled_by: null,
+    failure_reason: null,
+    ...overrides,
+  };
+}
+
 let policy: Policy;
 let runs: RunWire[];
+let deletions: DeletionWire[];
 let writes: { method: string; url: string; body: unknown }[];
 /** A refusal or lost answer per route key, if set (`PUT policy`,
- * `GET preview`, `POST runs`, `POST cancel`, `POST copy`). */
+ * `GET preview`, `POST runs`, `POST cancel`, `POST copy`, `GET
+ * deletions`, `POST deletion cancel`). */
 let failures: Record<string, { status: number; detail: string } | 'network'>;
 /** While set, a preview answers only once it resolves. */
 let previewHold: Promise<void> | null;
@@ -272,6 +351,28 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     }
     return json(target);
   }
+  if (url === '/api/permanent-deletion/requests' && method === 'GET') {
+    const refused = fail('GET deletions');
+    if (refused) return refused;
+    return json(deletions);
+  }
+  const deletionCancel =
+    /^\/api\/permanent-deletion\/requests\/(\d+)\/cancel$/.exec(url);
+  if (deletionCancel && method === 'POST') {
+    const target = deletions.find((d) => d.id === Number(deletionCancel[1]));
+    if (!target) {
+      return json(
+        { detail: `There is no deletion request ${deletionCancel[1]}.` },
+        404,
+      );
+    }
+    const refused = fail('POST deletion cancel');
+    if (refused) return refused;
+    target.state = 'CANCELLED';
+    target.cancelled_by = { user_id: 90, display_name: 'Ada Admin' };
+    target.finished_at = T0;
+    return json(target);
+  }
   return json({ detail: `Unhandled fake route: ${method} ${url}` }, 500);
 }
 
@@ -326,6 +427,7 @@ beforeEach(() => {
     archive_purge_batch_part_numbers: 20,
   };
   runs = [];
+  deletions = [];
   writes = [];
   failures = {};
   previewHold = null;
@@ -1025,7 +1127,8 @@ test('HA-14: the runs show the purge — its states and results, the purged and 
     'Purge started',
   ]);
   const purging = archiveCell(9);
-  expect(within(purging).getByText('Pre-purge backup').tagName).toBe('SUMMARY');
+  // A non-breaking hyphen keeps `Pre-purge` whole in a narrow column.
+  expect(within(purging).getByText(PRE_PURGE).tagName).toBe('SUMMARY');
   expect(purging.textContent).toContain(
     '20261117T092400Z-pre-purge-run-9-20261117T092000Z',
   );
@@ -1069,7 +1172,7 @@ test('HA-14: the runs show the purge — its states and results, the purged and 
   });
   expect(runRow(6).Counts).not.toContain('Purged');
   expect(within(archiveCell(6)).getByText('Purge receipt')).toBeTruthy();
-  expect(within(archiveCell(6)).queryByText('Pre-purge backup')).toBeNull();
+  expect(within(archiveCell(6)).queryByText(PRE_PURGE)).toBeNull();
 
   // A run that failed while purging keeps the whole components it purged.
   expect(runRow(5)).toMatchObject({
@@ -1154,4 +1257,413 @@ test('HA-15: the purge batch limits are edited in the dialog, sent only when cha
   expect(
     within(again).getByRole('button', { name: 'Save changes' }),
   ).toBeDisabled();
+});
+
+/* ============ Permanent deletion requests (archival step 3, D17) ============ */
+
+const DELETION_KEY = 'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY';
+const DELETION_BACKUP =
+  '20261118T090501Z-pre-purge-deletion-4-20261118T090500Z';
+const CHANGED =
+  'The data changed after the request; nothing was deleted. Request it again.';
+
+/** One cell of the requests table's row of request `id`. */
+function deletionCell(id: number, label: string): HTMLElement {
+  const row = within(card('Permanent deletion requests'))
+    .getAllByRole('row')
+    .find((tr) => tr.querySelector('td')?.textContent === String(id));
+  if (!row) throw new Error(`No row for deletion request ${id}`);
+  return row.querySelector(`td[data-label="${label}"]`) as HTMLElement;
+}
+
+/** What the row of request `id` shows at a glance, by column: the state
+ * pill, the lines a cell shows outside its folded disclosures, and the
+ * result's text. */
+function deletionRow(id: number): Record<string, string> {
+  const shown = (label: string) =>
+    Array.from(
+      deletionCell(id, label).querySelectorAll(
+        ':scope > .admin-runlines > :not(details)',
+      ),
+      (line) => line.textContent,
+    ).join(' / ');
+  return {
+    State:
+      deletionCell(id, 'State').querySelector('.pillnav')?.textContent ?? '',
+    Deletes: shown('Deletes'),
+    'Requested by': shown('Requested by'),
+    Times: shown('Times'),
+    Result:
+      deletionCell(id, 'Result').querySelector('.admin-runresult')
+        ?.textContent ?? '',
+  };
+}
+
+/** The pre-purge backup folded in the result of request `id`, if any. */
+function deletionBackup(id: number): string | null {
+  const details = deletionCell(id, 'Result').querySelector('details');
+  if (details === null) return null;
+  expect(details.querySelector('summary')?.textContent).toBe(PRE_PURGE);
+  return details.querySelector('.admin-runarchive')?.textContent ?? '';
+}
+
+async function deletionsLoaded() {
+  await loaded();
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('status', {
+        name: 'Loading permanent deletion requests',
+      }),
+    ).toBeNull(),
+  );
+}
+
+const deletionReads = () =>
+  vi
+    .mocked(fetch)
+    .mock.calls.filter(([input]) =>
+      String(input).startsWith('/api/permanent-deletion'),
+    ).length;
+
+test('HA-16: a holder of the deletion key sees the requests below the runs: state, records, rows, requester, times, backup and result', async () => {
+  session = sessionWith(['RUN_HISTORY_ARCHIVAL_AND_PURGE', DELETION_KEY]);
+  deletions = [
+    deletion(5, {
+      state: 'RUNNING',
+      started_at: '2026-11-18T10:05:00Z',
+      backup_label: 'deletion-5-20261118T100500Z',
+    }),
+    deletion(4, {
+      state: 'COMPLETED',
+      scope: { work_order_numbers: [], part_numbers: ['PN-A'] },
+      work_orders: [
+        {
+          id: 2,
+          work_order_number: null,
+          internal: true,
+          named: false,
+          part_numbers: ['PN-A'],
+          demand_lines: 1,
+        },
+      ],
+      part_numbers: [{ part_number: 'PN-A', master: true }],
+      requested_by: null,
+      requested_by_operator: 'ops-anna',
+      requested_at: '2026-11-18T09:00:00Z',
+      started_at: '2026-11-18T09:05:00Z',
+      backup_label: 'deletion-4-20261118T090500Z',
+      pre_purge_backup: {
+        name: DELETION_BACKUP,
+        dump_started_at: '2026-11-18T09:05:01Z',
+      },
+      finished_at: '2026-11-18T09:06:00Z',
+    }),
+    deletion(3, {
+      state: 'FAILED',
+      started_at: '2026-11-18T08:05:00Z',
+      backup_label: 'deletion-3-20261118T080500Z',
+      finished_at: '2026-11-18T08:06:00Z',
+      failure_reason: CHANGED,
+    }),
+    deletion(2, {
+      state: 'CANCELLED',
+      finished_at: '2026-11-18T07:01:00Z',
+      cancelled_by: { user_id: 90, display_name: 'Ada Admin' },
+    }),
+  ];
+  renderSection();
+  await deletionsLoaded();
+
+  const requestsCard = card('Permanent deletion requests');
+  expect(
+    card('Runs').compareDocumentPosition(requestsCard) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(requestsCard.textContent).toContain(
+    'Each request deletes Work Orders or a Part Number with all their data from the database, as if they had never been entered; the server carries it out after a pre-purge backup.',
+  );
+  expect(requestsCard.textContent).toContain(
+    'Delete permanently… in Work Order Details and in the Part Number dialog of Management → Part Numbers requests a deletion.',
+  );
+  expect(
+    within(requestsCard)
+      .getAllByRole('columnheader')
+      .map((th) => th.textContent),
+  ).toEqual(['Request', 'State', 'Deletes', 'Requested by', 'Times', 'Result']);
+
+  // The open request: Deleting…, nothing to cancel; its rows per table
+  // are folded under its records.
+  expect(deletionRow(5)).toMatchObject({
+    State: 'Deleting…',
+    Deletes: 'Work Order 007201 / 28 rows',
+    'Requested by': 'Sam Super / Test data entered by mistake',
+    Result: '—',
+  });
+  expect(deletionBackup(5)).toBeNull();
+  expect(deletionCell(5, 'State').querySelector('button')).toBeNull();
+  // The Work Order Number stays whole: it never wraps inside.
+  expect(
+    deletionCell(5, 'Deletes').querySelector('.admin-runname')?.textContent,
+  ).toBe('007201');
+  expect(deletionCell(5, 'Deletes').querySelector('summary')?.textContent).toBe(
+    'Rows per table',
+  );
+  expect(
+    Array.from(
+      deletionCell(5, 'Deletes').querySelectorAll('details .admin-runsub'),
+      (line) => line.textContent,
+    ),
+  ).toEqual([
+    'Work Orders: 1',
+    'Demand lines: 1',
+    'Allocations: 0',
+    'Quantity Flows: 2',
+    'Lineage links: 0',
+    'Movements: 12',
+    'Assigned Routes: 2',
+    'Assigned Route steps: 6',
+    'Part Number details: 0',
+    'Audit rows: 4',
+  ]);
+  expect(deletionRow(5).Times).toContain(
+    `Requested ${formatInstant('2026-11-18T10:00:00Z')}`,
+  );
+  expect(deletionRow(5).Times).toContain(
+    `Started ${formatInstant('2026-11-18T10:05:00Z')}`,
+  );
+
+  // An operator's Part Number request that deleted an internal Work
+  // Order too, after its pre-purge backup (folded under the result).
+  expect(deletionRow(4)).toMatchObject({
+    State: 'Deleted',
+    Deletes: 'Part Number PN-A / Also 1 internal Work Order / 28 rows',
+    Result: 'Deleted from the database.',
+  });
+  expect(deletionBackup(4)).toBe(DELETION_BACKUP);
+  expect(deletionRow(4)['Requested by']).toContain('ops-anna (operator)');
+  expect(
+    Array.from(
+      deletionCell(4, 'Times').querySelectorAll('details .admin-runtime'),
+      (line) => line.firstChild?.textContent?.trim(),
+    ),
+  ).toEqual(['Requested', 'Started', 'Backup started', 'Finished']);
+
+  // A failed request shows the reason as the server gives it.
+  expect(deletionRow(3)).toMatchObject({
+    State: 'Failed — nothing was deleted',
+    Result: CHANGED,
+  });
+  expect(deletionRow(2)).toMatchObject({
+    State: 'Cancelled',
+    Result: 'Cancelled by Ada Admin.',
+  });
+  expect(
+    within(requestsCard).queryByRole('button', { name: /^Cancel deletion/ }),
+  ).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+test('HA-17: Cancel asks first, is offered only for a request waiting for the server, and posts once', async () => {
+  session = sessionWith(['RUN_HISTORY_ARCHIVAL_AND_PURGE', DELETION_KEY]);
+  deletions = [
+    deletion(6),
+    deletion(2, {
+      state: 'CANCELLED',
+      finished_at: T0,
+      cancelled_by: { user_id: 90, display_name: 'Ada Admin' },
+    }),
+  ];
+  renderSection();
+  await deletionsLoaded();
+  expect(deletionRow(6).State).toBe('Waiting for the server');
+  // Cancel… sits under the state it applies to.
+  expect(deletionCell(6, 'State').querySelector('button')).toHaveAccessibleName(
+    'Cancel deletion request 6…',
+  );
+  expect(
+    screen.queryByRole('button', { name: 'Cancel deletion request 2…' }),
+  ).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Cancel deletion request 6…' }),
+  );
+  const confirm = screen.getByRole('dialog', {
+    name: 'Cancel deletion request 6?',
+  });
+  expect(confirm.textContent).toContain(
+    'Nothing is deleted, and the records stay in the database. To delete them later, request the deletion again.',
+  );
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Keep request (Esc)' }),
+  );
+  expect(writes).toEqual([]);
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Cancel deletion request 6…' }),
+  );
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Cancel deletion request 6?' }),
+    ).getByRole('button', { name: 'Cancel request' }),
+  );
+  expect(
+    await within(card('Permanent deletion requests')).findByText(
+      '✓ Deletion request 6 is cancelled. Nothing was deleted.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/permanent-deletion/requests/6/cancel',
+      body: undefined,
+    },
+  ]);
+  await waitFor(() => expect(deletionRow(6).State).toBe('Cancelled'));
+  expect(deletionRow(6).Result).toBe('Cancelled by Ada Admin.');
+  expect(
+    screen.queryByRole('button', { name: 'Cancel deletion request 6…' }),
+  ).toBeNull();
+});
+
+test('HA-18: a refused cancel shows the server text; a lost answer reloads the requests; offline blocks Cancel', async () => {
+  session = sessionWith(['RUN_HISTORY_ARCHIVAL_AND_PURGE', DELETION_KEY]);
+  deletions = [deletion(7)];
+  renderSection();
+  await deletionsLoaded();
+  const RUNNING =
+    'Deletion request 7 is being carried out on the server now and cannot be cancelled. Wait until it finishes.';
+  failures['POST deletion cancel'] = { status: 409, detail: RUNNING };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Cancel deletion request 7…' }),
+  );
+  const confirm = screen.getByRole('dialog', {
+    name: 'Cancel deletion request 7?',
+  });
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Cancel request' }),
+  );
+  expect(await within(confirm).findByRole('alert')).toHaveTextContent(RUNNING);
+
+  const reads = deletionReads();
+  failures['POST deletion cancel'] = { status: 502, detail: 'Bad gateway.' };
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Cancel request' }),
+  );
+  expect(
+    await within(card('Permanent deletion requests')).findByRole('alert'),
+  ).toHaveTextContent(
+    'The server did not answer, so deletion request 7 may or may not have been cancelled. Check its state in the table; cancelling it again is safe.',
+  );
+  expect(
+    screen.queryByRole('dialog', { name: 'Cancel deletion request 7?' }),
+  ).toBeNull();
+  // The lost answer reloads the requests.
+  await waitFor(() => expect(deletionReads()).toBeGreaterThan(reads + 1));
+  cleanup();
+
+  renderSection('unavailable');
+  await deletionsLoaded();
+  expect(
+    screen.getByRole('button', { name: 'Cancel deletion request 7…' }),
+  ).toBeDisabled();
+});
+
+test('HA-19: only holders of the deletion key see the card and read the requests; it has its empty and error states', async () => {
+  // The archival key alone: no card, the requests never read.
+  deletions = [deletion(1)];
+  renderSection();
+  await loaded();
+  expect(
+    screen.queryByRole('heading', { name: 'Permanent deletion requests' }),
+  ).toBeNull();
+  expect(deletionReads()).toBe(0);
+  cleanup();
+
+  // No key of the section at all: view-only, no card either.
+  session = sessionWith(['CONFIGURE_SYSTEM_SETTINGS']);
+  renderSection();
+  await loaded();
+  expect(
+    screen.queryByRole('heading', { name: 'Permanent deletion requests' }),
+  ).toBeNull();
+  expect(deletionReads()).toBe(0);
+  cleanup();
+
+  // The deletion key alone: the card with Cancel, the rest view-only.
+  session = sessionWith([DELETION_KEY]);
+  renderSection();
+  await deletionsLoaded();
+  expect(
+    screen.getByText(
+      'View only — changing this needs the Run history archival and purge permission.',
+    ),
+  ).toBeInTheDocument();
+  expect(deletionRow(1).State).toBe('Waiting for the server');
+  expect(
+    screen.getByRole('button', { name: 'Cancel deletion request 1…' }),
+  ).toBeEnabled();
+  cleanup();
+
+  // Empty, then a failed load with Retry.
+  deletions = [];
+  renderSection();
+  await deletionsLoaded();
+  expect(
+    within(card('Permanent deletion requests')).getByText(
+      'No permanent deletion has been requested yet.',
+    ),
+  ).toBeInTheDocument();
+  cleanup();
+
+  failures['GET deletions'] = { status: 500, detail: 'Database unavailable.' };
+  renderSection();
+  expect(
+    await screen.findByText(
+      'The permanent deletion requests could not be loaded.',
+    ),
+  ).toBeInTheDocument();
+  delete failures['GET deletions'];
+  deletions = [deletion(8)];
+  fireEvent.click(
+    within(card('Permanent deletion requests')).getByRole('button', {
+      name: 'Retry',
+    }),
+  );
+  await waitFor(() =>
+    expect(deletionRow(8).State).toBe('Waiting for the server'),
+  );
+});
+
+test('HA-20: a Work Order Number or Part Number stays whole unless it is longer than 16 characters', async () => {
+  session = sessionWith([DELETION_KEY]);
+  deletions = [
+    deletion(11, {
+      state: 'CANCELLED',
+      scope: {
+        work_order_numbers: ['007099-SUPPLEMENTAL-AMENDMENT'],
+        part_numbers: [],
+      },
+      finished_at: T0,
+      cancelled_by: { user_id: 90, display_name: 'Ada Admin' },
+    }),
+    deletion(10, {
+      state: 'CANCELLED',
+      scope: { work_order_numbers: [], part_numbers: ['0118-40-0022-07X'] },
+      finished_at: T0,
+      cancelled_by: { user_id: 90, display_name: 'Ada Admin' },
+    }),
+  ];
+  renderSection();
+  await deletionsLoaded();
+  const name = (id: number) =>
+    deletionCell(id, 'Deletes').querySelector('.admin-runname') as HTMLElement;
+  // 16 characters: kept on one line.
+  expect(name(10)).toHaveTextContent('0118-40-0022-07X');
+  expect(name(10).className).toBe('admin-runname');
+  // 29 characters: may wrap anywhere rather than widen the table.
+  expect(name(11)).toHaveTextContent('007099-SUPPLEMENTAL-AMENDMENT');
+  expect(name(11).className).toBe('admin-runname long');
+  expect(deletionRow(11).Deletes).toBe(
+    'Work Order 007099-SUPPLEMENTAL-AMENDMENT / 28 rows',
+  );
 });

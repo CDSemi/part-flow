@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { ApiError, setAuthFailureListener } from './client';
+import { PERMISSIONS } from './roles';
 import {
   changeOwnEmail,
   changeOwnPassword,
@@ -84,6 +85,26 @@ test('getSession maps the signed-in user and the setup state', async () => {
 
   fetchMock.mockResolvedValue(json({ user: null, setup_open: true }));
   expect(await getSession()).toEqual({ user: null, setupOpen: true });
+});
+
+test('a Super User session decodes every key, the permanent deletion key included', async () => {
+  // Migration 0042 grants the key to every role that holds every other
+  // key: a client that did not know it would refuse the Super User's
+  // whole sign-in state.
+  fetchMock.mockResolvedValue(
+    json({
+      user: {
+        ...WIRE_USER,
+        permissions: [...PERMISSIONS],
+      },
+      setup_open: false,
+    }),
+  );
+  const state = await getSession();
+  expect(state.user?.permissions).toEqual([...PERMISSIONS]);
+  expect(state.user?.permissions).toContain(
+    'DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY',
+  );
 });
 
 test('signIn, changeOwnPassword and signOut send the exact requests', async () => {

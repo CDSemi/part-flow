@@ -8,13 +8,18 @@
 # disk_archive (PARTFLOW_ARCHIVE_DIR), then database, schema and backup_age from one read-only `status` run (the `status`
 # ops service, as the application database role, the backup directory mounted read-only), and archival_proposal from
 # one read-only `history-archive status` run (the `maintenance` ops service, as the maintenance database role, with the
-# archive folder and, when archive.sh would mount it, the copy folder; OPERATIONS_RUNBOOK §11), which also fails while
-# archive.sh's incident record <records-dir>/archive/reconcile-after-purge exists (a reconcile after a purge that did
-# not end clean; OPERATIONS_RUNBOOK §8). The newest backup of any kind counts for backup_age, a pre-purge backup of
-# history archival included. It never starts, stops or changes a service, never writes in the backup or archive
-# directories and never repairs; after a `status` run that hit its time bound it removes the one-off container that run
-# left (one that was not there before it), and after a `maintenance` run that hit its bound only the container of that
-# run (its own --name), never a step of archive.sh.
+# archive folder and, when archive.sh would mount it, the copy folder; OPERATIONS_RUNBOOK §11), which also fails when a
+# permanent deletion request, APPROVED or RUNNING, was requested longer ago than --deletion-wait-minutes (the history
+# archive task has not carried it out, or has not finished it) and while archive.sh's incident record
+# <records-dir>/archive/reconcile-after-purge exists (a reconcile after a purge or a deletion that did not end clean;
+# OPERATIONS_RUNBOOK §8). While archival is not set up (PARTFLOW_ARCHIVE_DIR empty), archival_proposal is SKIP, but the
+# cheap check of archive.sh (`history-archive settings` with `docker compose exec` in the running backend container)
+# still looks for an open permanent deletion request, which nothing carries out then: one requested longer ago than
+# --deletion-wait-minutes fails the line. The newest backup of any kind counts for backup_age, a pre-purge backup
+# included. It never starts, stops or changes a service, never writes in the backup or archive directories and never
+# repairs; after a `status` run that hit its time bound it removes the one-off container that run left (one that was not
+# there before it), and after a `maintenance` run that hit its bound only the container of that run (its own --name),
+# never a step of archive.sh.
 #
 # Exit status: 0 nothing to notify (every line PASS/SKIP, or the failing set was already reported less than
 # --renotify-hours ago); 1 at least one FAIL to notify; 2 could not run (one line `ERROR check could not run: ...`).
@@ -36,13 +41,16 @@ OPENSSL_SECONDS=15
 STATUS_SECONDS=120
 # A release lock older than this is reported as stale (FAIL database) instead of skipping the status checks.
 RELEASE_LOCK_HOURS=4
+# The default of --deletion-wait-minutes: three 5-minute starts of the history archive task, plus the time a deletion
+# takes (its pre-purge backup and the reconcile after it).
+DELETION_WAIT_MINUTES=15
 
 usage() {
     cat <<'EOF'
 Usage: deploy/production/check.sh --url URL [--env-file .env.production] [--state-dir DIR]
            [--cacert FILE] [--resolve-to ADDRESS]
            [--max-backup-age-hours N] [--min-free-percent N] [--min-cert-days N]
-           [--renotify-hours N] [--allow-accepted-schema] [--only ID]... [--quiet]
+           [--renotify-hours N] [--deletion-wait-minutes N] [--allow-accepted-schema] [--only ID]... [--quiet]
            [--records-dir DIR] [--no-state] [--rehearsal --project NAME]
 
 Run from the repository root of the running release's checkout, as the account that owns PARTFLOW_BACKUP_DIR.
@@ -55,18 +63,23 @@ Run from the repository root of the running release's checkout, as the account t
   --min-free-percent N       0-100, default 15 (100 fails every measured disk: the notification test)
   --min-cert-days N          1-365, default 21
   --renotify-hours N         0-168, default 6; an unchanged failing set is notified again after N hours (0 = always)
+  --deletion-wait-minutes N  1-1440, default 15: archival_proposal fails when a permanent deletion request is still open
+                             (APPROVED or RUNNING) N minutes after it was requested (the history archive task has not
+                             carried it out, or archival is not set up)
   --allow-accepted-schema    an `accepted` schema (rollback path 2 override) passes https
   --only ID                  evaluate only this check (repeatable); state files are not changed
   --quiet                    print nothing unless the exit status is non-zero
   --records-dir DIR          release records (default $HOME/partflow-deployments); the release lock is
                              DIR/.release.lock: while it exists the status checks are skipped; archive.sh's incident
-                             record DIR/archive/reconcile-after-purge fails archival_proposal
+                             record DIR/archive/reconcile-after-purge (after a purge or a deletion) fails
+                             archival_proposal
   --no-state                 evaluate against the stored state without changing it (manual diagnosis)
   --rehearsal --project NAME a throwaway Compose project (never partflow, partflow-production or partflow-staging)
 Check ids: https certificate containers restarts errors disk_data disk_backup disk_docker disk_archive
            database schema backup_age archival_proposal
 disk_archive and archival_proposal use PARTFLOW_ARCHIVE_DIR and PARTFLOW_ARCHIVE_COPY_DIR of the env file; both are
-SKIP while PARTFLOW_ARCHIVE_DIR is empty (DEPLOYMENT §3.1).
+SKIP while PARTFLOW_ARCHIVE_DIR is empty (DEPLOYMENT §3.1), except that archival_proposal then fails for a permanent
+deletion request that waits, since nothing carries it out (history-archive settings in the running backend container).
 Output: one line per check, PASS|FAIL|SKIP <id> <reason>, then NOTE lines.
 Exit: 0 nothing to notify, 1 notify (a FAIL), 2 could not run.
 EOF
@@ -170,7 +183,8 @@ while [ "$#" -gt 0 ]; do
             continue
             ;;
         --url | --env-file | --state-dir | --cacert | --resolve-to | --max-backup-age-hours | \
-            --min-free-percent | --min-cert-days | --renotify-hours | --only | --records-dir | --project)
+            --min-free-percent | --min-cert-days | --renotify-hours | --deletion-wait-minutes | --only | --records-dir | \
+            --project)
             [ "$#" -ge 2 ] || usage_error "$option needs a value."
             value=$2
             shift 2
@@ -187,6 +201,7 @@ while [ "$#" -gt 0 ]; do
         --min-free-percent) check_count "$option" "$value" 0 100; MIN_FREE=$value ;;
         --min-cert-days) check_count "$option" "$value" 1 365; MIN_CERT_DAYS=$value ;;
         --renotify-hours) check_count "$option" "$value" 0 168; RENOTIFY_HOURS=$value ;;
+        --deletion-wait-minutes) check_count "$option" "$value" 1 1440; DELETION_WAIT_MINUTES=$value ;;
         --only)
             case " $CHECK_IDS " in
                 *" $value "*) ;;
@@ -687,7 +702,7 @@ check_disk_docker() {
 
 STATUS_IDS='database schema backup_age archival_proposal'
 ARCHIVE_NOT_SET_UP="archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in $ENV_FILE (DEPLOYMENT §3.1)"
-# archive.sh's incident record: the reconcile after a purge did not end clean (read only).
+# archive.sh's incident record: the reconcile after a purge or a deletion did not end clean (read only).
 PURGE_INCIDENT=$RECORDS_DIR/archive/reconcile-after-purge
 # one_off SERVICE: the ids of this project's one-off containers of SERVICE (`docker compose run`).
 one_off() {
@@ -708,17 +723,46 @@ remove_new_one_off() {
 mount_point() {
     timeout "$DOCKER_SECONDS" df -P "$1" 2>/dev/null | awk 'NR == 2 { print $6 }'
 }
+# check_unarchived_deletion: archival_proposal while archival is not set up. PartFlow records permanent deletion
+# requests all the same, and without the history archive task nothing carries them out: the cheap check of archive.sh
+# (`history-archive settings` in the running backend container, as the application database role; it creates no
+# container) looks for an open request, and one requested longer ago than --deletion-wait-minutes fails the line
+# (deletion_request_waiting). Otherwise, and when the check gives no answer, the line is SKIP.
+check_unarchived_deletion() {
+    src=0
+    pf "$DOCKER_SECONDS" exec -T backend python -m app.cli history-archive settings >"$WORK/archive-settings.json" \
+        2>"$WORK/archive-settings.err" || src=$?
+    for name in archive-settings.json archive-settings.err; do
+        cp "$WORK/$name" "$STATE_DIR/$name.tmp" && replace "$STATE_DIR/$name"
+    done
+    if [ "$src" -eq 124 ]; then
+        emit SKIP archival_proposal "$ARCHIVE_NOT_SET_UP; the deletion request check (history-archive settings in the backend container) gave no answer within $DOCKER_SECONDS s"
+        return 0
+    fi
+    python3 "$SCRIPT_DIR/monitor_report.py" settings "$WORK/archive-settings.json" "$src" \
+        --skip-reason "$ARCHIVE_NOT_SET_UP" --deletion-wait-minutes "$DELETION_WAIT_MINUTES" \
+        >"$WORK/archive.out" 2>"$WORK/archive-monitor.err" || true
+    text=$(tr -d '\r' <"$WORK/archive.out" | grep -E '^(FAIL|SKIP) archival_proposal ' | head -n 1) || text=
+    if [ -z "$text" ]; then
+        emit SKIP archival_proposal "$ARCHIVE_NOT_SET_UP; the deletion request check could not be evaluated (monitor_report.py)"
+        return 0
+    fi
+    word=${text%% *}
+    rest=${text#* }
+    emit "$word" archival_proposal "${rest#* }"
+}
 # check_archival: archival_proposal from one read-only `history-archive status` run in the maintenance service. The
 # copy folder is mounted exactly as archive.sh mounts it (a long-syntax bind with create_host_path: false in an override
 # file), only while it is a writable folder on a file system that is neither the archive folder's nor `/`; otherwise
-# the run reports copy_dir_unusable, and the line gives the reason.
+# the run reports copy_dir_unusable, and the line gives the reason. A permanent deletion request still open (APPROVED or
+# RUNNING) longer than --deletion-wait-minutes after it was requested fails the line (deletion_request_waiting).
 check_archival() {
     if [ -n "$ARCHIVE_PROBLEM" ]; then
         emit FAIL archival_proposal "$ARCHIVE_PROBLEM (DEPLOYMENT §3.1)"
         return 0
     fi
     if [ -z "$ARCHIVE_DIR" ]; then
-        emit SKIP archival_proposal "$ARCHIVE_NOT_SET_UP"
+        check_unarchived_deletion
         return 0
     fi
     if [ ! -d "$ARCHIVE_DIR" ]; then
@@ -779,10 +823,11 @@ EOF
         emit FAIL archival_proposal "history-archive status gave no answer within $STATUS_SECONDS s"
         return 0
     fi
-    set -- archive "$WORK/archive-status.json" "$arc"
+    set -- archive "$WORK/archive-status.json" "$arc" --deletion-wait-minutes "$DELETION_WAIT_MINUTES"
     [ -z "$copy_reason" ] || set -- "$@" --copy-reason "$copy_reason"
-    # A reconcile after a purge that did not end clean is an incident until the operator removes archive.sh's record
-    # (OPERATIONS_RUNBOOK §8); meanwhile archive.sh works on no run. The line fails and names it first.
+    # A reconcile after a purge or a deletion that did not end clean is an incident until the operator removes
+    # archive.sh's record (OPERATIONS_RUNBOOK §8); meanwhile archive.sh works on no run and no deletion request. The line
+    # fails and names it first.
     [ ! -f "$PURGE_INCIDENT" ] || set -- "$@" --purge-reconcile "$PURGE_INCIDENT"
     python3 "$SCRIPT_DIR/monitor_report.py" "$@" >"$WORK/archive.out" 2>"$WORK/archive-monitor.err" || true
     text=$(tr -d '\r' <"$WORK/archive.out" | grep -E '^(PASS|FAIL|SKIP) archival_proposal ' | head -n 1) || text=
