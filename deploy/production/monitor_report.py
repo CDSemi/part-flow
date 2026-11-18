@@ -1,15 +1,24 @@
-"""Turn a `status` or `reconcile` JSON report into the check lines of the monitoring scripts (P16-S6; OPERATIONS_RUNBOOK
-§2, §7, §9).
+"""Turn a `status`, `history-archive status` or `reconcile` JSON report into the check lines of the monitoring scripts
+(P16-S6; OPERATIONS_RUNBOOK §2, §7, §9, §11).
 
 Usage:
   python3 deploy/production/monitor_report.py status STATUS_JSON RC [--growth-file FILE]
+  python3 deploy/production/monitor_report.py archive ARCHIVE_STATUS_JSON RC [--copy-reason TEXT]
   python3 deploy/production/monitor_report.py reconcile REPORT RC
 
 `status` (deploy/production/check.sh): prints exactly four lines, `PASS|FAIL|SKIP <id> <reason>` for database, schema,
 backup_age and archival_proposal, plus optional `NOTE` lines; exit 0 no FAIL, 1 a FAIL (an invalid report included),
 2 usage error only. A report is valid only when it is one JSON document with report_version 1, command `status` and
 an exit_code equal to RC (the process status; P16-S1 exit-code rule). With --growth-file, a database that answered adds
-one line per UTC day (date, database bytes, Movement rows, Movement bytes) to FILE.
+one line per UTC day (date, database bytes, Movement rows, Movement bytes) to FILE. check.sh takes its archival_proposal
+line from `archive` instead of this one.
+
+`archive` (deploy/production/check.sh): prints exactly one line, `PASS|FAIL archival_proposal <reason>`, from the report
+of `python -m app.cli history-archive status` (the `maintenance` service): FAIL naming each finding
+(copy_confirmation_overdue, last_run_failed, archive_dir_unusable, copy_dir_unusable), FAIL when the report is not valid
+(report_version 1, command `history-archive status`, exit_code equal to RC) or carries an error, otherwise PASS with
+the open run, the last finished run and the archive folder's free space; exit 0 PASS, 1 FAIL, 2 usage error only.
+--copy-reason: why check.sh did not mount the copy folder; it explains copy_dir_unusable.
 
 `reconcile` (deploy/production/scheduled-reconcile.sh): `RECONCILE clean|mismatch|error <path> (<n> findings, <ms> ms)`
 and one `FAIL <check> <title>: ...` line per failing check; exit = the report's exit_code when it is valid, otherwise
@@ -209,6 +218,88 @@ def run_status(arguments):
 
 
 # ---------------------------------------------------------------------------
+# archive (history-archive status)
+# ---------------------------------------------------------------------------
+
+ARCHIVE_COMMAND = "history-archive status"
+
+
+def gib(value):
+    return f"{value / 1073741824:.1f} GiB" if is_int(value) else "? GiB"
+
+
+def days(seconds):
+    return f"{seconds / 86400:.1f} days" if is_int(seconds) else "? days"
+
+
+def run_text(run):
+    return f"run {run.get('id')} {run.get('state')}"
+
+
+def archive_line(document, rc, copy_reason=None):
+    """The archival_proposal line of one `history-archive status` report (`document` None = unreadable)."""
+    if (
+        document is None
+        or document.get("report_version") != 1
+        or document.get("command") != ARCHIVE_COMMAND
+        or not is_int(document.get("exit_code"))
+        or document.get("exit_code") != rc
+    ):
+        return line("FAIL", "archival_proposal", f"history-archive status could not run (exit {rc}); see archive-status.err")
+    error = document.get("error") if isinstance(document.get("error"), dict) else None
+    if error is not None:
+        return line("FAIL", "archival_proposal", error.get("message") or error.get("code") or "history-archive status failed")
+    open_run = section(document, "open_run")
+    last = section(document, "last_finished_run")
+    archive_dir = section(document, "archive_dir")
+    copy_dir = section(document, "copy_dir")
+    findings = [str(f) for f in document.get("findings") or []]
+    if findings:
+        texts = []
+        for code in findings:
+            if code == "copy_confirmation_overdue":
+                texts.append(f"{code}: {run_text(open_run)} has waited {days(open_run.get('waiting_seconds'))} for its"
+                             f" off-host copy confirmation (limit {document.get('max_wait_days')} days)")
+            elif code == "last_run_failed":
+                texts.append(f"{code}: {run_text(last)}: {last.get('failure_reason') or 'no reason recorded'}")
+            elif code == "archive_dir_unusable":
+                texts.append(f"{code}: the archive folder (PARTFLOW_ARCHIVE_DIR) is missing or not writable")
+            elif code == "copy_dir_unusable" and copy_reason:
+                texts.append(f"{code}: the copy folder (PARTFLOW_ARCHIVE_COPY_DIR) {copy_reason}")
+            elif code == "copy_dir_unusable":
+                texts.append(f"{code}: the copy folder (PARTFLOW_ARCHIVE_COPY_DIR) is not mounted, missing, not writable"
+                             " or not on another device")
+            else:
+                texts.append(code)
+        return line("FAIL", "archival_proposal", "; ".join(texts))
+    parts = []
+    if open_run:
+        text = run_text(open_run)
+        if is_int(open_run.get("waiting_seconds")):
+            text += (f" waiting {days(open_run.get('waiting_seconds'))} for its copy confirmation"
+                     f" (limit {document.get('max_wait_days')} days)")
+        parts.append(text)
+    else:
+        parts.append("no open run")
+    parts.append(f"last finished {run_text(last)}" if last else "no finished run")
+    parts.append(f"archive folder {gib(archive_dir.get('free_bytes'))} free")
+    if copy_dir:
+        parts.append(f"copy folder {gib(copy_dir.get('free_bytes'))} free")
+    return line("PASS", "archival_proposal", "; ".join(parts))
+
+
+def run_archive(arguments):
+    copy_reason = None
+    if len(arguments) == 4 and arguments[2] == "--copy-reason":
+        copy_reason = arguments[3]
+    elif len(arguments) != 2:
+        raise UsageError("archive needs ARCHIVE_STATUS_JSON RC [--copy-reason TEXT]")
+    text = archive_line(load(arguments[0]), parse_rc(arguments[1]), copy_reason)
+    print(text)
+    return 1 if text.startswith("FAIL ") else 0
+
+
+# ---------------------------------------------------------------------------
 # reconcile
 # ---------------------------------------------------------------------------
 
@@ -250,10 +341,12 @@ def parse_rc(text):
 
 def main(argv):
     try:
-        if not argv or argv[0] not in ("status", "reconcile"):
-            raise UsageError("the first argument must be status or reconcile")
+        if not argv or argv[0] not in ("status", "archive", "reconcile"):
+            raise UsageError("the first argument must be status, archive or reconcile")
         if argv[0] == "status":
             return run_status(argv[1:])
+        if argv[0] == "archive":
+            return run_archive(argv[1:])
         return run_reconcile(argv[1:])
     except UsageError as exc:
         print(f"monitor_report: {exc}", file=sys.stderr)

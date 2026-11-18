@@ -8,8 +8,8 @@ Administration"):
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_security_settings_schema.py`` with
-  ``0039_security_settings``;
+  ``tests/test_history_archive_schema.py`` with
+  ``0040_phase16_history_archive``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install holds the owner's defaults (every hour; 48 hourly, 30
   daily and 52 weekly backups kept) and the CHECKs refuse every value

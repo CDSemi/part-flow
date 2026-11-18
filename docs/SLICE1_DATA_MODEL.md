@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0039_security_settings`. The slice's own tables
+The schema described here is the current schema at migration head `0040_phase16_history_archive`. The slice's own tables
 were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -736,7 +736,7 @@ The constraints are listed in §17.
   | `PUT /api/policies/worker-sessions` | `{worker_session_timeout_minutes, badge_confirm_done, badge_confirm_queue, badge_confirm_undo}` |
   | `PUT /api/policies/correction-permissions` | `{undo_reason_required}` |
   | `PUT /api/policies/due-soon` | `{due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days}` |
-  | `PUT /api/policies/data-retention` (setting or clearing the period) | `{retention_period_months}` |
+  | `PUT /api/policies/data-retention` (History archival & purge) | `{retention_period_months, shortest_retention_months, archive_max_wait_days, archive_start_minute, archive_preview_seconds}`, with the metadata `{reason}` when the shortest allowed period changed (rows written before `0040_phase16_history_archive` hold only `{retention_period_months}`) |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
   | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, with the metadata `{mail_password_changed}`; never the password (rows written before `0037_phase17_two_step` have no `mail_timeout_seconds` key) |
@@ -744,7 +744,10 @@ The constraints are listed in §17.
   | `PUT /api/policies/password-rules` | `{password_min_length, password_max_length, password_require_digit, password_require_special, password_require_uppercase, password_require_lowercase}` |
   | `PUT /api/policies/remember-me` | `{remember_me_offered, remember_me_expires, remember_me_days}` |
 
-  The `sign-in`, `backups`, `mail-server` and `two-step` rows carry `actor_user_id` set to the signed-in User. A
+  The `sign-in`, `backups`, `mail-server`, `two-step` and `data-retention` rows carry `actor_user_id` set to the
+  signed-in User. Where the retention period was never saved, `0040_phase16_history_archive` set it to 24 months and
+  appended one `data-retention` row with no actor and the metadata `{"source": "migration", "revision":
+  "0040_phase16_history_archive"}`. A
   changed mail server password with nothing else changed is an effective change: the snapshots are equal and the
   metadata says `mail_password_changed: true`.
 - Password writes append `UPDATED` rows for entity type `User` with the snapshot `{password_set, password_temporary,
@@ -790,6 +793,11 @@ The constraints are listed in §17.
 - The seeded roles have no `CREATED` row; the first edit's `before_data` is the seed. Where
   `0033_phase17_super_user_role` completes an existing role named Super User instead of seeding one, it appends one
   `UPDATED` row with no actor and the metadata `{"source": "migration", "revision": "0033_phase17_super_user_role"}`.
+- `0040_phase16_history_archive` grants the new key `RUN_HISTORY_ARCHIVAL_AND_PURGE` to the role named Administrator
+  (the exactly cased name first, then any letter case) and to every role that holds every other key, and appends one
+  `UPDATED` row per role it changes, with no actor and the metadata `{"source": "migration", "revision":
+  "0040_phase16_history_archive"}`. Its downgrade revokes the key the same way, with `"downgrade": true` added to the
+  metadata.
 - The User theme preference (`users.theme_preference`) is a display preference written only by the User's own toggle
   (`PUT /api/session/theme-preference`). It is never audited, never in the `User` snapshot, and does not change
   `users.updated_at`. Its write locks only the User row (`FOR NO KEY UPDATE`) and does not take the user-administration
@@ -902,6 +910,18 @@ The migration `0037_phase17_two_step` adds the following (IMPLEMENTATION_ROADMAP
 The beyond-demand correction writes one append-only `work_order_allocations` row (with `exceeds_demand`, the mandatory
 reason, `actor_user_id`, and the before and requested figures in its command metadata) and no `audit_events` row. The
 Hot list removals it triggers are audited as described above.
+
+### History archival runs
+
+- Every change of state of a Movement-history archival run, and the confirmation of its off-host copy, appends one row
+  with `entity_type` `HistoryArchiveRun` and `entity_id` the run id as text, in the same transaction as the change.
+- The request in Administration is `CREATED` (`before_data` NULL); every later change is `UPDATED`. The snapshot is
+  every column of `history_archive_runs` (times as UTC ISO-8601 text) plus `"groups": ["MOVEMENT_HISTORY"]`.
+- Rows written from Administration (the request, a cancellation, the copy confirmation) carry `actor_user_id` and the
+  metadata `{"source": "web", "command": "request" | "cancel" | "copy_confirmation"}`. Rows written by the host job carry
+  no actor and the metadata `{"source": "maintenance", "command": "export" | "verify" | "copy" | "recover"}`.
+- The maintenance database role inserts these rows without `RETURNING`, because it may append audit rows but never
+  read them, and the trigger `trg_audit_events_maintenance_scope` refuses any other entity type from it (§17).
 
 ### The acting User
 
@@ -1149,7 +1169,8 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
 - `event_type NOT NULL` with `ck_audit_events_event_type`: `CREATED`, `UPDATED`, `DELETED`, `ROUTE_ADJUSTED`.
 - `entity_type NOT NULL` with `ck_audit_events_entity_type`: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`,
   `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`,
-  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`. Both lists widen additively.
+  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun`. Both lists widen
+  additively.
 - `entity_id NOT NULL` (no foreign key: polymorphic, §16).
 - `actor_reference` nullable; `actor_user_id` nullable FK `fk_audit_events_actor_user_id_users` to `users (id)`.
 - `occurred_at timestamptz NOT NULL`; `before_data jsonb` nullable; `after_data jsonb` nullable; `metadata jsonb`.
@@ -1162,6 +1183,10 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   form, created as raw SQL so the stored expression is the one the Application emits). It makes the adjustment's
   idempotency race-free.
 - Append-only guard: UPDATE and DELETE revoked, plus the raise trigger `trg_audit_events_forbid_mutation` (§16).
+- `trg_audit_events_maintenance_scope` (`0040_phase16_history_archive`): a row-level `BEFORE INSERT` trigger with `WHEN
+  (NEW.entity_type <> 'HistoryArchiveRun')` that refuses the row when the inserting role may write archive records
+  (INSERT on `history_archived_flows`) and does not own `audit_events`: the maintenance role appends only
+  `HistoryArchiveRun` rows.
 
 ### Policy and Worker Session tables
 
@@ -1181,10 +1206,20 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
   `due_soon_max_days` (default 7, `ck_application_policy_due_soon_max_days_range`, 0–365), with
   `ck_application_policy_due_soon_window_order` (`due_soon_min_days <= due_soon_max_days`)
   (`0025_phase13_display_settings`). They are `integer NOT NULL` and hold the one global Due Soon warning policy.
-- `retention_period_months integer NULL` with `ck_application_policy_retention_period_range` (NULL or 12–1200)
-  (`0027_phase13_retention_period`): the Movement-history retention period in whole months, NULL meaning no retention
-  period. It is the one policy column with no server default, because PROJECT_PROFILE §28 forbids a hard-coded
-  retention number. It is stored for the archival maintenance and read by no production path.
+- `retention_period_months integer NULL` (`0027_phase13_retention_period`) with
+  `ck_application_policy_retention_period_range` (`0040_phase16_history_archive`: NULL, or from
+  `shortest_retention_months` to 1200): the Movement-history retention period in whole months, NULL meaning no
+  retention period, so nothing is eligible for archival. It is the one policy column with no server default, because
+  PROJECT_PROFILE §28 forbids a hard-coded retention number; `0040_phase16_history_archive` set it to 24 months where no
+  `data-retention` audit row showed that it was ever saved (§16). Only the archival module
+  (`app.application.history_archive`) reads it; no production path does.
+- The other settings of History archival & purge (`0040_phase16_history_archive`), each `integer NOT NULL` with its
+  default and a range CHECK named `ck_application_policy_<column>_range`: `shortest_retention_months` (12; 1–1200), the
+  shortest allowed retention period, below which the run guard refuses a cutoff (§17 History archival tables);
+  `archive_max_wait_days` (7; 1–365), the days a run may wait for its copy confirmation before the host job's status
+  reports it; `archive_start_minute` (20; 0–59), the minute of the hour at which the host job's hourly work starts;
+  and `archive_preview_seconds` (90; 10–600), the time limit of a preview, whose default answers inside the 100
+  seconds after which Cloudflare ends a request. The downgrade refuses while one of them differs from its default.
 - `backup_interval_hours` (default 1, `ck_application_policy_backup_interval_hours_allowed`: 1, 2, 3, 4, 6, 8, 12 or
   24), `backup_keep_hourly` (default 48, `ck_application_policy_backup_keep_hourly_range`, 0–720), `backup_keep_daily`
   (default 30, `ck_application_policy_backup_keep_daily_range`, 1–3650) and `backup_keep_weekly` (default 52,
@@ -1249,9 +1284,11 @@ their names.
 
 **`role_permissions`** (`0028_phase13_users_roles`): one row per grant. PK `pk_role_permissions` `(role_id,
 permission)`; `role_id` FK `fk_role_permissions_role_id_roles` to `roles (id)`; `permission text NOT NULL` with
-`ck_role_permissions_permission_known`, which admits exactly the 35-key vocabulary (one key per PROJECT_PROFILE §20
-capability: `Permission` in `app/domain/enums.py`, repeated as a literal in the migration and pinned equal by a schema
-test). A later capability widens the CHECK; a key is never renamed.
+`ck_role_permissions_permission_known`, which admits exactly the 36-key vocabulary (one key per PROJECT_PROFILE §20
+capability: `Permission` in `app/domain/enums.py`, repeated as a literal in the migration that last widened it and pinned
+equal by a schema test). `0040_phase16_history_archive` appended `RUN_HISTORY_ARCHIVAL_AND_PURGE` and granted it to the
+role named Administrator and to every role holding every other key (§16). A later capability widens the CHECK; a key is
+never renamed.
 
 **`users`** (`0028_phase13_users_roles`): application accounts, never Workers.
 
@@ -1351,6 +1388,82 @@ allocated_by_worker_id IS NULL AND actor_user_id IS NOT NULL)`). A correction is
 reason, never a reversal, never attributed to a Scan Station or a Worker, and always recorded with a signed-in User. The
 downgrade refuses while any correction row exists; otherwise it drops the CHECK and the column.
 
+### History archival tables
+
+Migration `0040_phase16_history_archive` adds the two tables of Movement-history archival runs (Phase 16, archival
+design step 1: runs that export, verify and copy an archive without deleting anything).
+
+**`history_archive_runs`**: one row per run.
+
+- PK `pk_history_archive_runs` `id` (integer identity). `state text NOT NULL` with `ck_history_archive_runs_state`:
+  `APPROVED`, `RUNNING`, `WAITING_FOR_COPY`, `COMPLETED`, `NOTHING_ELIGIBLE`, `CANCELLED` or `FAILED`.
+- The request, which never changes: `cutoff timestamptz NOT NULL` (the start of a site-calendar day), `reason text NOT
+  NULL` (`ck_history_archive_runs_reason_length`, 1–500 characters), `requested_by_user_id` FK to `users (id)`,
+  `requested_at timestamptz NOT NULL DEFAULT now()`, and the counts its preview found: `preview_components`,
+  `preview_flows`, `preview_movements`, `preview_first_occurred_at`, `preview_last_occurred_at` and
+  `preview_archive_bytes` (`ck_history_archive_runs_preview_shape`).
+- The host job's progress, all nullable: `started_at`; `archive_name`, `exported_at`, `exported_components`,
+  `exported_flows`, `exported_movements`, `exported_lineage_edges`, `exported_assigned_routes`, `archive_bytes` and
+  `manifest_sha256`, set together (`ck_history_archive_runs_export_shape`; `ck_history_archive_runs_archive_name_shape`:
+  `run-<id>-<UTC stamp>`; `ck_history_archive_runs_manifest_sha256_shape`: 64 lowercase hexadecimal characters);
+  `verified_at` with `skipped_components` and `skipped_flows` (`ck_history_archive_runs_verify_shape`); `copied_at`;
+  `copy_confirmed_at` exactly with `copy_confirmed_by_user_id` FK to `users (id)`
+  (`ck_history_archive_runs_copy_confirmation_shape`); `finished_at`, set exactly in the final states (`COMPLETED`,
+  `NOTHING_ELIGIBLE`, `CANCELLED`, `FAILED`), and `cancelled_by_user_id` FK to `users (id)`, set exactly when
+  `CANCELLED` (`ck_history_archive_runs_finish_shape`); `result` (`EXPORT_ONLY`), set exactly when `COMPLETED`
+  (`ck_history_archive_runs_result_shape`); `failure_reason`, set exactly when `FAILED`
+  (`ck_history_archive_runs_failure_shape`, at most 2,000 characters). `ck_history_archive_runs_progress_shape` ties
+  `started_at` and `verified_at` to the states that need them, and `ck_history_archive_runs_completed_copy` lets a run
+  be `COMPLETED` only with `copied_at` or `copy_confirmed_at` set.
+- The partial UNIQUE expression index `uq_history_archive_runs_open` on `((true)) WHERE state IN ('APPROVED',
+  'RUNNING', 'WAITING_FOR_COPY')`: at most one run is open, even when two requests race.
+- The guard trigger `trg_history_archive_runs_guard_mutation` (row-level, `BEFORE INSERT OR DELETE OR UPDATE`) and
+  `trg_history_archive_runs_forbid_truncate` (function `partflow_history_archive_runs_guard_mutation`):
+  - an insert must be `APPROVED` with no progress, and its cutoff may not be newer than `now()` minus
+    `shortest_retention_months` (read from the policy row; compared in UTC with four days' allowance, because the
+    application, which alone knows the site's calendar and enforces the rule exactly, counts the months back from the
+    site's date, which can be a day ahead of UTC at the end of a month); that refusal reports SQLSTATE 23514 with the
+    trigger's name as its constraint, so the request answers 409;
+  - the request columns never change, a finished run never changes, and no run is deleted or truncated;
+  - the application role may only cancel an `APPROVED` or `WAITING_FOR_COPY` run and confirm the copy of a
+    `WAITING_FOR_COPY` run once;
+  - every other transition (`APPROVED` to `RUNNING` or `FAILED`; `RUNNING` to `WAITING_FOR_COPY`, `COMPLETED`,
+    `NOTHING_ELIGIBLE` or `FAILED`; `WAITING_FOR_COPY` to `COMPLETED` or `FAILED`) needs a role that may write archive
+    records (the maintenance role, or the owner) while the transaction-local setting `partflow.archive_run_id` names
+    the run; such a change never sets `copy_confirmed_at`, `copy_confirmed_by_user_id` or `cancelled_by_user_id`, and
+    the maintenance role (a role that may write archive records and does not own the table) changes a run in no other
+    way, so its credential alone can neither confirm a copy nor cancel a run.
+
+**`history_archived_flows`**: the carry-forward record of each flow of an archived component, written by the host job
+at export.
+
+- PK `pk_history_archived_flows` `(run_id, flow_id)`; `run_id` FK to `history_archive_runs (id)`; the composite FK
+  `fk_history_archived_flows_flow_id_part_number_quantity_flows` `(flow_id, part_number)` to `quantity_flows (id,
+  part_number)`, so a flow row cannot be deleted while its record exists, and `part_number` stays the canonical PN
+  (`ck_history_archived_flows_part_number_canonical`).
+- `component_id` (the smallest flow id of the component), `flow_status` (a closed status,
+  `ck_history_archived_flows_flow_status`), `movement_count`, `first_movement_id`, `last_movement_id`,
+  `first_occurred_at`, `last_occurred_at` (`ck_history_archived_flows_movement_shape`) and `content_sha256` (the SHA-256
+  of the flow's Movements as the archive writes them, `ck_history_archived_flows_content_sha256_shape`).
+- What the readers and checks derive from those Movements: `received_quantity`, `received_demand_id` and
+  `received_at` (the `RECEIVED` row; no FK to the demand line, as for the Movement), `adjusted_quantity` (the
+  effective `QUANTITY_ADJUSTED`), `stocked_quantity` with `stocked_area_id` and `scrapped_quantity` with
+  `scrapped_area_id` (FKs to `areas (id)`; the effective `STOCKED` and `SCRAPPED` rows), and `void_command_ids text[]
+  NOT NULL DEFAULT '{}'` (the commands of its undone splits and merges), each with its shape CHECK.
+- `skipped_at` (the component changed between the export and the verification) and `purged_at` (always NULL in step 1:
+  nothing is deleted), never both (`ck_history_archived_flows_skipped_or_purged`).
+- Indexes: `ix_history_archived_flows_flow_id`, and the partial UNIQUE `uq_history_archived_flows_flow_id_purged` on
+  `(flow_id) WHERE purged_at IS NOT NULL` (at most one purged record per flow).
+- The guard trigger `trg_history_archived_flows_guard_mutation` (row-level, `BEFORE INSERT OR DELETE OR UPDATE`) and
+  `trg_history_archived_flows_forbid_truncate` (function `partflow_history_archived_flows_guard_mutation`): a record is
+  inserted only while its run is `RUNNING` and `partflow.archive_run_id` names it; the only change is setting an empty
+  `skipped_at` (run `RUNNING`) or an empty `purged_at` (run `PURGING`, a state of a later step); no record is deleted.
+- No reader adds these records in step 1; readers will add only purged records once the purge exists.
+
+The downgrade of `0040_phase16_history_archive` refuses while a run, a record or a `HistoryArchiveRun` audit row exists,
+or while one of the new settings differs from its default; otherwise it drops both tables, the guards and the settings,
+restores the previous CHECKs and revokes `RUN_HISTORY_ARCHIVAL_AND_PURGE` (§16). The retention period stays as it is.
+
 ### Migration boundary of the slice
 
 The migrations that created this slice's schema (`0002_phase3_domain`, `0004_phase4_audit` and
@@ -1381,21 +1494,27 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
   - the owner (`POSTGRES_USER`, a superuser), which owns every object and is used only by `db`, `migrate` and
     `db-roles`;
   - `partflow_app`, used by the backend;
-  - `partflow_maintenance`, provisioned and used by no service until the archival maintenance exists.
+  - `partflow_maintenance`, used by the host job of Movement-history archival (`python -m app.cli history-archive`).
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (35 at head `0039_security_settings`) |
+| Class | `partflow_app` privileges | Tables (37 at head `0040_phase16_history_archive`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end) |
+| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end), `history_archive_runs` (the row trigger lets the application role only request, cancel and confirm a copy) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
-| `READ_ONLY` | SELECT | `alembic_version` |
+| `READ_ONLY` | SELECT | `alembic_version`, `history_archived_flows` |
 | `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
-- `partflow_maintenance` holds SELECT only, on `alembic_version`, `application_policy`, `areas`, `machines`,
-  `operations`, `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
-  `scan_stations`, `users`, `worker_sessions` and `workers`.
+- `partflow_maintenance` holds exactly what the archive export and the host job need
+  (`MAINTENANCE_PRIVILEGES`): SELECT on `alembic_version`, `application_policy`, `areas`, `assigned_route_steps`,
+  `assigned_routes`, `machines`, `operations`, `part_movements`, `part_numbers`, `quantity_flow_lineage`,
+  `quantity_flows`, `role_permissions`, `roles`, `scan_stations`, `users`, `work_order_demands`, `work_orders`,
+  `worker_sessions` and `workers`; SELECT and UPDATE on `history_archive_runs` (no INSERT: only a person requests a
+  run, in Administration) and SELECT, INSERT and UPDATE on `history_archived_flows`, whose guard triggers decide which
+  changes it may make; and INSERT, without SELECT, on `audit_events`, which
+  `trg_audit_events_maintenance_scope` limits to `HistoryArchiveRun` rows. It holds no DELETE anywhere and never reads
+  credentials, sign-in sessions, mail or Scan Station device tables.
 - Neither role holds any sequence privilege (identity columns), or `CREATE` on schema `public` or on the database.
   PUBLIC holds nothing on any PartFlow table or sequence, and default privileges for PUBLIC and both roles are removed.
 - The column guards on `areas` and `machines` stay trigger-only.
@@ -1451,7 +1570,7 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 | ERP fields and synchronization | deferred and not approved (IMPLEMENTATION_ROADMAP Deferred) | an isolated integration boundary; `device_event_id` stays compatible |
 | Offline scan synchronization | not planned (owner decision of 2026-11-13, PROJECT_PROFILE §32); production writes stay blocked while disconnected | `device_event_id` was chosen so that a future approved offline design needs no renaming (§20) |
 | Return of stocked quantity to active production | not part of PartFlow (owner decision of 2026-11-13, PROJECT_PROFILE §18) | none |
-| Administrative Movement-history archival and purge | planned in IMPLEMENTATION_ROADMAP Phase 16; the retention period is stored (`application_policy.retention_period_months`) but read by no production path | a separate privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
+| Purge of archived Movement history | IMPLEMENTATION_ROADMAP Phase 16: the archival runs exist and export, verify and copy an archive without deleting anything (`0040_phase16_history_archive`, §17 History archival tables); the purge, its deletion guard and the readers of the carry-forward record are the next step | a separate privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
 | Further file-import capabilities | deferred until an owner decision asks for them (IMPLEMENTATION_ROADMAP Deferred) | no schema change is planned |
 
 ---
@@ -1530,7 +1649,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | `GET /api/part-numbers/resolve` answers the server's canonical form of an entered PN for Add Part. |
+| 2026-11-17 | uncommitted | Migration head `0040_phase16_history_archive`: the history archival runs and their carry-forward records, their guards, the settings of History archival & purge with the 24-month retention default, the `HistoryArchiveRun` audit rows, the key `RUN_HISTORY_ARCHIVAL_AND_PURGE` and the maintenance role's privileges. |
+| 2026-11-17 | `1490927` | `GET /api/part-numbers/resolve` answers the server's canonical form of an entered PN for Add Part. |
 | 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: the password rules and Remember me columns of `application_policy`, their audit sections and `user_sessions.remembered`. |
 | 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, the passkey columns of `user_sign_in_challenges`, the lock order and the audit snapshot with passkeys. |
 | 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: the three tables of two-step sign-in, the two-step policy and mail server timeout columns, `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the lock order and the audit rows (the `two-step` section and the own email change). |

@@ -4,7 +4,8 @@
 Role. Three database roles exist on the production stack: the cluster
 bootstrap superuser (``POSTGRES_USER``, owns every object, runs
 ``migrate``, ``provision-roles`` and ``apply-grants``), ``partflow_app``
-(the backend) and ``partflow_maintenance`` (no service until P16-S8).
+(the backend) and ``partflow_maintenance`` (the history archival host job,
+``python -m app.cli history-archive``).
 
 - ``provision_roles`` creates or repairs the two LOGIN roles and sets their
   passwords as SCRAM verifiers (the plaintext never reaches SQL text).
@@ -38,7 +39,7 @@ from app.infrastructure.database_privileges import (
     APP_PRIVILEGES,
     GUARD_FUNCTION_SHA256,
     GUARD_TRIGGERS,
-    MAINTENANCE_SELECT,
+    MAINTENANCE_PRIVILEGES,
     TABLE_CLASSES,
 )
 
@@ -437,8 +438,8 @@ def _expected_privileges(
         return set()
     if grantee == roles.app:
         return set(APP_PRIVILEGES[TABLE_CLASSES[relation]])
-    if grantee == roles.maintenance and relation in MAINTENANCE_SELECT:
-        return {"SELECT"}
+    if grantee == roles.maintenance:
+        return set(MAINTENANCE_PRIVILEGES.get(relation, frozenset()))
     return set()
 
 
@@ -864,10 +865,12 @@ def apply_grants(
                 _privilege_list(APP_PRIVILEGES[table_class]), _table(table), app_role
             ),
         )
-        if table in MAINTENANCE_SELECT:
+        if table in MAINTENANCE_PRIVILEGES:
             _execute(
                 connection,
-                sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(_table(table), maintenance_role),
+                sql.SQL("GRANT {} ON TABLE {} TO {}").format(
+                    _privilege_list(MAINTENANCE_PRIVILEGES[table]), _table(table), maintenance_role
+                ),
             )
     _execute(
         connection,

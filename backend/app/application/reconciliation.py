@@ -140,6 +140,7 @@ CHECK_TABLES: Final[Mapping[str, tuple[str, ...]]] = {
     "i": ("work_order_demands", "work_orders"),
     "j": (
         "areas",
+        "history_archived_flows",
         "machine_asset_tag_config",
         "machines",
         "part_movements",
@@ -1962,6 +1963,16 @@ _CANONICAL_CHECKS: Final = (
         CANONICAL_PART_NUMBER_SQL,
         True,
     ),
+    # The carry-forward records of archived flows (history archival, Phase 16).
+    _CanonicalCheck(
+        "history_archived_flows",
+        "flow_id",
+        "part_number",
+        "HistoryArchivedFlow",
+        "ck_history_archived_flows_part_number_canonical",
+        CANONICAL_PART_NUMBER_SQL,
+        True,
+    ),
     _CanonicalCheck(
         "workers",
         "id",
@@ -2104,6 +2115,8 @@ def _check_j(context: _Context) -> _Outcome:
             " UNION ALL SELECT DISTINCT part_number, 'quantity_flows' FROM quantity_flows"
             " UNION ALL SELECT DISTINCT part_number, 'work_order_allocations'"
             " FROM work_order_allocations"
+            " UNION ALL SELECT DISTINCT part_number, 'history_archived_flows'"
+            " FROM history_archived_flows"
             ') pn GROUP BY value COLLATE "C"'
         )
     }

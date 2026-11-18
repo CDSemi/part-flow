@@ -32,6 +32,17 @@ x-app-database-environment: &app-database-environment
     DATABASE_PASSWORD_FILE: /run/secrets/partflow_app_password
     SITE_TIMEZONE: ${PARTFLOW_SITE_TIMEZONE:?Set PARTFLOW_SITE_TIMEZONE in .env.production}
 
+# The history-archive host job (`maintenance`) connects as the maintenance database role, which may read the history
+# and write archive records but never delete (P16-S4 role; history archival design §7.1, §8.3).
+x-maintenance-database-environment: &maintenance-database-environment
+    DATABASE_HOST: db
+    DATABASE_PORT: "5432"
+    DATABASE_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env.production}
+    # Fixed: equals app.application.database_roles.MAINTENANCE_ROLE.
+    DATABASE_USER: partflow_maintenance
+    DATABASE_PASSWORD_FILE: /run/secrets/partflow_maintenance_password
+    SITE_TIMEZONE: ${PARTFLOW_SITE_TIMEZONE:?Set PARTFLOW_SITE_TIMEZONE in .env.production}
+
 services:
     db:
         # Debian variant pinned to the development minor: collation and the
@@ -244,6 +255,44 @@ services:
               source: ${PARTFLOW_BACKUP_DIR:?Set PARTFLOW_BACKUP_DIR in .env.production}
               target: /backups
               read_only: true
+              bind:
+                  create_host_path: false
+        restart: "no"
+        healthcheck:
+            disable: true
+        deploy:
+            resources:
+                limits:
+                    memory: ${PARTFLOW_OPS_MEMORY:-512m}
+                    cpus: "${PARTFLOW_OPS_CPUS:-1.0}"
+        logging: *logging
+
+    # One-shot history-archive job (Movement-history archival, build step 1: it exports and never deletes):
+    # `run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance settings|recover|next|export --run N|verify --run N|
+    # copy --run N|status` (deploy/production/archive.sh; check.sh runs `status`). The archive folder is mounted here
+    # only, owned by the account that runs archive.sh (mode 0700); without PARTFLOW_ARCHIVE_DIR the mount names a path
+    # that does not exist, so a run fails instead of writing anywhere else. The optional off-host copy folder
+    # (PARTFLOW_ARCHIVE_COPY_DIR): when it is set, the job is told to copy into /archive-copy, and archive.sh and
+    # check.sh mount it there (a long-syntax bind that never creates the host path, in a generated override file;
+    # never `-v`) only while it exists on a file system that is neither the archive folder's nor `/`; otherwise the job
+    # finds /archive-copy unusable and the run waits for a copy confirmation (DEPLOYMENT §3.1). The release
+    # identity recorded in each archive comes from the image (RELEASE_TAG/RELEASE_COMMIT).
+    maintenance:
+        image: partflow/backend:${PARTFLOW_RELEASE:?Set PARTFLOW_RELEASE in .env.production}
+        pull_policy: never
+        profiles: [ops]
+        entrypoint: ["python", "-m", "app.cli", "history-archive"]
+        environment:
+            <<: *maintenance-database-environment
+            PARTFLOW_ARCHIVE_DIR: /archive
+            # Empty (no copy folder) unless PARTFLOW_ARCHIVE_COPY_DIR is set in .env.production.
+            PARTFLOW_ARCHIVE_COPY_DIR: ${PARTFLOW_ARCHIVE_COPY_DIR:+/archive-copy}
+        secrets: [partflow_maintenance_password]
+        networks: [internal]
+        volumes:
+            - type: bind
+              source: ${PARTFLOW_ARCHIVE_DIR:-/partflow-archive-dir-is-not-set}
+              target: /archive
               bind:
                   create_host_path: false
         restart: "no"

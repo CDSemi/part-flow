@@ -4,29 +4,16 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test } from 'vitest';
 
-import {
-  formatRetentionPeriod,
-  parseRetentionMonths,
-} from './retention-period';
+import { formatRetentionPeriod } from './retention-period';
 
-// The Movement-history retention period helpers (Administration →
-// History archival & purge) and the guard that nothing outside that
-// section reads the stored period: it is configuration for later
-// archival maintenance, never production workflow logic
-// (PROJECT_PROFILE §28).
-
-test('RP-1: parseRetentionMonths admits only whole months from 12 to 1200', () => {
-  expect(parseRetentionMonths('12')).toBe(12);
-  expect(parseRetentionMonths('1200')).toBe(1200);
-  expect(parseRetentionMonths(' 24 ')).toBe(24);
-  // Number semantics, as the Worker session timeout field.
-  expect(parseRetentionMonths('1e2')).toBe(100);
-  for (const text of ['', '   ', '11', '1201', '12.5', 'abc', '-12']) {
-    expect(parseRetentionMonths(text)).toBeNull();
-  }
-});
+// The Movement-history retention period wording (Administration →
+// History archival & purge) and the guard that only the settings API and
+// that section read the stored period: production workflows never do
+// (PROJECT_PROFILE §28). The ranges are the server's.
 
 test('RP-2: formatRetentionPeriod states the months in years and months', () => {
+  expect(formatRetentionPeriod(1)).toBe('1 month');
+  expect(formatRetentionPeriod(6)).toBe('6 months');
   expect(formatRetentionPeriod(12)).toBe('1 year');
   expect(formatRetentionPeriod(13)).toBe('1 year 1 month');
   expect(formatRetentionPeriod(18)).toBe('1 year 6 months');

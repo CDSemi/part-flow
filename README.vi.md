@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `aa6287d` cộng các thay đổi
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi
 > chưa commit ngày 2026-11-17.
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
@@ -80,9 +80,9 @@ cách nói của người dùng:
   vai trò và quyền, thiết lập đăng nhập, thiết lập hiển thị Production Board và
   chính sách Due Soon.
 
-Chưa có: lưu trữ (archival) và xóa vĩnh viễn (purge) lịch sử Movement cũ (thời hạn
-lưu giữ có thể được lưu nhưng chưa có gì được lưu trữ hay xóa), và phần thiết lập
-Scan behavior trong Administration. Trạng thái hiện thực đầy đủ nằm trong
+Chưa có: xóa vĩnh viễn (purge) lịch sử Movement cũ (các lần chạy lưu trữ
+(archival) xuất nó ra các tệp lưu trữ đã kiểm tra nhưng chưa xóa gì), và phần
+thiết lập Scan behavior trong Administration. Trạng thái hiện thực đầy đủ nằm trong
 [`docs/IMPLEMENTATION_ROADMAP.vi.md`](./docs/IMPLEMENTATION_ROADMAP.vi.md).
 
 ## Đọc tiếp ở đâu
@@ -273,7 +273,7 @@ docker compose up --build -V
 ## Migration database (Alembic)
 
 Áp dụng các migration (từ baseline no-op của repository foundation đến head hiện
-tại, `0038_phase17_passkeys`):
+tại, `0040_phase16_history_archive`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -462,7 +462,7 @@ Tùy chọn: `--check ID` (lặp lại được, `a` đến `j`), `--statement-t
 `0` sạch, `1` không khớp, `2` không chạy được. Exit status chỉ có giá trị khi báo
 cáo là một tài liệu JSON hoàn chỉnh có `exit_code` bằng đúng nó; báo cáo rỗng hoặc
 không phân tích được nghĩa là không chạy được. Check (g) báo `not_applicable` cho
-đến khi có archival lịch sử Movement, và check (h) báo `not_applicable` trên
+đến khi có purge của archival lịch sử Movement, và check (h) báo `not_applicable` trên
 database không có các database role của PartFlow, trong đó có development stack.
 Không chạy migration trong lúc lệnh đang chạy. Các check, dạng lệnh production và
 quy tắc vận hành nằm trong
@@ -553,9 +553,13 @@ Bộ test pytest gồm ba loại:
   `0036_phase17_outgoing_mail`, địa chỉ email của user và mail server gửi đi;
   `tests/test_phase17_two_step_schema.py` bao phủ `0037_phase17_two_step`,
   schema của xác thực hai bước (two-step sign-in);
-  `tests/test_phase17_passkeys_schema.py` bao phủ head duy nhất
-  `0038_phase17_passkeys`, schema của passkey, và sự tương đồng giữa model và
-  migration.
+  `tests/test_phase17_passkeys_schema.py` bao phủ `0038_phase17_passkeys`,
+  schema của passkey; `tests/test_security_settings_schema.py` bao phủ
+  `0039_security_settings`, quy tắc mật khẩu và Remember me;
+  `tests/test_history_archive_schema.py` bao phủ head duy nhất
+  `0040_phase16_history_archive`, các lần chạy và bản ghi chuyển tiếp của
+  archival lịch sử cùng các chốt chặn của chúng, và sự tương đồng giữa model
+  và migration.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` và
   `tests/test_revision_cli.py` bao phủ write gate (409 `release_mismatch`, 503
   `not_ready`), job `migrate` (một transaction, các từ chối, lock) và báo cáo
@@ -781,7 +785,8 @@ docs/              canonical project documentation
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Head migration là `0038_phase17_passkeys`, được bao phủ bởi `tests/test_phase17_passkeys_schema.py`. |
+| 2026-11-17 | uncommitted | Head migration là `0040_phase16_history_archive`, được bao phủ bởi `tests/test_history_archive_schema.py`; các lần chạy archival xuất lịch sử Movement cũ mà không xóa nó. |
+| 2026-11-17 | `1fc96e1` | Head migration là `0038_phase17_passkeys`, được bao phủ bởi `tests/test_phase17_passkeys_schema.py`. |
 | 2026-11-17 | `aa6287d` | Head migration là `0037_phase17_two_step`, được bao phủ bởi `tests/test_phase17_two_step_schema.py`. |
 | 2026-11-16 | `252f678` | Head migration là `0036_phase17_outgoing_mail`, được bao phủ bởi `tests/test_phase17_outgoing_mail_schema.py`. |
 | 2026-11-16 | `c1f042b` | Head migration là `0035_phase16_backup_policy`, được bao phủ bởi `tests/test_phase16_backup_policy_schema.py`. |

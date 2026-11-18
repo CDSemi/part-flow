@@ -1065,6 +1065,11 @@ def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
         "fk_audit_events_actor_user_id_users",
         "fk_machine_lifecycle_events_actor_user_id_users",
         "fk_work_order_allocations_actor_user_id_users",
+        # Phase 16: the people who request, confirm the copy of or cancel
+        # a history archival run.
+        "fk_history_archive_runs_requested_by_user_id_users",
+        "fk_history_archive_runs_copy_confirmed_by_user_id_users",
+        "fk_history_archive_runs_cancelled_by_user_id_users",
     }
     assert "badge_barcode" not in {
         str(column["name"]) for column in sa.inspect(db_engine).get_columns("users")
@@ -1264,6 +1269,8 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/api/route_adjustments.py",
     # Phase 15 slice 1: the Work Order import routes.
     "app/api/work_order_import.py",
+    # Phase 16: the history archival routes that require a key.
+    "app/api/history_archive.py",
 }
 
 

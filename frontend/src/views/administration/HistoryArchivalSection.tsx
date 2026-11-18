@@ -1,190 +1,293 @@
 import { useState } from 'react';
 
 import { ApiError } from '../../api/client';
+import { listArchiveRuns } from '../../api/history-archive';
 import { getRetentionPolicy, updateRetentionPolicy } from '../../api/policies';
+import type { RetentionPolicy } from '../../api/policies';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
+import type { ApiData } from '../../api/use-api-data';
 import { useConnectivity } from '../../app/connectivity-context';
 import { useSession } from '../../app/session-context';
-import { useUnsavedWork } from '../../app/unsaved-work';
+import { useCloseGuard } from '../../components/close-guard';
+import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
+import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
+import { ArchivePreviewCard } from './ArchivePreviewCard';
+import { ArchiveRunsCard } from './ArchiveRunsCard';
+import { formatRetentionPeriod } from './retention-period';
 import {
-  RETENTION_MONTHS_MAX,
-  RETENTION_MONTHS_MIN,
-  formatRetentionPeriod,
-  parseRetentionMonths,
-} from './retention-period';
-import {
-  ReadOnlyValues,
+  AdminField,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
-// Administration → History archival & purge (Phase 13; GUI_DESIGN §9
-// Data & system, PROJECT_PROFILE §28): the real Movement-history retention
-// period — no retention period, or whole months from 12 to 1200 —
-// stored in the server's application policy
-// (`/api/policies/data-retention`), audited and re-validated by the
-// server. It is configuration only: saving it archives, deletes or
-// schedules nothing, and no production workflow reads it. Archival and
-// purge runs are not available yet and the section says so — no
-// control pretends otherwise. Without the Configure system settings
-// permission the period reads as text.
+// Administration → History archival & purge (Phase 16, archival design B
+// step 1; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings of the
+// Movement-history archival (`/api/policies/data-retention` — the
+// retention period, the shortest allowed period, the Start minute of the
+// server's archival job, the preview time limit and the wait limit), the
+// preview of what a run would export at a cutoff and the request of a
+// run, and the table of runs with Cancel and Confirm off-host copy. In
+// this step a run exports the history to archive files and deletes
+// nothing. Every change needs the Run history archival and purge
+// permission (the server checks it); every signed-in user reads the
+// settings and the runs, with one view-only line under the header when
+// the user may not change them. The server validates every value and
+// owns every rule: the section shows its answers as given.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'data-retention')?.subtitle ??
   '';
 
-const PERIOD_ERROR = 'Enter a whole number of months from 12 to 1200.';
-const UNKNOWN_OUTCOME_MESSAGE =
-  'The server did not answer — this change may or may not have been saved. Check the retention period before trying again; saving the same value again is safe.';
+const PERMISSION = 'RUN_HISTORY_ARCHIVAL_AND_PURGE';
 
 export function HistoryArchivalSection() {
+  const canWrite = useSession().can(PERMISSION);
   const { status } = useConnectivity();
+  const [editing, setEditing] = useState(false);
   const writeBlocked = status !== 'connected';
-  const canWrite = useSession().can('CONFIGURE_SYSTEM_SETTINGS');
   const policyData = useApiData(getRetentionPolicy);
-
-  const header = (
-    <>
-      <SectionHeader title="History archival & purge" subtitle={SUBTITLE} />
-      {canWrite ? null : (
-        <ViewOnlyNote permission="CONFIGURE_SYSTEM_SETTINGS" />
-      )}
-    </>
-  );
-
-  if (policyData.state.status === 'loading') {
-    return (
-      <>
-        {header}
-        <LoadingState label="Loading section" />
-      </>
-    );
-  }
-  if (policyData.state.status === 'error') {
-    return (
-      <>
-        {header}
-        <ErrorState
-          message="History retention settings could not be loaded."
-          detail={policyData.state.message}
-          onRetry={policyData.reload}
-        />
-      </>
-    );
-  }
+  const runsData = useApiData(listArchiveRuns);
+  const policy =
+    policyData.state.status === 'ready' ? policyData.state.data : null;
 
   return (
     <>
-      {header}
-      <div className="admin-config">
-        <h2>Retention period</h2>
-        <p className="admin-confighelp">
-          How long Movement history stays in the PartFlow database before
-          archival maintenance may move it to archive files. Saving the period
-          archives or deletes nothing, and it never affects production scanning.
-        </p>
-        {canWrite ? (
-          <RetentionPeriodForm
-            savedMonths={policyData.state.data.retentionPeriodMonths}
+      <SectionHeader title="History archival & purge" subtitle={SUBTITLE} />
+      {canWrite ? null : <ViewOnlyNote permission={PERMISSION} />}
+      <div className="admin-cards admin-cards-two">
+        <SettingsCard
+          title="Retention and schedule"
+          description="How long Movement history stays in the database, and when the server's archival job does its work."
+          edit={
+            canWrite && policy
+              ? {
+                  label: 'Edit retention and schedule…',
+                  disabled: writeBlocked,
+                  onClick: () => setEditing(true),
+                }
+              : undefined
+          }
+        >
+          <RetentionSettingsBody
+            policyData={policyData}
+            editing={editing}
             writeBlocked={writeBlocked}
-            onSaved={policyData.reload}
-            onOutcomeUnknown={policyData.revalidate}
+            onClose={(wrote) => {
+              setEditing(false);
+              if (wrote) policyData.reload();
+            }}
           />
-        ) : (
-          <ReadOnlyValues
-            rows={[
-              {
-                label: 'Retention period',
-                value:
-                  policyData.state.data.retentionPeriodMonths === null
-                    ? 'No retention period'
-                    : formatRetentionPeriod(
-                        policyData.state.data.retentionPeriodMonths,
-                      ),
-              },
-            ]}
+        </SettingsCard>
+        {canWrite ? (
+          <ArchivePreviewCard
+            previewSeconds={policy?.previewSeconds ?? null}
+            writeBlocked={writeBlocked}
+            onRunsChanged={runsData.reload}
           />
-        )}
-        <h2>Archival and purge runs</h2>
-        <p className="admin-confighelp">
-          Archival and purge runs — by retention period, data-size threshold or
-          manual request — are not available yet. Nothing is archived or purged:
-          all Movement history stays in the database.
-        </p>
+        ) : null}
+      </div>
+      <div className="admin-cards admin-cards-stack">
+        <ArchiveRunsCard
+          runsData={runsData}
+          canWrite={canWrite}
+          writeBlocked={writeBlocked}
+        />
       </div>
     </>
   );
 }
 
-function RetentionPeriodForm({
-  savedMonths,
+/** The months of a period in words: `6 months`, `24 months (2 years)`. */
+function formatPeriodValue(months: number): string {
+  return months < 12
+    ? formatRetentionPeriod(months)
+    : `${months} months (${formatRetentionPeriod(months)})`;
+}
+
+function RetentionSettingsBody({
+  policyData,
+  editing,
   writeBlocked,
-  onSaved,
-  onOutcomeUnknown,
+  onClose,
 }: {
-  /** The stored period; null = no retention period. */
-  savedMonths: number | null;
+  policyData: ApiData<RetentionPolicy>;
+  editing: boolean;
   writeBlocked: boolean;
-  onSaved: () => void;
-  /** Background re-read of the stored period after a save whose answer
-   * was lost — never tearing the form down, so the notice stays. */
-  onOutcomeUnknown: () => void;
+  onClose: (wrote: boolean) => void;
 }) {
-  const [keepPeriod, setKeepPeriod] = useState(savedMonths !== null);
-  const [text, setText] = useState(
-    savedMonths === null ? '' : String(savedMonths),
+  const { state } = policyData;
+  if (state.status === 'loading') {
+    return <LoadingState label="Loading retention and schedule" />;
+  }
+  if (state.status === 'error') {
+    return (
+      <ErrorState
+        message="The retention and schedule settings could not be loaded."
+        detail={state.message}
+        onRetry={policyData.reload}
+      />
+    );
+  }
+  const policy = state.data;
+  return (
+    <>
+      <div className="admin-configpreview">
+        <div className="prow">
+          <span className="k">Retention period</span>
+          <span className="v">
+            {policy.retentionPeriodMonths === null
+              ? 'No retention period'
+              : formatPeriodValue(policy.retentionPeriodMonths)}
+          </span>
+        </div>
+        <div className="prow">
+          <span className="k">Shortest allowed period</span>
+          <span className="v">
+            {formatPeriodValue(policy.shortestRetentionMonths)}
+          </span>
+        </div>
+        <div className="prow">
+          <span className="k">Start minute</span>
+          <span className="v">{`${policy.startMinute} minutes past each hour`}</span>
+        </div>
+        <div className="prow">
+          <span className="k">Preview time limit</span>
+          <span className="v">{`${policy.previewSeconds} seconds`}</span>
+        </div>
+        <div className="prow">
+          <span className="k">Report a waiting run after</span>
+          <span className="v">{`${policy.maxWaitDays} days`}</span>
+        </div>
+      </div>
+      {editing ? (
+        <RetentionSettingsDialog
+          saved={policy}
+          writeBlocked={writeBlocked}
+          onClose={onClose}
+        />
+      ) : null}
+    </>
   );
+}
+
+const WHOLE_NUMBER_ERROR = 'Enter a whole number.';
+const UNKNOWN_OUTCOME =
+  'The server did not answer — the settings may or may not have been saved. Close this window to reload them before trying again.';
+
+/** The whole number in `text`, else null (never rounded; the server
+ * checks the range and answers its own message). */
+function parseWhole(text: string): number | null {
+  if (text.trim() === '') return null;
+  const value = Number(text);
+  return Number.isInteger(value) ? value : null;
+}
+
+function RetentionSettingsDialog({
+  saved,
+  writeBlocked,
+  onClose,
+}: {
+  saved: RetentionPolicy;
+  writeBlocked: boolean;
+  /** Close request; `wrote` = a save was sent (re-read the settings). */
+  onClose: (wrote: boolean) => void;
+}) {
+  const [keepPeriod, setKeepPeriod] = useState(
+    saved.retentionPeriodMonths !== null,
+  );
+  const [periodText, setPeriodText] = useState(
+    String(saved.retentionPeriodMonths ?? ''),
+  );
+  const [shortestText, setShortestText] = useState(
+    String(saved.shortestRetentionMonths),
+  );
+  const [reason, setReason] = useState('');
+  const [minuteText, setMinuteText] = useState(String(saved.startMinute));
+  const [secondsText, setSecondsText] = useState(String(saved.previewSeconds));
+  const [daysText, setDaysText] = useState(String(saved.maxWaitDays));
   const [busy, setBusy] = useState(false);
+  const [wrote, setWrote] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [savedNote, setSavedNote] = useState(false);
 
-  const months = keepPeriod ? parseRetentionMonths(text) : null;
-  const invalid = keepPeriod && months === null;
-  const dirty = months !== savedMonths;
-  // An entry that is not a valid period yet is unsaved input as well.
-  useUnsavedWork(dirty || invalid);
-
-  const choose = (keep: boolean) => {
-    setKeepPeriod(keep);
-    setSavedNote(false);
+  const period = keepPeriod ? parseWhole(periodText) : null;
+  const shortest = parseWhole(shortestText);
+  const minute = parseWhole(minuteText);
+  const seconds = parseWhole(secondsText);
+  const days = parseWhole(daysText);
+  const periodInvalid = keepPeriod && period === null;
+  const invalid =
+    periodInvalid ||
+    shortest === null ||
+    minute === null ||
+    seconds === null ||
+    days === null;
+  const shortestChanged =
+    shortest !== null && shortest !== saved.shortestRetentionMonths;
+  // Only the valid settings whose value differs from the stored ones.
+  const patch: Partial<Omit<RetentionPolicy, 'updatedAt'>> = {
+    ...(!periodInvalid && period !== saved.retentionPeriodMonths
+      ? { retentionPeriodMonths: period }
+      : {}),
+    ...(shortestChanged ? { shortestRetentionMonths: shortest } : {}),
+    ...(minute !== null && minute !== saved.startMinute
+      ? { startMinute: minute }
+      : {}),
+    ...(seconds !== null && seconds !== saved.previewSeconds
+      ? { previewSeconds: seconds }
+      : {}),
+    ...(days !== null && days !== saved.maxWaitDays
+      ? { maxWaitDays: days }
+      : {}),
   };
+  const changed = Object.keys(patch).length > 0;
+
+  const guard = useCloseGuard({
+    dirty: invalid || changed,
+    busy,
+    onClose: () => onClose(wrote),
+  });
 
   const submit = async () => {
-    if (invalid) return;
+    if (busy || writeBlocked || invalid) return;
+    if (!changed) {
+      onClose(wrote);
+      return;
+    }
     setBusy(true);
     setServerError(null);
-    setSavedNote(false);
+    setWrote(true);
     try {
-      await updateRetentionPolicy(months);
-      setSavedNote(true);
-      onSaved();
+      // The reason travels with a change of the shortest allowed period
+      // only; the server requires it then and answers its own message.
+      await updateRetentionPolicy(patch, shortestChanged ? reason : undefined);
+      onClose(true);
     } catch (error) {
-      if (error instanceof ApiError && !writeOutcomeUnknown(error)) {
-        setServerError(error.message);
-      } else {
-        // No answer, a timeout or a 5xx: the PUT may have committed.
-        // Re-read the stored period so Save is judged against it.
-        setServerError(UNKNOWN_OUTCOME_MESSAGE);
-        onOutcomeUnknown();
-      }
-    } finally {
+      setServerError(
+        writeOutcomeUnknown(error) || !(error instanceof ApiError)
+          ? UNKNOWN_OUTCOME
+          : error.message,
+      );
       setBusy(false);
     }
   };
 
+  const title = 'Retention and schedule';
   return (
-    <>
+    <ModalDialog label={title} onClose={guard.requestClose}>
+      <h3>{title}</h3>
       <div className="admin-form">
         <label className="admin-check">
           <input
             type="radio"
             name="retention-period-choice"
             checked={!keepPeriod}
-            onChange={() => choose(false)}
+            disabled={busy}
+            onChange={() => setKeepPeriod(false)}
           />
           <span>No retention period</span>
         </label>
@@ -193,56 +296,162 @@ function RetentionPeriodForm({
             type="radio"
             name="retention-period-choice"
             checked={keepPeriod}
-            onChange={() => choose(true)}
+            disabled={busy}
+            onChange={() => setKeepPeriod(true)}
           />
           <span>Keep a set period of history</span>
         </label>
-      </div>
-      {keepPeriod ? (
-        <>
-          <div className="admin-configgrid">
-            <label>
-              Retention period (months)
+        {keepPeriod ? (
+          <>
+            <AdminField label="Retention period (months)">
               <input
                 className="field mono"
                 type="number"
-                min={RETENTION_MONTHS_MIN}
-                max={RETENTION_MONTHS_MAX}
                 step={1}
-                value={text}
-                onChange={(event) => {
-                  setText(event.target.value);
-                  setSavedNote(false);
-                }}
+                value={periodText}
+                disabled={busy}
+                onChange={(event) => setPeriodText(event.target.value)}
               />
-            </label>
+            </AdminField>
+            {period === null ? (
+              <div className="err" role="alert">
+                {WHOLE_NUMBER_ERROR}
+              </div>
+            ) : (
+              <p className="admin-fieldhelp">
+                {`Movement history older than ${formatRetentionPeriod(period)} can be archived.`}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="admin-fieldhelp">
+            Nothing is eligible for archival without a retention period.
+          </p>
+        )}
+        <AdminField label="Shortest allowed period (months)">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={shortestText}
+            disabled={busy}
+            onChange={(event) => setShortestText(event.target.value)}
+          />
+        </AdminField>
+        {shortest === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
           </div>
-          {months === null ? (
-            <div className="err" role="alert">
-              {PERIOD_ERROR}
-            </div>
-          ) : (
-            <p className="admin-confighelp">
-              {`Retention period: ${formatRetentionPeriod(months)}.`}
-            </p>
-          )}
-        </>
-      ) : null}
-      <ServerErrorNote message={serverError} />
-      {savedNote ? (
-        <div className="admin-savednote" role="status">
-          ✓ Retention period saved.
-        </div>
-      ) : null}
+        ) : null}
+        {shortestChanged ? (
+          <AdminField
+            label={
+              <>
+                Reason for changing the shortest allowed period{' '}
+                <span className="field-required">(required)</span>
+              </>
+            }
+          >
+            <textarea
+              className="field"
+              rows={3}
+              maxLength={500}
+              value={reason}
+              disabled={busy}
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </AdminField>
+        ) : null}
+        <AdminField label="Start minute (0–59)">
+          <input
+            className="field mono"
+            type="number"
+            min={0}
+            max={59}
+            step={1}
+            value={minuteText}
+            disabled={busy}
+            onChange={(event) => setMinuteText(event.target.value)}
+          />
+        </AdminField>
+        {minute === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            The archival job on the server does its hourly work from this
+            minute.
+          </p>
+        )}
+        <AdminField label="Preview time limit (seconds)">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={secondsText}
+            disabled={busy}
+            onChange={(event) => setSecondsText(event.target.value)}
+          />
+        </AdminField>
+        {seconds === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            Keep it below the wait of every proxy in front of PartFlow: through
+            Cloudflare a request ends after 100 seconds.
+          </p>
+        )}
+        <AdminField label="Report a waiting run after (days)">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={daysText}
+            disabled={busy}
+            onChange={(event) => setDaysText(event.target.value)}
+          />
+        </AdminField>
+        {days === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            When a run waits longer than this for its off-host copy to be
+            confirmed, the server's monitoring check reports it.
+          </p>
+        )}
+        <ServerErrorNote message={serverError} />
+      </div>
       <div className="row">
         <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
+          Cancel (Esc)
+        </button>
+        <button
           className="bigbtn primary"
-          disabled={writeBlocked || busy || invalid || !dirty}
+          disabled={busy || writeBlocked || invalid}
           onClick={() => void submit()}
         >
-          Save
+          Save changes
         </button>
       </div>
-    </>
+      {guard.asking ? (
+        <UnsavedChangesDialog
+          saveDisabled={writeBlocked || invalid}
+          onKeepEditing={guard.keepEditing}
+          onSave={() => void submit()}
+          onDiscard={() => onClose(wrote)}
+        >
+          You have unsaved changes to the retention and schedule settings.
+        </UnsavedChangesDialog>
+      ) : null}
+    </ModalDialog>
   );
 }

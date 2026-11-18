@@ -3,12 +3,13 @@ compose.production.build.yaml, .env.production.example, both Dockerfiles, the ba
 configuration and the web tier configuration in frontend/nginx/).
 
 Case mapping (P16-S2 SPEC section 6.2, amended by P16-S3 SPEC section 6.2, P16-S4 SPEC section 6.4, P16-S5 SPEC
-section 6.3 and P16-S6 SPEC section 6.2):
-  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20..ST-23, ST-25)
+section 6.3 and P16-S6 SPEC section 6.2; Movement-history archival step 1 adds ST-26 and NX-16):
+  Compose model (resolved by `docker compose config`)  -> ComposeModel (ST-1..ST-12, ST-14..ST-17, ST-20..ST-23, ST-25,
+                                                          ST-26)
   Dockerfiles and the development default              -> Dockerfiles (ST-13)
   Liveness probes and the release meta (P16-S3)        -> ReleaseArtifacts (ST-18, ST-19)
   Backend production logging configuration (P16-S6)    -> LoggingConfiguration (ST-24)
-  nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-14)
+  nginx configuration (parsed as text)                 -> WebTier (NX-1..NX-16)
 
 Run from anywhere on a host with the docker CLI (Compose v2) and git:
   python -B -m unittest discover -s deploy/production/tests -p 'test*.py'
@@ -47,10 +48,19 @@ RELEASE = "static-test"
 # The commit the generated env passes to the build file (ST-12); any 40-hex value.
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 LONG_RUNNING = {"db", "backend", "web"}
-PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles", "backup-tools", "status")
+PARTFLOW_IMAGES = ("backend", "web", "migrate", "db-roles", "backup-tools", "status", "maintenance")
 # P16-S5: the backup directory's container path (backup-tools read-write, migrate and, P16-S6, status read-only; ST-4,
 # ST-21, ST-23).
 BACKUP_TARGET = "/backups"
+# Movement-history archival step 1: the archive folder's container path in the maintenance service (ST-4, ST-26), the
+# copy folder's (archive.sh and check.sh mount it with `-v` when it is usable), and the source Compose falls back to
+# without PARTFLOW_ARCHIVE_DIR (a path that does not exist, so a run fails instead of writing elsewhere).
+ARCHIVE_TARGET = "/archive"
+ARCHIVE_COPY_TARGET = "/archive-copy"
+ARCHIVE_UNSET_SOURCE = "/partflow-archive-dir-is-not-set"
+MAINTENANCE_ROLE = "partflow_maintenance"
+# The history archival routes whose preview runs up to the preview time limit (at most 600 s; NX-16).
+ARCHIVE_SLOW_LOCATIONS = {("=", "/api/history-archive/preview"), ("=", "/api/history-archive/runs")}
 # P16-S4: the database-role secrets and the application database role's name in code (ST-9, ST-10).
 SECRET_NAMES = ("postgres_password", "partflow_app_password", "partflow_maintenance_password")
 DATABASE_ROLES_MODULE = REPO / "backend" / "app" / "application" / "database_roles.py"
@@ -73,6 +83,8 @@ EMPTY_IN_EXAMPLE = (
     "PARTFLOW_TRUSTED_PROXY",
     "PARTFLOW_COMMIT",
     "PARTFLOW_ACCEPT_SCHEMA_REVISION",
+    "PARTFLOW_ARCHIVE_DIR",
+    "PARTFLOW_ARCHIVE_COPY_DIR",
 )
 SECRET_LIKE = ("PASSWORD", "SECRET", "TOKEN", "DSN")
 # Any health route a probe may name; a container health check names liveness only (P16-S3 ST-6, ST-18).
@@ -475,7 +487,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual({n for n, s in self.services.items() if not s.get("profiles")}, LONG_RUNNING)
         for name in self.ops_services():
             self.assertEqual(self.services[name]["profiles"], ["ops"], name)
-        self.assertEqual(self.ops_services(), {"migrate", "db-roles", "backup-tools", "status"})
+        self.assertEqual(self.ops_services(), {"migrate", "db-roles", "backup-tools", "status", "maintenance"})
 
     # ST-3
     def test_st3_only_web_published_on_loopback(self):
@@ -488,12 +500,15 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(ports[0]["target"], 80)
         self.assertEqual(str(ports[0]["published"]), example_values()["PARTFLOW_HTTP_PORT"])
 
-    # ST-4 (amended by P16-S5 and P16-S6): the only host-path mounts are the backup directory on backup-tools
-    # (read-write) and, read-only, on migrate and status; the long syntax never lets Compose create a missing host path.
+    # ST-4 (amended by P16-S5, P16-S6 and archival step 1): the only host-path mounts are the backup directory on
+    # backup-tools (read-write) and, read-only, on migrate and status, and the archive folder on maintenance (ST-26);
+    # the long syntax never lets Compose create a missing host path.
     def test_st4_volumes(self):
         expected = {"backup-tools": False, "migrate": True, "status": True}
         for name, service in self.services.items():
             binds = [v for v in service.get("volumes") or [] if v.get("type") == "bind"]
+            if name == "maintenance":
+                continue
             if name not in expected:
                 self.assertFalse(binds, f"{name} has a host-path mount")
                 continue
@@ -509,7 +524,8 @@ class ComposeModel(unittest.TestCase):
         # The raw file uses the long syntax for every mount (the short syntax resolves to create_host_path: true).
         raw = COMPOSE_FILE.read_text(encoding="utf-8")
         self.assertEqual(raw.count("source: ${PARTFLOW_BACKUP_DIR:?"), 3)
-        self.assertEqual(raw.count("create_host_path: false"), 3)
+        self.assertEqual(raw.count("source: ${PARTFLOW_ARCHIVE_DIR:-"), 1)
+        self.assertEqual(raw.count("create_host_path: false"), 4)
         volumes = self.services["db"]["volumes"]
         self.assertEqual(
             [(v["type"], v["source"], v["target"]) for v in volumes],
@@ -532,7 +548,9 @@ class ComposeModel(unittest.TestCase):
             if d.name == "proxy_read_timeout"
         ]
         self.assertTrue(timeouts, "no proxy_read_timeout in frontend/nginx")
-        longest = max(timeouts)
+        # The history archival locations (NX-16) only read, or write in one transaction at the end: a stop may cut
+        # them off without a partial change, so the stop grace covers every other (writing) route.
+        longest = max(t for t in timeouts if t != 610)
         self.assertEqual(longest, 180)
         for name in ("backend", "web"):
             self.assertGreater(duration_seconds(self.services[name]["stop_grace_period"]), longest, name)
@@ -575,7 +593,7 @@ class ComposeModel(unittest.TestCase):
         expected_users = {
             "postgres_password": {"db", "migrate", "db-roles"},
             "partflow_app_password": {"backend", "db-roles", "status"},
-            "partflow_maintenance_password": {"db-roles"},
+            "partflow_maintenance_password": {"db-roles", "maintenance"},
         }
         for secret, expected in expected_users.items():
             users = {name for name, s in self.services.items() if any(x["source"] == secret for x in s.get("secrets") or [])}
@@ -634,6 +652,8 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(attached["db-roles"], {"internal"})
         # P16-S6: status reaches db only.
         self.assertEqual(attached["status"], {"internal"})
+        # Archival step 1: maintenance reaches db only.
+        self.assertEqual(attached["maintenance"], {"internal"})
         # P16-S5: backup-tools needs no database and has no network at all.
         self.assertEqual(attached["backup-tools"], set())
         self.assertEqual(self.services["backup-tools"].get("network_mode"), "none")
@@ -650,6 +670,7 @@ class ComposeModel(unittest.TestCase):
         self.assertEqual(self.services["db-roles"]["image"], self.services["backend"]["image"])
         self.assertEqual(self.services["backup-tools"]["image"], self.services["backend"]["image"])
         self.assertEqual(self.services["status"]["image"], self.services["backend"]["image"])
+        self.assertEqual(self.services["maintenance"]["image"], self.services["backend"]["image"])
         for name in PARTFLOW_IMAGES:
             self.assertEqual(self.services[name].get("pull_policy"), "never", name)
         # No service of the runtime file can build: `up` or `run` with a missing PARTFLOW_RELEASE image must fail
@@ -773,6 +794,58 @@ class ComposeModel(unittest.TestCase):
     def test_st25_db_error_verbosity(self):
         self.assertEqual(self.services["db"].get("command"), ["postgres", "-c", "log_error_verbosity=terse"])
         self.assertIsNone(self.services["db"].get("entrypoint"))
+
+    # ST-26 (archival step 1): the history-archive job as the maintenance database role, the archive folder mounted here
+    # only (read-write, never created by Compose; a path that does not exist without PARTFLOW_ARCHIVE_DIR), the copy
+    # folder's container path set only when PARTFLOW_ARCHIVE_COPY_DIR is; never started by `up`, never starts db.
+    def test_st26_maintenance(self):
+        maintenance = self.services["maintenance"]
+        self.assertEqual(maintenance.get("profiles"), ["ops"])
+        self.assertEqual(maintenance.get("entrypoint"), ["python", "-m", "app.cli", "history-archive"])
+        self.assertIsNone(maintenance.get("command"))
+        self.assertFalse(maintenance.get("depends_on"))
+        self.assertEqual([s["source"] for s in maintenance.get("secrets") or []], ["partflow_maintenance_password"])
+        roles = DATABASE_ROLES_MODULE.read_text(encoding="utf-8")
+        role = re.search(r'^MAINTENANCE_ROLE: Final = "([a-z_]+)"$', roles, re.M)
+        self.assertIsNotNone(role, f"no MAINTENANCE_ROLE literal in {DATABASE_ROLES_MODULE}")
+        environment = maintenance["environment"]
+        self.assertEqual(environment["DATABASE_USER"], role.group(1))
+        self.assertEqual(environment["DATABASE_USER"], MAINTENANCE_ROLE)
+        self.assertEqual(environment["DATABASE_PASSWORD_FILE"], "/run/secrets/partflow_maintenance_password")
+        self.assertEqual(environment["SITE_TIMEZONE"], "UTC")
+        self.assertEqual(environment["PARTFLOW_ARCHIVE_DIR"], ARCHIVE_TARGET)
+        self.assertEqual(environment["PARTFLOW_ARCHIVE_COPY_DIR"], "")
+        self.assertNotIn("DATABASE_ROLES_REQUIRED", environment)
+        volumes = maintenance["volumes"]
+        self.assertEqual([(v["type"], v["target"], bool(v.get("read_only"))) for v in volumes],
+                         [("bind", ARCHIVE_TARGET, False)])
+        self.assertEqual(volumes[0]["source"], ARCHIVE_UNSET_SOURCE)
+        self.assertIsNot((volumes[0].get("bind") or {}).get("create_host_path"), True)
+        # The archive folder is mounted nowhere else.
+        archive = Path(self.root) / "archive"
+        copy = Path(self.root) / "archive-copy"
+        archive.mkdir(exist_ok=True)
+        copy.mkdir(exist_ok=True)
+        configured = self.variant("archive", PARTFLOW_ARCHIVE_DIR=archive.as_posix(),
+                                  PARTFLOW_ARCHIVE_COPY_DIR=copy.as_posix())
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        services = json.loads(configured.stdout)["services"]
+        for name, service in services.items():
+            sources = [v.get("source") for v in service.get("volumes") or [] if v.get("type") == "bind"]
+            if name == "maintenance":
+                self.assertEqual(len(sources), 1)
+                self.assertTrue(same_path(sources[0], archive), sources)
+                self.assertEqual(service["environment"]["PARTFLOW_ARCHIVE_COPY_DIR"], ARCHIVE_COPY_TARGET)
+            else:
+                self.assertFalse([s for s in sources if same_path(s, archive) or same_path(s, copy)], name)
+            for key, value in (service.get("environment") or {}).items():
+                self.assertFalse(bool(value) and (same_path(str(value), archive) or same_path(str(value), copy)),
+                                 f"{name}.{key}")
+        self.assertEqual(maintenance["restart"], "no")
+        self.assertIs(maintenance["healthcheck"].get("disable"), True)
+        limits = maintenance["deploy"]["resources"]["limits"]
+        self.assertTrue(limits.get("memory") and limits.get("cpus"))
+        self.assertEqual(maintenance["logging"]["driver"], "json-file")
 
     # ST-17 (P16-S3)
     def test_st17_release_identity_comes_from_the_image(self):
@@ -1031,8 +1104,22 @@ class WebTier(unittest.TestCase):
         self.assertEqual(self.value(self.server.block, "proxy_send_timeout"), ["60s"])
         for name in ("proxy_read_timeout", "proxy_send_timeout"):
             owners = {tuple(loc.args) for loc in self.locations if loc.children(name)}
-            self.assertEqual(owners, {("=", "/api/work-orders/import")}, name)
+            self.assertEqual(owners, {("=", "/api/work-orders/import")} | ARCHIVE_SLOW_LOCATIONS, name)
             self.assertEqual(self.value(self.location("=", "/api/work-orders/import").block, name), ["180s"])
+
+    # NX-16 (archival step 1): the archival preview and the run request (which recomputes the preview) wait up to 610 s,
+    # beyond the largest preview time limit of Administration (600 s); the list of runs shares the exact location.
+    def test_nx16_history_archive_timeouts(self):
+        for args in sorted(ARCHIVE_SLOW_LOCATIONS):
+            location = self.location(*args)
+            for name in ("proxy_read_timeout", "proxy_send_timeout"):
+                self.assertEqual(self.value(location.block, name), ["610s"], (args, name))
+            self.assertEqual(self.includes(location), [PROXY_API_INCLUDE], args)
+            self.assertFalse(location.children("client_max_body_size"), args)
+        for path in ("/api/history-archive/preview", "/api/history-archive/runs"):
+            self.assertIn(tuple(select_location(self.locations, path).args), ARCHIVE_SLOW_LOCATIONS, path)
+        for path in ("/api/history-archive/runs/3/cancel", "/api/history-archive/runs/3/copy-confirmation"):
+            self.assertEqual(tuple(select_location(self.locations, path).args), ("/api/",), path)
 
     # NX-3
     def test_nx3_rate_limits(self):

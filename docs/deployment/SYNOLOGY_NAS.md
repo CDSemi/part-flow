@@ -19,7 +19,8 @@ installation is in [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md).
 - PartFlow running on the NAS in the Compose project `partflow-production`, reachable at `https://<HOSTNAME>` from the
   company network, and, if you choose it, from the Internet through Cloudflare;
 - the first Administrator created and the Scan Station devices enrolled;
-- after §11, a verified backup every hour with an encrypted copy outside the NAS, and email alerts when a check fails.
+- after §11, a verified backup every hour with an encrypted copy outside the NAS, email alerts when a check fails,
+  and the history archive task.
 
 ### What you need
 
@@ -146,6 +147,7 @@ is:
   repo/       the release checkout; .env.production lives here
   secrets/    the three password files (PARTFLOW_SECRETS_DIR)
   backups/    one sub-folder per database backup (PARTFLOW_BACKUP_DIR)
+  archive/    one sub-folder per history archive (PARTFLOW_ARCHIVE_DIR), created in §11.8
 ```
 
 Never give the DSM group `Everyone` access to these folders, never share them with ordinary DSM users, and never put
@@ -418,7 +420,8 @@ PartFlow is now in production. Give people the address `https://<HOSTNAME>`.
 ## 11. After go-live: backups and monitoring
 
 These tasks are recommended and never block use. Until the backup task runs, the only backups are the ones that
-`release.sh` takes before each release. Do them in this order.
+`release.sh` takes before each release. Do them in this order; §11.8, the history archive task, is needed only before
+the first archival run.
 
 ### 11.1 Email notifications
 
@@ -462,7 +465,9 @@ A backup that stays on the NAS is lost with the NAS. Copy the backup folder else
 
 1. Install **Hyper Backup** from Package Center, open it and create a **Data backup task**.
 2. Choose a destination outside this NAS: another NAS, Synology C2 Storage or an S3-compatible service.
-3. As the source, select the folder `docker/partflow/backups`.
+3. As the source, select the folders `docker/partflow/backups` and `docker/partflow/archive` (the archive folder of
+   §11.8; select it once it exists). The archives are in no database backup, so this copy is their only copy outside
+   the NAS unless you set a copy folder (§11.8).
 4. Enable **client-side encryption**. Keep the password and the key file outside the NAS: without them, the copies
    cannot be read.
 5. Schedule it daily at `03:30`, between two backups. Set the version rotation as you decide, enable the weekly
@@ -502,8 +507,8 @@ command to your HTTPS option:
 - **Option B (Cloudflare):** add nothing. The check reaches PartFlow through Cloudflare, like a user.
 
 Test the check task: select it, click **Run**, then read its result on the NAS. The first line shows the time and the
-exit code (`exit 0`); every other line starts with `PASS`, or `SKIP` for a check that does not apply (the line
-`archival_proposal` is always `SKIP`):
+exit code (`exit 0`); every other line starts with `PASS`, or `SKIP` for a check that does not apply (the lines
+`disk_archive` and `archival_proposal` are `SKIP` until §11.8 is done):
 
 ```sh
 cat /root/partflow-monitoring/last-check.txt
@@ -546,11 +551,89 @@ and edit the rules of the active profile:
    docker network inspect partflow-production_internal partflow-production_edge --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'
    ```
 
+### 11.8 History archive task
+
+PartFlow can move old Movement history into archive files (History archival & purge in Administration; the runbook
+§11). **The current build step only exports and copies archives and never deletes anything.** The history archive job
+needs an archive folder on the NAS, optionally a copy folder on another device, and a task that starts it every 5
+minutes. Do this before the first run is requested in Administration.
+
+1. **Create the archive folder**, owned by `root` (the account that runs the task) and readable by `root` only:
+
+   ```sh
+   mkdir -p /volume1/docker/partflow/archive
+   chown root:root /volume1/docker/partflow/archive
+   chmod 700 /volume1/docker/partflow/archive
+   ls -ld /volume1/docker/partflow/archive
+   ```
+
+   The line starts with `drwx------` and names `root`. The history archive job runs as `root` too and writes there.
+
+2. **Set it in the configuration file.** The two commands work whether or not the line already exists:
+
+   ```sh
+   cd /volume1/docker/partflow/repo
+   sed -i '/^PARTFLOW_ARCHIVE_DIR=/d' .env.production
+   echo 'PARTFLOW_ARCHIVE_DIR=/volume1/docker/partflow/archive' >> .env.production
+   grep '^PARTFLOW_ARCHIVE' .env.production
+   ```
+
+3. **Optional: a copy folder on another device.** Without it, every archival run waits until you confirm in
+   Administration that its archive was copied off the NAS (the Hyper Backup task of §11.3 does that copy; the runbook
+   §11 explains the confirmation). With it, each run copies its archive there, checks the copy and completes by
+   itself. The folder must be on **another device**, mounted on the NAS, writable by `root`:
+   - a USB disk: DSM mounts it under `/volumeUSB1/usbshare`; create a folder on it, for example
+     `mkdir -p /volumeUSB1/usbshare/partflow-archive-copy`;
+   - or a shared folder of another server: in **File Station → Tools → Mount Remote Folder → CIFS Shared Folder**,
+     mount it on an empty folder of the NAS, for example `/volume1/docker/partflow/archive-copy`, with **Mount
+     automatically on startup** selected.
+
+   Then set the folder in the configuration file:
+
+   ```sh
+   sed -i '/^PARTFLOW_ARCHIVE_COPY_DIR=/d' .env.production
+   echo 'PARTFLOW_ARCHIVE_COPY_DIR=/volumeUSB1/usbshare/partflow-archive-copy' >> .env.production
+   ```
+
+   The job uses the copy folder only while it exists and lies on a file system that is neither the archive folder's
+   nor the NAS's system partition `/`, and it checks this again before every step. When the disk or the share is not
+   mounted, its path is a folder on the system partition: the job copies nothing there, the run waits, and `check.sh`
+   reports `copy_dir_unusable` with the reason. Never create the copy folder by hand while the disk or share is out.
+
+4. **Create the task** as in §11.2 (User `root`, email only when the script terminates abnormally):
+   - **General:** Task `PartFlow history archive`.
+   - **Schedule:** **Run on the following days: Daily**, first run time `00:00`, **Frequency** every 5 minutes, last
+     run time `23:55`.
+   - **Run command:**
+
+     ```sh
+     cd /volume1/docker/partflow/repo && HOME=/root deploy/production/archive.sh --scheduled
+     ```
+
+   Most starts end within seconds. Once an hour, at the first start at or after the **Start minute** set in
+   Administration → History archival & purge (20 initially, away from the hourly backup at minute 0), the task does
+   the hourly work: it exports, verifies and copies a requested run. The very first start only records the current
+   hour, so the first hourly work comes at the next Start minute. A refusal or a failure sends one email for its hour.
+
+5. **Test it.** Select the task and click **Run**. Then check that the job can reach its folder and the database,
+   which prints the hourly work's lines and ends with a line that starts with `ARCHIVE`:
+
+   ```sh
+   deploy/production/pf archive
+   deploy/production/check.sh --url https://<HOSTNAME> --only disk_archive --only archival_proposal --no-state
+   ```
+
+   Both check lines start with `PASS`. Add the options of your `PartFlow check` task (`--cacert`, `--resolve-to`).
+
+6. Add the archive folder to the Hyper Backup task (§11.3, step 3), if you have not done so yet.
+
 ## 12. Installing a new release
 
 Every later release is installed with `deploy/production/release.sh`. It takes a verified backup, builds the new
 images without touching the running ones, migrates the database, switches PartFlow to the new release and checks it.
-Choose a time when no Work Order import runs, a few minutes after the full hour, once the hourly backup has finished.
+Choose a time when no Work Order import runs, a few minutes after the full hour, once the hourly backup has finished
+and well before the Start minute of the history archive task: a release is refused while that task does its hourly
+work (start it again once the work has finished), and the task refuses while a release runs.
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -595,12 +678,15 @@ Keep enough free disk space for the database, the images of at least one more re
 the local backups. A backup needs free space of twice the newest backup plus 1 GiB in the backup folder; a restore
 drill needs five times the backup plus 1 GiB on the Docker storage. The `check.sh` disk checks fail below 15 % free
 space: `disk_data` for the database volume, `disk_backup` for the backup folder and `disk_docker` for the Docker
-storage (images and container logs). `/root/partflow-monitoring/growth.tsv` records the database size once a day.
+storage (images and container logs) and `disk_archive` for the archive folder (§11.8). The archive folder grows with
+every archival run; nothing removes archives automatically. `/root/partflow-monitoring/growth.tsv` records the database
+size once a day.
 
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
+| 2026-11-17 | uncommitted | §11.8: the archive folder, the optional copy folder and the 5-minute history archive task, which exports and copies archives and never deletes anything; §4, §11.3, §11.5, §12 and §13 for the archive folder. |
 | 2026-11-16 | uncommitted | §7, §12: `deploy/production/pf install` and `pf update` run these steps. |
 | 2026-11-16 | `c1f042b` | §1, §11.2: the backup task runs every hour with `--kind scheduled`, and Administration → Backups sets the interval and how many backups are kept; §11.3, §11.5, §12: times around the hourly backup. |
 | 2026-11-12 | `de4d99f` | §12: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after a minute, and every other page once idle for 1 minute instead of 2. |

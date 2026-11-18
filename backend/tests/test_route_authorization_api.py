@@ -52,6 +52,7 @@ from tests.auth_harness import (
     enroll_station_device,
     station_device_client,
 )
+from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _TEST_DATABASE = "partflow_test_route_authorization_api"
@@ -86,6 +87,7 @@ MWSP = Permission.MANAGE_WORKER_SESSION_POLICIES
 MCP = Permission.MANAGE_CORRECTION_PERMISSIONS
 CSS = Permission.CONFIGURE_SYSTEM_SETTINGS
 MUAR = Permission.MANAGE_USERS_AND_ROLES
+RHAP = Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -193,6 +195,7 @@ def _concrete(path: str) -> str:
         .replace("{demand_id}", "1")
         .replace("{allocation_id}", "1")
         .replace("{quantity_flow_id}", "1")
+        .replace("{run_id}", "1")
     )
 
 
@@ -407,6 +410,157 @@ def _enrolled_device(client: TestClient) -> int:
 
 def _key(*keys: Permission) -> frozenset[Permission]:
     return frozenset(keys)
+
+
+# History archival (Phase 16, design B step 1): a run needs closed history older
+# than the retention period, set up directly by the owner.
+
+
+def _owner(client: TestClient) -> Engine:
+    return owner_engine(engine_of(client).url)
+
+
+def _close_open_runs(client: TestClient) -> None:
+    """Fail every open run, as the maintenance job would (owner, with its setting)."""
+    owner = _owner(client)
+    try:
+        with owner.begin() as connection:
+            open_ids = list(
+                connection.execute(
+                    sa.text(
+                        "SELECT id FROM history_archive_runs"
+                        " WHERE state IN ('APPROVED', 'RUNNING', 'WAITING_FOR_COPY')"
+                    )
+                ).scalars()
+            )
+            for run_id in open_ids:
+                connection.execute(
+                    sa.text("SELECT set_config('partflow.archive_run_id', :id, true)"),
+                    {"id": str(run_id)},
+                )
+                connection.execute(
+                    sa.text(
+                        "UPDATE history_archive_runs SET state = 'FAILED', finished_at = now(),"
+                        " failure_reason = 'closed by the authorization test' WHERE id = :id"
+                    ),
+                    {"id": run_id},
+                )
+    finally:
+        owner.dispose()
+
+
+def _old_closed_history(client: TestClient) -> None:
+    """A released flow, closed, with its Movements three years old (owner setup)."""
+    admin = admin_of(client)
+    area = _area(client)
+    operation = _ok(
+        admin.post("/api/operations", json={"area_id": area["id"], "code": f"OP-{_suffix()}"}),
+        201,
+    )
+    part_number = f"RA-{_suffix().upper()}"
+    work_order = _ok(
+        admin.post(
+            "/api/work-orders",
+            json={"lines": [{"part_number": part_number, "requested_quantity": 5}]},
+        ),
+        201,
+    )
+    demand_id = work_order["demands"][0]["id"]
+    flow = _ok(
+        admin.post(
+            f"/api/work-orders/{work_order['id']}/demands/{demand_id}/release",
+            json={
+                "part_number": part_number,
+                "quantity": 5,
+                "route_mode": "FLOATING",
+                "starting_area_id": area["id"],
+                "operation_id": operation["id"],
+                "confirm_active_quantity": True,
+                "device_event_id": str(uuid.uuid4()),
+            },
+        ),
+        201,
+    )["quantity_flow_id"]
+    owner = _owner(client)
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                sa.text(
+                    "UPDATE quantity_flows SET status = 'SCRAPPED', closed_at = now()"
+                    " WHERE id = :flow"
+                ),
+                {"flow": flow},
+            )
+            connection.execute(
+                sa.text(
+                    "ALTER TABLE part_movements DISABLE TRIGGER trg_part_movements_forbid_mutation"
+                )
+            )
+            connection.execute(
+                sa.text(
+                    "UPDATE part_movements SET occurred_at = occurred_at - interval '36 months',"
+                    " server_received_at = server_received_at - interval '36 months'"
+                    " WHERE quantity_flow_id = :flow"
+                ),
+                {"flow": flow},
+            )
+            connection.execute(
+                sa.text(
+                    "ALTER TABLE part_movements ENABLE TRIGGER trg_part_movements_forbid_mutation"
+                )
+            )
+    finally:
+        owner.dispose()
+
+
+def _archive_request(client: TestClient) -> tuple[str, dict[str, Any]]:
+    _close_open_runs(client)
+    _old_closed_history(client)
+    return "/api/history-archive/runs", {"json": {"reason": "authorization test"}}
+
+
+def _requested_run(client: TestClient) -> int:
+    path, kwargs = _archive_request(client)
+    return int(_ok(admin_of(client).post(path, **kwargs), 201)["id"])
+
+
+def _run_to_cancel(client: TestClient) -> tuple[str, dict[str, Any]]:
+    return f"/api/history-archive/runs/{_requested_run(client)}/cancel", {}
+
+
+def _run_waiting_for_copy(client: TestClient) -> tuple[str, dict[str, Any]]:
+    run_id = _requested_run(client)
+    manifest = "ab" * 32
+    owner = _owner(client)
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                sa.text("SELECT set_config('partflow.archive_run_id', :id, true)"),
+                {"id": str(run_id)},
+            )
+            connection.execute(
+                sa.text(
+                    "UPDATE history_archive_runs SET state = 'RUNNING', started_at = now(),"
+                    " archive_name = 'run-' || id || '-20271110T042000Z', exported_at = now(),"
+                    " exported_components = 1, exported_flows = 1, exported_movements = 1,"
+                    " exported_lineage_edges = 0, exported_assigned_routes = 0,"
+                    " archive_bytes = 1, manifest_sha256 = :manifest, verified_at = now(),"
+                    " skipped_components = 0, skipped_flows = 0 WHERE id = :id"
+                ),
+                {"manifest": manifest, "id": run_id},
+            )
+            connection.execute(
+                sa.text(
+                    "UPDATE history_archive_runs SET state = 'WAITING_FOR_COPY' WHERE id = :id"
+                ),
+                {"id": run_id},
+            )
+    finally:
+        owner.dispose()
+    return (
+        f"/api/history-archive/runs/{run_id}/copy-confirmation",
+        {"json": {"manifest_sha256": manifest}},
+    )
 
 
 _WRITES: list[_Write] = [
@@ -674,8 +828,8 @@ _WRITES: list[_Write] = [
         "retention-policy",
         "PUT",
         "/api/policies/data-retention",
-        _key(CSS),
-        _key(CSS),
+        _key(RHAP),
+        _key(RHAP),
         lambda c: (
             "/api/policies/data-retention",
             {
@@ -687,6 +841,33 @@ _WRITES: list[_Write] = [
             },
         ),
         "application_policy",
+    ),
+    _Write(
+        "history-archive-request",
+        "POST",
+        "/api/history-archive/runs",
+        _key(RHAP),
+        _key(RHAP),
+        _archive_request,
+        "history_archive_runs",
+    ),
+    _Write(
+        "history-archive-cancel",
+        "POST",
+        "/api/history-archive/runs/{run_id}/cancel",
+        _key(RHAP),
+        _key(RHAP),
+        _run_to_cancel,
+        "history_archive_runs",
+    ),
+    _Write(
+        "history-archive-copy-confirmation",
+        "POST",
+        "/api/history-archive/runs/{run_id}/copy-confirmation",
+        _key(RHAP),
+        _key(RHAP),
+        _run_waiting_for_copy,
+        "history_archive_runs",
     ),
     _Write(
         "backup-policy",
@@ -993,7 +1174,22 @@ _MANAGEMENT_WRITES = {
 
 # Permission routes that write nothing, so no audit row proves the call:
 # each has its own test below.
-_NON_WRITING_ROUTES = {("POST", "/api/policies/mail-server/test")}
+_NON_WRITING_ROUTES = {
+    ("POST", "/api/policies/mail-server/test"),
+    ("GET", "/api/history-archive/preview"),
+}
+
+
+def test_the_archive_preview_needs_the_archival_key(client: TestClient, db_engine: Engine) -> None:
+    """Phase 16: the preview reads only; it needs Run history archival and purge."""
+    path = "/api/history-archive/preview"
+    lacking = client_as(client, *(key for key in ALL_PERMISSIONS if key is not RHAP))
+    count = _audit_count(db_engine)
+    assert anonymous_client(client).get(path).status_code == 401
+    _denied(lacking.get(path), [RHAP], _A2)
+    body = _ok(client_as(client, RHAP).get(path))
+    assert {"cutoff_date", "components", "flows", "movements"} <= set(body)
+    assert _audit_count(db_engine) == count
 
 
 def test_the_test_message_needs_configure_system_settings(

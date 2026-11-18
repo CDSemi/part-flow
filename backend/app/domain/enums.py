@@ -290,6 +290,11 @@ class AuditEntityType(StrEnum):
     ROLE = "Role"
     SCAN_STATION_DEVICE = "ScanStationDevice"
     ASSIGNED_ROUTE = "AssignedRoute"
+    # Phase 16 (history archival, design B step 1): every change of state of
+    # a Movement-history archival run — administrative maintenance, never
+    # production activity. The only entity type the maintenance database role
+    # may append (trigger ``trg_audit_events_maintenance_scope``).
+    HISTORY_ARCHIVE_RUN = "HistoryArchiveRun"
 
 
 class WorkerIdentificationMode(StrEnum):
@@ -424,6 +429,11 @@ class Permission(StrEnum):
     PERFORM_QUANTITY_CORRECTIONS = "PERFORM_QUANTITY_CORRECTIONS"
     EDIT_WORK_ORDER_ALLOCATION = "EDIT_WORK_ORDER_ALLOCATION"
     PERFORM_HISTORICAL_CORRECTIONS = "PERFORM_HISTORICAL_CORRECTIONS"
+    # Data maintenance (Phase 16, history archival design D7, migration
+    # 0040): every setting and action of Administration → History archival &
+    # purge, the retention period included. Appended last, so the CHECK
+    # literal of every earlier revision stays a prefix of this vocabulary.
+    RUN_HISTORY_ARCHIVAL_AND_PURGE = "RUN_HISTORY_ARCHIVAL_AND_PURGE"
 
 
 class UserSessionEndReason(StrEnum):
@@ -570,3 +580,39 @@ class StationCommand(StrEnum):
     ALLOCATION = "ALLOCATION"
     ALLOCATION_ADJUSTMENT = "ALLOCATION_ADJUSTMENT"
     UNDO = "UNDO"
+
+
+class HistoryArchiveRunState(StrEnum):
+    """Where a Movement-history archival run stands (Phase 16, history
+    archival design §6.1; build step 1: runs without deletion).
+
+    APPROVED — requested in Administration (the request is the approval)
+    and waiting for the host job; RUNNING — the job is exporting and
+    verifying the archive; WAITING_FOR_COPY — verified, waiting for a person
+    to confirm the off-host copy (only without a copy folder); COMPLETED —
+    finished (step 1: export only, nothing deleted); NOTHING_ELIGIBLE —
+    finished, nothing was eligible at the cutoff; CANCELLED — cancelled in
+    Administration before it finished; FAILED — the job stopped it and
+    recorded why. The last four are final. The design's later states
+    (PROPOSED, DISMISSED, PURGING, COMPLETED_WITH_SKIPS) are added by the
+    build steps that introduce them.
+    """
+
+    APPROVED = "APPROVED"
+    RUNNING = "RUNNING"
+    WAITING_FOR_COPY = "WAITING_FOR_COPY"
+    COMPLETED = "COMPLETED"
+    NOTHING_ELIGIBLE = "NOTHING_ELIGIBLE"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
+
+
+class HistoryArchiveRunResult(StrEnum):
+    """The recorded result of a COMPLETED archival run.
+
+    EXPORT_ONLY (build step 1): the archive was exported, verified and
+    copied off the host, and nothing was deleted from the database, so a
+    later run archives the same history again before any purge.
+    """
+
+    EXPORT_ONLY = "EXPORT_ONLY"

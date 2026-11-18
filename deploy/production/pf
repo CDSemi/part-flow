@@ -8,13 +8,15 @@
 #   backup   a manual deploy/production/backup.sh (OPERATIONS_RUNBOOK §3)
 #   restore  the new-instance restore of a backup into an empty database (OPERATIONS_RUNBOOK §6)
 #   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
+#   archive  the hourly work of Movement-history archival now: deploy/production/archive.sh (§11; build step 1 only
+#            exports archives and never deletes anything)
 #   delete-permanently
 #            the preview, or with --confirm a verified manual backup and then the deletion, of Work Orders and Part
 #            Numbers entered only for testing (`app.cli delete-permanently` in the owner's one-shot db-roles service;
 #            OPERATIONS_RUNBOOK §10)
 # `deploy/production/pf --help` prints the usage. Exit status: 0 done, 1 refused or a check failed (nothing was
-# changed by the refusal), 2 could not run; update and backup end with the exit status of release.sh and backup.sh,
-# delete-permanently with the exit status of `app.cli delete-permanently`.
+# changed by the refusal), 2 could not run; update, backup and archive end with the exit status of release.sh,
+# backup.sh and archive.sh, delete-permanently with the exit status of `app.cli delete-permanently`.
 set -eu
 
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
@@ -40,6 +42,8 @@ Commands:
                             restore the backup NAME into this host's empty database, then start PartFlow on it
                             (OPERATIONS_RUNBOOK §6, New-instance restore); the checkout must be at the backup's release
   status [--url URL]        the containers, /api/health and the status report; with --url the full check.sh
+  archive                   run the hourly work of Movement-history archival now (archive.sh; OPERATIONS_RUNBOOK
+                            §11): export, verify and copy an approved run, or finish a confirmed one; never deletes
   delete-permanently (--work-order NUMBER | --part-number PN)... --reason TEXT [--confirm]
                             show what would be deleted of Work Orders and Part Numbers entered only for testing; with
                             --confirm take a verified manual backup, then delete them in one transaction
@@ -49,8 +53,8 @@ Options of every command:
   --operator NAME           recorded as the operator (default: the login name)
 Text values: 1-500 characters, no control characters, no " or \. A Work Order Number or Part Number: 1-500
 characters, no control characters, given exactly as PartFlow shows it.
-Exit: 0 done, 1 refused or a check failed, 2 could not run; update and backup end with the exit status of release.sh
-      and backup.sh, delete-permanently with the exit status of the deletion command.
+Exit: 0 done, 1 refused or a check failed, 2 could not run; update, backup and archive end with the exit status of
+      release.sh, backup.sh and archive.sh, delete-permanently with the exit status of the deletion command.
 EOF
 }
 
@@ -114,7 +118,7 @@ case "${1:-}" in
         usage
         exit 0
         ;;
-    install | update | backup | restore | status | delete-permanently) COMMAND=$1; shift ;;
+    install | update | backup | restore | status | archive | delete-permanently) COMMAND=$1; shift ;;
     '') usage_error "a command is required." ;;
     *) usage_error "unknown command $1." ;;
 esac
@@ -459,6 +463,14 @@ cmd_status() {
 }
 
 # ---------------------------------------------------------------------------
+# pf archive (OPERATIONS_RUNBOOK §11)
+# ---------------------------------------------------------------------------
+
+cmd_archive() {
+    exec sh deploy/production/archive.sh --env-file "$ENV_FILE"
+}
+
+# ---------------------------------------------------------------------------
 # pf delete-permanently (OPERATIONS_RUNBOOK §10)
 # ---------------------------------------------------------------------------
 
@@ -512,5 +524,6 @@ case "$COMMAND" in
     backup) cmd_backup ;;
     restore) cmd_restore ;;
     status) cmd_status ;;
+    archive) cmd_archive ;;
     delete-permanently) cmd_delete_permanently ;;
 esac

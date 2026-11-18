@@ -2,12 +2,12 @@
 
 One classification of every relation in schema ``public`` at the code
 head, the exact table privileges of the application database role per
-class, the tables the maintenance database role may read, and the guard
-triggers and guard functions the migrations create. ``apply-grants``
-derives every grant from these constants and reconcile check (h)
-compares the database with them. Tests pin them to the migrated schema:
-a migration that adds a table classifies it in the same commit, and one
-that adds or changes a guard updates ``GUARD_TRIGGERS`` /
+class, the exact table privileges of the maintenance database role, and
+the guard triggers and guard functions the migrations create.
+``apply-grants`` derives every grant from these constants and reconcile
+check (h) compares the database with them. Tests pin them to the migrated
+schema: a migration that adds a table classifies it in the same commit,
+and one that adds or changes a guard updates ``GUARD_TRIGGERS`` /
 ``GUARD_FUNCTION_SHA256`` in the same commit.
 
 "Role" here always means a PostgreSQL database role, never an
@@ -33,7 +33,9 @@ APP_PRIVILEGES: Final[Mapping[TableClass, frozenset[str]]] = {
     TableClass.ORDINARY: frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"}),
     TableClass.APPEND_ONLY: frozenset({"SELECT", "INSERT"}),
     # worker_sessions: open-session expiry and end; its FOR NO KEY UPDATE
-    # row lock needs UPDATE too. The row trigger refuses every other change.
+    # row lock needs UPDATE too. history_archive_runs: a run request, its
+    # cancellation and the confirmation of its off-host copy. The row
+    # trigger of each refuses every other change.
     TableClass.GUARDED_UPDATE: frozenset({"SELECT", "INSERT", "UPDATE"}),
     # assigned_route_steps: past steps are immutable; an AssignedRoute
     # adjustment deletes unreferenced future steps.
@@ -49,6 +51,8 @@ TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
     "assigned_routes": TableClass.ORDINARY,
     "audit_events": TableClass.APPEND_ONLY,
     "departments": TableClass.ORDINARY,
+    "history_archive_runs": TableClass.GUARDED_UPDATE,
+    "history_archived_flows": TableClass.READ_ONLY,
     "machine_asset_tag_config": TableClass.ORDINARY,
     "machine_lifecycle_events": TableClass.APPEND_ONLY,
     "machines": TableClass.ORDINARY,
@@ -79,28 +83,45 @@ TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
     "workers": TableClass.ORDINARY,
 }
 
-#: SELECT only for the maintenance database role (CD5): Movements, flows,
-#: lineage, the CD9 context tables, Users/roles/role permissions, the
-#: application policy and ``alembic_version`` for the archive manifest.
-#: Never credentials, sign-in sessions or Scan Station devices.
-MAINTENANCE_SELECT: Final[frozenset[str]] = frozenset(
-    {
-        "alembic_version",
-        "application_policy",
-        "areas",
-        "machines",
-        "operations",
-        "part_movements",
-        "quantity_flow_lineage",
-        "quantity_flows",
-        "role_permissions",
-        "roles",
-        "scan_stations",
-        "users",
-        "worker_sessions",
-        "workers",
-    }
-)
+_READ: Final = frozenset({"SELECT"})
+
+#: The exact table privileges of the maintenance database role (CD5;
+#: history archival design §8.3, build step 1): SELECT on what the archive
+#: export reads — Movements, flows, lineage, Assigned Routes and their
+#: steps, Work Orders and demand lines, the Part Number master, the context
+#: tables, Users/roles/role permissions, the application policy and
+#: ``alembic_version`` for the archive manifest —; on the two archival
+#: tables SELECT and the UPDATE their guard triggers allow, and INSERT on
+#: the records only (a run is requested by a person in Administration,
+#: never by the job); and INSERT on ``audit_events``, which
+#: ``trg_audit_events_maintenance_scope`` limits to ``HistoryArchiveRun``
+#: rows (no SELECT: it never reads the audit trail). Never credentials,
+#: sign-in sessions, mail or Scan Station devices; no DELETE (the purge step
+#: adds it on ``part_movements``).
+MAINTENANCE_PRIVILEGES: Final[Mapping[str, frozenset[str]]] = {
+    "alembic_version": _READ,
+    "application_policy": _READ,
+    "areas": _READ,
+    "assigned_route_steps": _READ,
+    "assigned_routes": _READ,
+    "audit_events": frozenset({"INSERT"}),
+    "history_archive_runs": frozenset({"SELECT", "UPDATE"}),
+    "history_archived_flows": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "machines": _READ,
+    "operations": _READ,
+    "part_movements": _READ,
+    "part_numbers": _READ,
+    "quantity_flow_lineage": _READ,
+    "quantity_flows": _READ,
+    "role_permissions": _READ,
+    "roles": _READ,
+    "scan_stations": _READ,
+    "users": _READ,
+    "work_order_demands": _READ,
+    "work_orders": _READ,
+    "worker_sessions": _READ,
+    "workers": _READ,
+}
 
 
 class GuardTrigger(NamedTuple):
@@ -140,6 +161,44 @@ GUARD_TRIGGERS: Final[Mapping[str, GuardTrigger]] = {
         " partflow_assigned_route_steps_forbid_update()",
     ),
     "trg_audit_events_forbid_mutation": _statement_guard("audit_events", _ALL_EVENTS),
+    # The maintenance role appends only HistoryArchiveRun rows (0040).
+    "trg_audit_events_maintenance_scope": GuardTrigger(
+        "audit_events",
+        "partflow_audit_events_maintenance_scope",
+        "CREATE TRIGGER trg_audit_events_maintenance_scope BEFORE INSERT ON public.audit_events"
+        " FOR EACH ROW WHEN ((new.entity_type <> 'HistoryArchiveRun'::text)) EXECUTE FUNCTION"
+        " partflow_audit_events_maintenance_scope()",
+    ),
+    # The run and record guards of history archival (0040): the row trigger
+    # judges every insert and change; no row is ever deleted or truncated.
+    "trg_history_archive_runs_forbid_truncate": GuardTrigger(
+        "history_archive_runs",
+        "partflow_history_archive_runs_guard_mutation",
+        "CREATE TRIGGER trg_history_archive_runs_forbid_truncate BEFORE TRUNCATE ON"
+        " public.history_archive_runs FOR EACH STATEMENT EXECUTE FUNCTION"
+        " partflow_history_archive_runs_guard_mutation()",
+    ),
+    "trg_history_archive_runs_guard_mutation": GuardTrigger(
+        "history_archive_runs",
+        "partflow_history_archive_runs_guard_mutation",
+        "CREATE TRIGGER trg_history_archive_runs_guard_mutation BEFORE INSERT OR DELETE OR UPDATE"
+        " ON public.history_archive_runs FOR EACH ROW EXECUTE FUNCTION"
+        " partflow_history_archive_runs_guard_mutation()",
+    ),
+    "trg_history_archived_flows_forbid_truncate": GuardTrigger(
+        "history_archived_flows",
+        "partflow_history_archived_flows_guard_mutation",
+        "CREATE TRIGGER trg_history_archived_flows_forbid_truncate BEFORE TRUNCATE ON"
+        " public.history_archived_flows FOR EACH STATEMENT EXECUTE FUNCTION"
+        " partflow_history_archived_flows_guard_mutation()",
+    ),
+    "trg_history_archived_flows_guard_mutation": GuardTrigger(
+        "history_archived_flows",
+        "partflow_history_archived_flows_guard_mutation",
+        "CREATE TRIGGER trg_history_archived_flows_guard_mutation BEFORE INSERT OR DELETE OR"
+        " UPDATE ON public.history_archived_flows FOR EACH ROW EXECUTE FUNCTION"
+        " partflow_history_archived_flows_guard_mutation()",
+    ),
     "trg_machine_lifecycle_events_forbid_mutation": _statement_guard(
         "machine_lifecycle_events", _ALL_EVENTS
     ),
@@ -191,6 +250,15 @@ GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
     ),
     "partflow_audit_events_forbid_mutation": (
         "b366828e03acbf84260a4fb8efef0a9e0175fd6a24c18bcfb360143ee903f85c"
+    ),
+    "partflow_audit_events_maintenance_scope": (
+        "38b0a49d48776f44e16b9537e8469bddc52893d379a4d1a484142a1ce0f2f0b3"
+    ),
+    "partflow_history_archive_runs_guard_mutation": (
+        "81af37aab747cbdaca01c680a0a8592549ed44b2bcf7d68f88d60899727d43d8"
+    ),
+    "partflow_history_archived_flows_guard_mutation": (
+        "fb284f5f0586513936b3a5a27be02ae164dce0894871e31d6b5d4ee64a8585d7"
     ),
     "partflow_machine_lifecycle_events_forbid_mutation": (
         "6a29a65f2e3ddee67b0f3bbda429d72b7fed6ff72564bc6bd7466724109f52b1"

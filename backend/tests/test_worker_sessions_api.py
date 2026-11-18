@@ -1937,6 +1937,9 @@ def test_worker_session_policy_api(
                 sa.text("SELECT count(*) FROM audit_events WHERE entity_type = 'ApplicationPolicy'")
             ).scalar_one()
         )
+    # Migration 0040 records the 24-month retention default as a
+    # data-retention row, so this section's rows are counted on their own.
+    sessions_before = _audit_count(db_engine, "ApplicationPolicy", "worker-sessions")
     stored = _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
     assert stored["worker_session_timeout_minutes"] == 30
     assert _ok(admin_of(client).get(_POLICY_PATH))["worker_session_timeout_minutes"] == 30
@@ -1966,7 +1969,7 @@ def test_worker_session_policy_api(
     )
     # An identical PUT is a no-op.
     _ok(admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
-    assert _audit_count(db_engine, "ApplicationPolicy", "worker-sessions") == before + 1
+    assert _audit_count(db_engine, "ApplicationPolicy", "worker-sessions") == sessions_before + 1
 
     for value in (0, 721, -5):
         refused = admin_of(client).put(_POLICY_PATH, json={"worker_session_timeout_minutes": value})
@@ -1982,7 +1985,7 @@ def test_worker_session_policy_api(
     ):
         assert admin_of(client).put(_POLICY_PATH, json=body).status_code == 422, body
     assert _ok(admin_of(client).get(_POLICY_PATH))["worker_session_timeout_minutes"] == 30
-    assert _audit_count(db_engine, "ApplicationPolicy", "worker-sessions") == before + 1
+    assert _audit_count(db_engine, "ApplicationPolicy", "worker-sessions") == sessions_before + 1
 
 
 def test_area_override_api(client: TestClient, db_engine: Engine) -> None:

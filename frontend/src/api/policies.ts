@@ -16,9 +16,10 @@
 // endpoint, and the Settings section's Due Soon warning policy — the
 // window behind every derived due countdown (GUI_DESIGN §3.12 / §9),
 // replaced as a whole (its fields share a cross-field rule). It also
-// holds the Movement-history retention period of History archival &
-// purge, stored for later archival maintenance only — nothing reads it
-// to archive or purge. Security → User sign-in reads the user sign-in
+// holds the settings of History archival & purge (the Movement-history
+// retention period, the shortest allowed period, the Start minute of the
+// host job, the preview time limit and the wait limit; a partial merge,
+// Phase 16), which the host job and the preview read. Security → User sign-in reads the user sign-in
 // policy (how long a user's sign-in lasts, when failed sign-ins lock an
 // account, whether an administrator-set password must be replaced) —
 // readable by any signed-in user, written as a partial merge by users
@@ -210,45 +211,84 @@ export async function updateDueSoonPolicy(
   return toDueSoonPolicy(wire);
 }
 
+/** The settings of Administration → History archival & purge. */
 export interface RetentionPolicy {
   /** The Movement-history retention period in whole months; null = no
-   * retention period. */
+   * retention period (nothing is eligible). */
   retentionPeriodMonths: number | null;
+  /** The shortest retention period allowed, in whole months (changed
+   * only with a reason). */
+  shortestRetentionMonths: number;
+  /** The minute of the hour at which the host job's hourly work starts. */
+  startMinute: number;
+  /** The time limit of a preview, in seconds. */
+  previewSeconds: number;
+  /** Days a run may wait for its off-host copy confirmation (or a failed
+   * last run may stand) before the monitoring line fails. */
+  maxWaitDays: number;
   /** The policy singleton's timestamp (shared by every section). */
   updatedAt: string;
 }
 
-interface RetentionPolicyWire {
-  retention_period_months: number | null;
-  updated_at: string;
-}
+export type RetentionSetting = Exclude<keyof RetentionPolicy, 'updatedAt'>;
+
+/** The wire name of each setting. */
+const RETENTION_WIRE: Record<RetentionSetting, string> = {
+  retentionPeriodMonths: 'retention_period_months',
+  shortestRetentionMonths: 'shortest_retention_months',
+  startMinute: 'archive_start_minute',
+  previewSeconds: 'archive_preview_seconds',
+  maxWaitDays: 'archive_max_wait_days',
+};
 
 const RETENTION_POLICY_PATH = '/api/policies/data-retention';
 
-function toRetentionPolicy(wire: RetentionPolicyWire): RetentionPolicy {
-  return {
-    retentionPeriodMonths: wire.retention_period_months,
-    updatedAt: wire.updated_at,
-  };
+function toRetentionPolicy(wire: Record<string, unknown>): RetentionPolicy {
+  const policy: Record<string, unknown> = { updatedAt: wire.updated_at };
+  for (const [setting, name] of Object.entries(RETENTION_WIRE)) {
+    const value = wire[name];
+    const nullable = setting === 'retentionPeriodMonths';
+    if (typeof value !== 'number' && !(nullable && value === null)) {
+      // An ApiError, so the card states this reason (a plain Error reads
+      // as "could not be reached", which a 200 answer was not).
+      throw new ApiError(
+        200,
+        `The server answered without the History archival & purge setting ${name}.`,
+      );
+    }
+    policy[setting] = value;
+  }
+  return policy as unknown as RetentionPolicy;
 }
 
-/** The Movement-history retention period (Administration → History
+/** The History archival & purge settings (Administration → History
  * archival & purge). */
 export async function getRetentionPolicy(): Promise<RetentionPolicy> {
-  const wire = await apiRequest<RetentionPolicyWire>(RETENTION_POLICY_PATH);
-  return toRetentionPolicy(wire);
+  return toRetentionPolicy(
+    await apiRequest<Record<string, unknown>>(RETENTION_POLICY_PATH),
+  );
 }
 
-/** Set the retention period in whole months, or clear it with null; an
- * unchanged value is a server no-op. */
+/** Store ONLY the provided settings (a partial merge: every other setting
+ * keeps its stored value). `retentionPeriodMonths: null` clears the
+ * retention period; `reason` is sent with a change of the shortest
+ * allowed period (the server requires it then). */
 export async function updateRetentionPolicy(
-  retentionPeriodMonths: number | null,
+  patch: Partial<Omit<RetentionPolicy, 'updatedAt'>>,
+  reason?: string,
 ): Promise<RetentionPolicy> {
-  const wire = await apiRequest<RetentionPolicyWire>(RETENTION_POLICY_PATH, {
-    method: 'PUT',
-    body: { retention_period_months: retentionPeriodMonths },
-  });
-  return toRetentionPolicy(wire);
+  const body: Record<string, unknown> = {};
+  for (const [setting, name] of Object.entries(RETENTION_WIRE)) {
+    const value = patch[setting as RetentionSetting];
+    if (value !== undefined) body[name] = value;
+  }
+  if (reason !== undefined) body.reason = reason;
+  return toRetentionPolicy(
+    await apiRequest<Record<string, unknown>>(RETENTION_POLICY_PATH, {
+      method: 'PUT',
+      body,
+    }),
+  );
 }
 
 export interface BackupPolicy {

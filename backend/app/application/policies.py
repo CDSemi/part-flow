@@ -21,13 +21,20 @@ maximum) and the whole lead-time warning percentage (1-100), audited
 under its own ``entity_id`` ``due-soon`` and written as a full replace
 of the three fields (one form with a cross-field rule). It is display
 configuration behind every derived due countdown; no production command
-reads it. History archival & purge (slice 11): the Movement-history
-retention period — whole months 12-1200 or none — stored as configuration
-for the Phase 16 archival maintenance; nothing in Phase 13 reads it,
-archives or purges (PROJECT_PROFILE §28 "retention settings live in
-Administration/configuration, not in production workflow logic").
-Audited under its own ``entity_id`` ``data-retention``; clearing the
-period (NULL) is a valid, audited change. Phase 14 slice 1 adds the User
+reads it. History archival & purge (slice 11; Phase 16 history archival,
+design B step 1): the Movement-history retention period — whole months from
+the shortest allowed period to 1200, or none —, the shortest allowed period
+(1-1200 months, initially 12, changed only with a reason that the audit
+row's metadata keeps), the days a run may wait for its copy confirmation
+before the host job's status reports it (1-365, initially 7), the Start
+minute of the host job's hourly work (0-59, initially 20) and the preview
+time limit (10-600 seconds, initially 90), a partial merge guarded by Run
+history archival and purge. Only the
+archival module (``app.application.history_archive``) and the host job read
+them — never production workflow logic (PROJECT_PROFILE §28 "retention
+settings live in Administration/configuration"). Audited under its own
+``entity_id`` ``data-retention``; clearing the period (NULL) is a valid,
+audited change. Phase 14 slice 1 adds the User
 sign-in panel of Administration → Settings (owner decisions OD-P1–OD-P3;
 ``entity_id`` ``sign-in``, a partial merge like Worker sessions): whether
 user sign-ins expire and after how many whole days (1-365, default 30),
@@ -114,6 +121,8 @@ from app.infrastructure.models import (
     DUE_SOON_DAYS_MIN,
     DUE_SOON_PERCENT_MAX,
     DUE_SOON_PERCENT_MIN,
+    HISTORY_ARCHIVE_POLICY_RANGES,
+    HISTORY_ARCHIVE_REASON_MAX_LENGTH,
     MAIL_HOST_MAX_LENGTH,
     MAIL_PASSWORD_MAX_LENGTH,
     MAIL_PORT_MAX,
@@ -121,7 +130,6 @@ from app.infrastructure.models import (
     MAIL_TIMEOUT_SECONDS_RANGE,
     MAIL_USERNAME_MAX_LENGTH,
     RETENTION_PERIOD_MONTHS_MAX,
-    RETENTION_PERIOD_MONTHS_MIN,
     SECURITY_POLICY_RANGES,
     SIGN_IN_LOCKOUT_ATTEMPTS_MAX,
     SIGN_IN_LOCKOUT_ATTEMPTS_MIN,
@@ -364,46 +372,110 @@ def update_due_soon_policy(
     return policy
 
 
-def is_retention_period_months(value: object) -> TypeGuard[int]:
-    """A whole number of months from 12 to 1200 (a bool is never a number)."""
+#: The settings of Administration → History archival & purge, in the order
+#: of its audited snapshot (``entity_id`` ``data-retention``).
+HISTORY_ARCHIVE_COLUMNS: Final = (
+    "retention_period_months",
+    "shortest_retention_months",
+    "archive_max_wait_days",
+    "archive_start_minute",
+    "archive_preview_seconds",
+)
+_SHORTEST_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["shortest_retention_months"]
+_MAX_WAIT_DAYS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_max_wait_days"]
+_START_MINUTE_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_start_minute"]
+_PREVIEW_SECONDS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_preview_seconds"]
+_SHORTEST_RETENTION_MESSAGE: Final = (
+    "The shortest allowed period must be a whole number of months from"
+    f" {_SHORTEST_RANGE[0]} to {_SHORTEST_RANGE[1]}."
+)
+_MAX_WAIT_DAYS_MESSAGE: Final = (
+    f"The waiting limit must be a whole number of days from {_MAX_WAIT_DAYS_RANGE[0]} to"
+    f" {_MAX_WAIT_DAYS_RANGE[1]}."
+)
+_START_MINUTE_MESSAGE: Final = (
+    f"The Start minute must be a whole number from {_START_MINUTE_RANGE[0]} to"
+    f" {_START_MINUTE_RANGE[1]}."
+)
+_PREVIEW_SECONDS_MESSAGE: Final = (
+    "The preview time limit must be a whole number of seconds from"
+    f" {_PREVIEW_SECONDS_RANGE[0]} to {_PREVIEW_SECONDS_RANGE[1]}."
+)
+_HISTORY_ARCHIVE_REASON_MESSAGE: Final = (
+    "Enter the reason for changing the shortest allowed period: 1 to 500 characters of plain text."
+)
+
+
+def _retention_message(shortest: int) -> str:
     return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and RETENTION_PERIOD_MONTHS_MIN <= value <= RETENTION_PERIOD_MONTHS_MAX
+        f"The retention period must be a whole number of months from {shortest} to"
+        f" {RETENTION_PERIOD_MONTHS_MAX}, or no retention period."
     )
 
 
-def _retention_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
-    return {"retention_period_months": policy.retention_period_months}
+def history_archive_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
+    """The audited facet of Administration → History archival & purge."""
+    return {column: getattr(policy, column) for column in HISTORY_ARCHIVE_COLUMNS}
 
 
-def update_retention_policy(
-    session: Session, *, retention_period_months: object, actor_user_id: int | None
+def maintenance_reason(value: object, message: str) -> str:
+    """A reason of history archival: trimmed, 1-500 characters, no control character."""
+    if not isinstance(value, str):
+        raise InvalidInputError(message)
+    trimmed = value.strip()
+    if not 1 <= len(trimmed) <= HISTORY_ARCHIVE_REASON_MAX_LENGTH or _CONTROL.search(trimmed):
+        raise InvalidInputError(message)
+    return trimmed
+
+
+def update_history_archive_policy(
+    session: Session, *, changes: dict[str, object], reason: object = UNSET, actor_user_id: int
 ) -> ApplicationPolicy:
-    """Set or clear the Movement-history retention period; a no-op writes and audits nothing.
+    """Merge the given History archival & purge settings; a no-op writes and audits nothing.
 
-    ``None`` clears the period (no retention period). Saving it never
-    archives, deletes, schedules or previews anything.
+    The User sign-in protocol: a field not given keeps its stored value. The
+    retention period is a whole number of months from the shortest allowed
+    period to 1200, or ``None`` (no retention period: nothing is eligible);
+    the shortest allowed period (1-1200 months) changes only with a
+    ``reason``, which the audit row's metadata keeps; the waiting limit of a
+    copy confirmation is 1-365 days, the Start minute 0-59 and the preview
+    time limit 10-600 seconds. Saving archives, deletes or schedules
+    nothing: the host job and the preview read the settings.
     """
-    policy = session.get(
-        ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
-    )
-    if policy is None:  # pragma: no cover - seeded by its migration
-        raise NotFoundError("The application policy is not configured.")
-    period: int | None
-    if retention_period_months is None:
-        period = None
-    elif is_retention_period_months(retention_period_months):
-        period = retention_period_months
-    else:
+    policy = _policy_for_edit(session)
+    if not changes:
+        raise InvalidInputError("Change at least one setting of History archival & purge.")
+    for column, message in (
+        ("shortest_retention_months", _SHORTEST_RETENTION_MESSAGE),
+        ("archive_max_wait_days", _MAX_WAIT_DAYS_MESSAGE),
+        ("archive_start_minute", _START_MINUTE_MESSAGE),
+        ("archive_preview_seconds", _PREVIEW_SECONDS_MESSAGE),
+    ):
+        if column in changes and not _is_whole_in(
+            changes[column], *HISTORY_ARCHIVE_POLICY_RANGES[column]
+        ):
+            raise InvalidInputError(message)
+    before = history_archive_snapshot(policy)
+    after = {**before, **changes}
+    shortest = after["shortest_retention_months"]
+    retention = after["retention_period_months"]
+    if "retention_period_months" in changes and retention is not None:
+        if not _is_whole_in(retention, shortest, RETENTION_PERIOD_MONTHS_MAX):
+            raise InvalidInputError(_retention_message(shortest))
+    elif retention is not None and retention < shortest:
         raise InvalidInputError(
-            "The retention period must be a whole number of months from 12 to 1200,"
-            " or no retention period."
+            f"The shortest allowed period cannot be longer than the retention period ({retention}"
+            " months). Lengthen the retention period first, or in the same change."
         )
-    if policy.retention_period_months == period:
+    if after == before:
         return policy
-    before = _retention_snapshot(policy)
-    policy.retention_period_months = period
+    metadata: dict[str, Any] | None = None
+    if after["shortest_retention_months"] != before["shortest_retention_months"]:
+        if isinstance(reason, UnsetType):
+            raise InvalidInputError(_HISTORY_ARCHIVE_REASON_MESSAGE)
+        metadata = {"reason": maintenance_reason(reason, _HISTORY_ARCHIVE_REASON_MESSAGE)}
+    for column, value in changes.items():
+        setattr(policy, column, value)
     policy.updated_at = func.now()
     audit.append_audit_event(
         session,
@@ -411,8 +483,9 @@ def update_retention_policy(
         entity_type=AuditEntityType.APPLICATION_POLICY,
         entity_id=DATA_RETENTION_SECTION,
         before_data=before,
-        after_data=_retention_snapshot(policy),
+        after_data=history_archive_snapshot(policy),
         actor_user_id=actor_user_id,
+        metadata=metadata,
     )
     commit(session, {})
     return policy

@@ -36,15 +36,19 @@ handlers in ``app.api.errors`` translate typed failures.
   ``null`` or an extra field is 422); the ranges and the minimum ≤
   maximum rule are the Application's 422; answers with the stored
   policy, also when nothing changed.
-- ``GET /policies/data-retention`` — the Movement-history retention
-  period of Administration → History archival & purge (Phase 13 slice
-  11), in whole months or ``null`` (no retention period) — stored only;
-  archival and purge are Phase 16.
-- ``PUT /policies/data-retention`` — exactly
-  ``{"retention_period_months": int | null}``: the key is required and
-  ``null`` clears the period (a missing key, a string, float or bool, or
-  an extra field is 422); the 12-1200 range is the Application's 422;
-  answers with the stored policy, also when nothing changed.
+- ``GET /policies/data-retention`` — the settings of Administration →
+  History archival & purge (Phase 13 slice 11; Phase 16 history archival,
+  design B step 1): the Movement-history retention period in whole months
+  or ``null`` (no retention period), the shortest allowed period, the days
+  a run may wait for its copy confirmation, the Start minute of the host
+  job's hourly work and the preview time limit.
+- ``PUT /policies/data-retention`` — a partial merge like User sign-in
+  (strict integers; ``retention_period_months: null`` clears the period; an
+  empty body or an extra field is 422) plus ``reason``, required when the
+  shortest allowed period changes; the ranges are the Application's 422;
+  requires ``RUN_HISTORY_ARCHIVAL_AND_PURGE``; answers with the stored
+  section, also when nothing changed. Saving archives nothing: the runs are
+  ``/api/history-archive`` (``app.api.history_archive``).
 - ``GET /policies/sign-in`` — Administration → Settings → User sign-in
   (Phase 14 slice 1): whether user sign-ins expire and after how many
   days, the failed sign-ins before a lock, the lock duration and whether
@@ -109,9 +113,10 @@ Access (Phase 14 slice 2): every read needs a signed-in User except
 the Scan Station read it without signing in). Each write needs its
 section's permission — Worker sessions
 ``MANAGE_WORKER_SESSION_POLICIES``, Correction permissions
-``MANAGE_CORRECTION_PERMISSIONS``, Due Soon, data retention, user sign-in,
-backups, the outgoing mail server, two-step sign-in, the password rules and
-Remember me ``CONFIGURE_SYSTEM_SETTINGS`` — and its
+``MANAGE_CORRECTION_PERMISSIONS``, History archival & purge
+``RUN_HISTORY_ARCHIVAL_AND_PURGE``, and Due Soon, user sign-in, backups, the
+outgoing mail server, two-step sign-in, the password rules and Remember me
+``CONFIGURE_SYSTEM_SETTINGS`` — and its
 audit row names the
 signed-in User (``actor_user_id``).
 """
@@ -142,6 +147,9 @@ CorrectionPermissionsManagerDep = Annotated[
 ]
 SystemSettingsManagerDep = Annotated[
     Principal, Depends(RequirePermission(Permission.CONFIGURE_SYSTEM_SETTINGS))
+]
+HistoryArchiveManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE))
 ]
 
 
@@ -223,22 +231,43 @@ def _due_soon_response(policy: ApplicationPolicy) -> DueSoonPolicyResponse:
     )
 
 
-class RetentionPolicyResponse(BaseModel):
+class HistoryArchivePolicyResponse(BaseModel):
     retention_period_months: int | None
+    shortest_retention_months: int
+    archive_max_wait_days: int
+    archive_start_minute: int
+    archive_preview_seconds: int
     # The singleton row's timestamp, shared by every policy section.
     updated_at: datetime.datetime
 
 
-class RetentionPolicyPutRequest(BaseModel):
+class HistoryArchivePolicyPutRequest(BaseModel):
+    """Any non-empty subset of the section; a field left out keeps its value.
+
+    ``retention_period_months: null`` clears the retention period; an
+    explicit ``null`` for another setting reaches the service (exclude_unset)
+    and is refused there. ``reason`` is required when the shortest allowed
+    period changes and recorded with that change only.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    # Required key; null clears the retention period.
-    retention_period_months: StrictInt | None
+    retention_period_months: StrictInt | None = None
+    shortest_retention_months: StrictInt | None = None
+    archive_max_wait_days: StrictInt | None = None
+    archive_start_minute: StrictInt | None = None
+    archive_preview_seconds: StrictInt | None = None
+    reason: str | None = None
 
 
-def _retention_response(policy: ApplicationPolicy) -> RetentionPolicyResponse:
-    return RetentionPolicyResponse(
-        retention_period_months=policy.retention_period_months, updated_at=policy.updated_at
+def _history_archive_response(policy: ApplicationPolicy) -> HistoryArchivePolicyResponse:
+    return HistoryArchivePolicyResponse(
+        retention_period_months=policy.retention_period_months,
+        shortest_retention_months=policy.shortest_retention_months,
+        archive_max_wait_days=policy.archive_max_wait_days,
+        archive_start_minute=policy.archive_start_minute,
+        archive_preview_seconds=policy.archive_preview_seconds,
+        updated_at=policy.updated_at,
     )
 
 
@@ -331,20 +360,22 @@ def put_due_soon_policy(
 
 
 @router.get("/policies/data-retention")
-def get_retention_policy(principal: SignedInDep, session: SessionDep) -> RetentionPolicyResponse:
-    return _retention_response(policies.get_policy(session))
+def get_history_archive_policy(
+    principal: SignedInDep, session: SessionDep
+) -> HistoryArchivePolicyResponse:
+    return _history_archive_response(policies.get_policy(session))
 
 
 @router.put("/policies/data-retention")
-def put_retention_policy(
-    principal: SystemSettingsManagerDep, body: RetentionPolicyPutRequest, session: SessionDep
-) -> RetentionPolicyResponse:
-    policy = policies.update_retention_policy(
-        session,
-        retention_period_months=body.retention_period_months,
-        actor_user_id=principal.user_id,
+def put_history_archive_policy(
+    principal: HistoryArchiveManagerDep, body: HistoryArchivePolicyPutRequest, session: SessionDep
+) -> HistoryArchivePolicyResponse:
+    changes = body.model_dump(exclude_unset=True)
+    reason: object = changes.pop("reason") if "reason" in changes else UNSET
+    policy = policies.update_history_archive_policy(
+        session, changes=changes, reason=reason, actor_user_id=principal.user_id
     )
-    return _retention_response(policy)
+    return _history_archive_response(policy)
 
 
 class SignInPolicyResponse(BaseModel):

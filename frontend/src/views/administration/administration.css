@@ -151,6 +151,11 @@
   color: var(--info-t);
 }
 
+.pillnav.err {
+  background: var(--error-surface);
+  color: var(--err-t);
+}
+
 .admin-notice {
   background: var(--info-surface-weak);
   border: 1px solid var(--info-border);
@@ -397,6 +402,15 @@
   gap: 8px;
 }
 
+/* A section of two cards of values (History archival & purge): two equal
+   columns when two fit, else one full-width column. 25rem holds the
+   widest label-and-value row of those cards (`First and last Movement` —
+   `Jan 03, 2023 – Nov 16, 2024`, 342px measured) on one line. */
+.admin-cards.admin-cards-two {
+  --admin-card-min: 25rem;
+  columns: var(--admin-card-min) 2;
+}
+
 /* A section whose cards hold a table or a wide form: one full-width
    column instead of the equal columns. */
 .admin-cards.admin-cards-stack {
@@ -494,7 +508,9 @@
 
 .admin-cardactionrow {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 8px;
   margin: 4px 0 8px;
 }
 
@@ -511,6 +527,101 @@
   color: var(--err-t);
   font-size: 13px;
   margin: 8px 0;
+}
+
+/* --- History archival & purge ------------------------------------------ */
+
+/* The runs table: each cell may hold several short lines (counts, times,
+   the requester and the reason), top-aligned. */
+.admin-runtable td {
+  vertical-align: top;
+  font-size: 13px;
+}
+
+.admin-runlines {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.admin-runreason {
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The main figure of a cell (the Movements) and its quieter second
+   lines (components and flows, the preview, the archive size). */
+.admin-runmain {
+  font-weight: 700;
+}
+
+.admin-runsub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* An archive name or a SHA-256: a smaller monospace that wraps anywhere
+   rather than widening the table or the dialog. */
+.admin-runarchive {
+  font-family: var(--mono), monospace;
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* One time of a run (`Requested Nov 17, 2026 09:00`). */
+.admin-runtime {
+  font-size: 12px;
+}
+
+/* The full timeline of a run, folded under `All times`. */
+.admin-runtimes summary {
+  color: var(--info-t);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.admin-runtimes summary:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+.admin-runtimes > .admin-runlines {
+  margin-top: 4px;
+}
+
+/* The wide table keeps each run to a few lines: tighter cells, and a
+   date and time, the cutoff and the Movements each on one line (the
+   stacked phone layout keeps its own spacing). */
+@media (min-width: 801px) {
+  .admin-runtable th,
+  .admin-runtable td {
+    padding-left: 9px;
+    padding-right: 9px;
+  }
+
+  .admin-runtable .admin-runwhen,
+  .admin-runtable .admin-runmain,
+  .admin-runtable td[data-label='Cutoff date'] {
+    white-space: nowrap;
+  }
+}
+
+.admin-runactions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* A reason field of an editor dialog. */
+.admin-form textarea.field {
+  height: auto;
+  min-height: 88px;
+  resize: vertical;
+  font-family: inherit;
 }
 
 /* A titled group of fields in a settings dialog (Two-step sign-in). */

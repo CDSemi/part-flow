@@ -339,24 +339,42 @@ class Check(CheckHarness):
                          "FAIL disk_docker 5 % free (5.0 GiB of 100.0 GiB) on the Docker root (images, container logs); threshold 15 %")
         self.assertEqual(self.line("disk_data"), "FAIL disk_data cannot measure: db is not running")
 
-    # CK-10
+    # CK-10 (archival step 1): disk_archive measures PARTFLOW_ARCHIVE_DIR of the env file; --archive-dir is accepted
+    # for compatibility, ignored and named in a warning.
     def test_ck10_archive(self):
         archive = self.tmp / "archive"
         archive.mkdir()
+        self.write_env([*self.env_lines, f"PARTFLOW_ARCHIVE_DIR={sh_path(archive)}"])
         self.prepend("df", rule(r"^-Pk .*archive$", out(df_text(90 * 1048576, 10 * 1048576))))
-        self.check("--only", "disk_archive", "--archive-dir", sh_path(archive))
+        self.check("--only", "disk_archive")
         self.assertExit(1)
         self.assertTrue(self.line("disk_archive").startswith("FAIL disk_archive 10 % free"), self.line("disk_archive"))
-        self.assertIn("on the archive directory", self.line("disk_archive"))
+        self.assertIn("on the archive folder", self.line("disk_archive"))
         self.reset()
         archive = self.tmp / "archive"
         archive.mkdir()
+        self.write_env([*self.env_lines, f"PARTFLOW_ARCHIVE_DIR={sh_path(archive)}/"])
         self.prepend("df", rule(r"^-Pk .*archive$", out(df_text(10 * 1048576, 90 * 1048576))))
-        self.check("--only", "disk_archive", "--archive-dir", sh_path(archive))
+        self.check("--only", "disk_archive")
         self.assertExit(0)
         self.assertTrue(self.line("disk_archive").startswith("PASS disk_archive 90 % free"))
+        self.write_env([*self.env_lines, "PARTFLOW_ARCHIVE_DIR="])
         self.check("--only", "disk_archive")
-        self.assertEqual(self.line("disk_archive"), "SKIP disk_archive no archive directory configured (P16-S8)")
+        self.assertEqual(self.line("disk_archive"),
+                         "SKIP disk_archive archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in .env.production"
+                         " (DEPLOYMENT §3.1)")
+        self.write_env([*self.env_lines, "PARTFLOW_ARCHIVE_DIR=relative/archive"])
+        self.check("--only", "disk_archive")
+        self.assertExit(1)
+        self.assertTrue(self.line("disk_archive").startswith("FAIL disk_archive PARTFLOW_ARCHIVE_DIR and"),
+                        self.line("disk_archive"))
+        self.write_env([*self.env_lines, "PARTFLOW_ARCHIVE_DIR="])
+        self.check("--only", "disk_archive", "--archive-dir", sh_path(archive))
+        self.assertExit(0)
+        self.assertEqual(self.line("disk_archive"),
+                         "SKIP disk_archive archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in .env.production"
+                         " (DEPLOYMENT §3.1)")
+        self.assertIn("--archive-dir is ignored", self.result.stderr)
 
     # CK-11
     def test_ck11_restart_baseline(self):

@@ -62,8 +62,8 @@ the installation.
 | Name and publish a release (developers) | §10 of this guide |
 
 `deploy/production/pf` is the short command for the production stack: `install`, `update`, `backup`, `restore`,
-`status` and `delete-permanently` (Work Orders and Part Numbers entered only for testing, runbook §10), each running
-the documented procedure ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any
+`status`, `archive` (the hourly work of the history archive job now, runbook §11) and `delete-permanently` (Work Orders
+and Part Numbers entered only for testing, runbook §10), each running the documented procedure ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md), Before you run any
 command).
 
 ### 1.3 What is supported
@@ -158,18 +158,21 @@ This section is reference. The installation steps are in the platform guides ([`
 | Service | What it does | Details |
 | --- | --- | --- |
 | `db` | PostgreSQL 16 (`postgres:16.14`, Debian variant) | Network `internal` only; no published port. Data in the volume `partflow-production_postgres_data`. Never an `-alpine` image: text sorting (collation) and the identity check "Canonical identity under the running interpreter and database" (reconcile check (j)) depend on the GNU C Library (glibc). Logs errors without detail lines (`log_error_verbosity=terse`). 60 s stop grace period. |
-| `backend` | The API, image `partflow/backend:<release>` | Networks `internal` and `edge`. Connects as the database role `partflow_app` and mounts only its password file. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` and `DATABASE_ROLES_REQUIRED` are fixed to `true`. Worker count from `PARTFLOW_BACKEND_WORKERS`; forwarded headers trusted from the `edge` subnet only. 200 s stop grace period, above the longest request time of `web` (180 s), so that a running import can finish. `restart: unless-stopped`, never `on-failure`, because with several workers a configuration refusal exits with code 0. When an outgoing mail server is set in Administration → Settings, `backend` connects to it through the `edge` network to send email. |
+| `backend` | The API, image `partflow/backend:<release>` | Networks `internal` and `edge`. Connects as the database role `partflow_app` and mounts only its password file. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` and `DATABASE_ROLES_REQUIRED` are fixed to `true`. Worker count from `PARTFLOW_BACKEND_WORKERS`; forwarded headers trusted from the `edge` subnet only. 200 s stop grace period, above the longest request time of `web` for a change that is written step by step (180 s,
+the import), so that a running import can finish; the history archival preview and run request (up to 610 s) only
+read, or write in one transaction at the end, so a stop can cut them off without a partial change. `restart: unless-stopped`, never `on-failure`, because with several workers a configuration refusal exits with code 0. When an outgoing mail server is set in Administration → Settings, `backend` connects to it through the `edge` network to send email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. The only published port: `127.0.0.1:${PARTFLOW_HTTP_PORT}` to container port 80; there is deliberately no setting for the bind address. No `depends_on`, so it keeps serving the screens while `backend` is stopped. 200 s stop grace period. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Applies database migrations and grants in one transaction. Needs a backup option (Migrations, below). Mounts the backup folder read-only at `/backups`. |
 | `db-roles` | Ops job: `python -m app.cli provision-roles` (default), `apply-grants` or `delete-permanently` | Creates or repairs the database roles and applies the grants (Database roles, below); `pf delete-permanently` runs the deletion of test data in it ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §10). Connects as the owner role and mounts the three secret files. |
 | `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` or `backup-rotate` | Used by `backup.sh`. No network, no database and no secret; mounts only the backup folder at `/backups`. |
 | `status` | Ops job: `python -m app.cli status` | A read-only report as `partflow_app`, with the backup folder mounted read-only. Used by `check.sh`. |
+| `maintenance` | Ops job: `python -m app.cli history-archive <step>` | The history archive job ([`deployment/OPERATIONS_RUNBOOK.md`](./deployment/OPERATIONS_RUNBOOK.md) §11), run by `archive.sh` (and `status` by `check.sh`). Connects as the database role `partflow_maintenance` and mounts only its password file. The only service that mounts the archive folder (at `/archive`); `archive.sh` adds the copy folder at `/archive-copy` when it is usable (Archive folders, below). Network `internal` only. It exports and copies archives and never deletes anything. |
 
 Every service has a restart policy, memory and processor limits from `.env.production`, and log rotation (`json-file`,
 10 MiB per file, 5 files). Every long-running service has a health check; the `backend` health check calls the
 liveness route, so a schema mismatch never marks the container unhealthy. The network `internal` has no route outside
-the host. Run the ops jobs that read or write the backup folder with `--user "$(id -u):$(id -g)"`, because that folder
-has mode 0700 and belongs to the operating account.
+the host. Run the ops jobs that read or write the backup folder or the archive folder with `--user "$(id -u):$(id -g)"`,
+because those folders have mode 0700 and belong to the operating account.
 
 #### Configuration file
 
@@ -184,6 +187,8 @@ example file are exactly the `${NAME}` references of the two production Compose 
 | `PARTFLOW_ACCEPT_SCHEMA_REVISION` | Rollback path 2 only (runbook §6): the one database revision the running release may serve. `release.sh` clears it. | empty |
 | `PARTFLOW_SECRETS_DIR` | Absolute path of the secrets folder, outside the release checkout (folder mode 0700, file mode 0444). | required |
 | `PARTFLOW_BACKUP_DIR` | Absolute path of the production backup folder: outside the release checkout, the secrets folder and any archive folder, never shared with another installation or a restore drill, mode 0700, owned by the operating account. It must exist before the first `$PF` command, because **every** `$PF` command needs it. | required |
+| `PARTFLOW_ARCHIVE_DIR` | Absolute path of the archive folder of History archival & purge (Archive folders, below). Only the `maintenance` service mounts it. | required before the first archival run; empty until then |
+| `PARTFLOW_ARCHIVE_COPY_DIR` | Absolute path of the off-host copy folder on another device (Archive folders, below). Empty: a run waits for its copy to be confirmed in Administration. | empty (optional) |
 | `PARTFLOW_SITE_TIMEZONE` | The factory's time zone, as an IANA name such as `America/Los_Angeles` (§6). | required |
 | `PARTFLOW_HTTP_PORT` | Loopback port that the reverse proxy connects to. | `18080` |
 | `POSTGRES_USER`, `POSTGRES_DB` | Name of the database owner role and of the database. | `partflow_owner`, `partflow` |
@@ -211,7 +216,7 @@ mounted into the containers under `/run/secrets`:
 | --- | --- | --- |
 | `postgres_password` | the owner role: `db`, `migrate`, `db-roles` | One line. `db` reads it **only when it creates a new, empty database volume**; `migrate` and `db-roles` read it every time they run. `backend` never mounts it. |
 | `partflow_app_password` | `backend`, `status`, `db-roles` | One line of 16 to 128 printable ASCII characters without spaces. |
-| `partflow_maintenance_password` | `db-roles` | Same rules, and different from `partflow_app_password`. |
+| `partflow_maintenance_password` | `db-roles`, `maintenance` | Same rules, and different from `partflow_app_password`. |
 
 Create the three files before the first command that starts `backend` or an ops job. If a file is missing, Compose
 creates an empty **folder** with that name instead; remove that folder first (`rmdir <path>`), then create the file.
@@ -229,6 +234,30 @@ done
 Each file holds exactly one line (a final line break is ignored), because PostgreSQL takes a new role's password from
 the first line only. A file that has several lines, is empty, cannot be read or is not UTF-8 is refused with a message
 that names the file, never its content. Changing a password later is a routine task (runbook §9).
+
+#### Archive folders
+
+History archival & purge exports old Movement history into archive files (runbook §11). **The current build step
+exports and copies archives only and never deletes anything.** Two host folders hold the archives; the backend never
+sees either of them.
+
+| Folder | Setting | Rules |
+| --- | --- | --- |
+| Archive folder | `PARTFLOW_ARCHIVE_DIR` | Required before the first archival run. An absolute path, written unquoted, without spaces or `:`; outside the release checkout, the secrets folder and the backup folder. Owned by the account that runs `archive.sh` and `check.sh` (the same account as the backup folder; `root` on the NAS), mode 0700: the `maintenance` job runs as that account (`--user`) and writes there. Without the setting, the `maintenance` service mounts a path that does not exist, so a run fails instead of writing anywhere else. Copied off the host with the backups (NAS guide §11.3). |
+| Copy folder | `PARTFLOW_ARCHIVE_COPY_DIR` | Optional. A folder on **another device**, such as a network share or a USB disk mounted on the host, writable by the same account. With it, each archive is copied there and checked, and the run completes unattended. `archive.sh` and `check.sh` mount it at `/archive-copy` only while it exists, is writable and lies on a file system that is neither the archive folder's nor the root file system `/`, and `archive.sh` checks this again before every step. The mount is a long-syntax bind with `create_host_path: false` in a generated Compose override file (`docker compose run -v` would create a missing folder), so Docker refuses a folder that vanished in between. A disk or share that is not mounted is therefore never mistaken for a copy. Without it, a run waits until its copy is confirmed in Administration. |
+
+Layout of the archive folder (the copy folder holds the same names):
+
+```text
+<PARTFLOW_ARCHIVE_DIR>/
+  .partial/run-<id>-<UTC time>/   while a run is exported and verified (mode 0700)
+  run-<id>-<UTC time>/            published by the verification with one rename, never changed afterwards:
+                                  movements.jsonl.gz, flows.jsonl.gz, lineage.jsonl.gz, assigned_routes.jsonl.gz,
+                                  context.json, manifest.json, README.txt, SHA256SUMS
+```
+
+Files have mode 0600 and folders 0700, as in the backup folder. `sha256sum -c SHA256SUMS` inside a run folder checks
+every file with standard tools alone. A move to another host takes the archive folder along (runbook §6 and §11).
 
 #### Images and release identity
 
@@ -318,14 +347,14 @@ The production database has three roles:
 | --- | --- | --- |
 | Owner (`POSTGRES_USER`, default `partflow_owner`) | `db`, `migrate`, `db-roles`, backups | The PostgreSQL superuser created with the database; it owns every object. Its name must differ from the two roles below. |
 | `partflow_app` | `backend` (the API and its commands `reconcile`, `revision` and the recovery commands) and `status` | Holds only the privileges in the next table. |
-| `partflow_maintenance` | no service yet | Reserved for the planned archival maintenance; holds `SELECT` on a named list of tables only. |
+| `partflow_maintenance` | `maintenance` (the history archive job, runbook §11) | Reads the history it archives and writes the archive records (`history_archive_runs`, `history_archived_flows`) and their audit rows; it holds `SELECT` on a named list of tables, `SELECT`, `INSERT` and `UPDATE` on those two tables and `INSERT` on `audit_events`, and never `DELETE`. |
 
 | Table class | `partflow_app` privileges | Tables |
 | --- | --- | --- |
 | append-only | `SELECT`, `INSERT` | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions` (a row trigger limits the columns) |
+| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions` and `history_archive_runs` (a row trigger limits the changes) |
 | no update | `SELECT`, `INSERT`, `DELETE` | `assigned_route_steps` |
-| read only | `SELECT` | `alembic_version` |
+| read only | `SELECT` | `alembic_version`, `history_archived_flows` |
 | ordinary | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | every other table |
 
 - `provision-roles` (the default of `db-roles`) creates or repairs `partflow_app` and `partflow_maintenance` as
@@ -418,9 +447,13 @@ openssl s_client -connect <host>:443 -servername <host> </dev/null 2>/dev/null |
 | `PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image` | 4 MiB | 60 s |
 | `POST /api/work-orders/import/preview` | 4 MiB | 60 s |
 | `POST /api/work-orders/import` | 4 MiB | 180 s |
+| `GET /api/history-archive/preview`, `GET` and `POST /api/history-archive/runs` | 1 MiB | 610 s |
 
 The 4 MiB limit is above the application's own limits (2 MiB pictures, 1 MiB import files), so the application
-answers a plausible oversized file itself. The largest allowed import, 2,000 Work Orders, takes about half a minute.
+answers a plausible oversized file itself. The history archival preview, and a run request that recomputes it, run up
+to the preview time limit of Administration (90 s initially, at most 600 s), so `web` waits 610 s for them. The
+reverse proxy waits 300 s (Platform proxy requirements, above) and Cloudflare 100 s, so keep the preview time limit
+below the wait of the proxy in use. The largest allowed import, 2,000 Work Orders, takes about half a minute.
 `web` never retries a request, so one user request is at most one backend execution.
 
 **Rate limits, per client address.** `POST /api/session` (sign-in), `POST /api/session/second-step` (the code of
@@ -486,8 +519,9 @@ Strict Transport Security (HSTS) is the reverse proxy's job; `web` does not set 
 | `release.sh` | Installs a new release: backup, build, migration, switch and checks. | runbook §5 |
 | `smoke.sh` | Checks a running release through `web` on the loopback port. It first waits, up to 120 s, while `web` does not accept connections yet or answers 502/504 for a backend that is still starting, because `up -d` returns before they answer. | runbook §5 |
 | `backup.sh` | Takes, verifies and rotates a backup. | runbook §3 |
+| `archive.sh` | The history archive job: run every 5 minutes with `--scheduled` by the host scheduler, it does the hourly work of History archival & purge once an hour at the Start minute of Administration (export, verify and copy of a requested run). It never deletes anything. | runbook §11 |
 | `restore-test.sh` | Restores a backup into a throwaway stack and checks it. | runbook §4 |
-| `check.sh` | Run every 15 minutes by the host scheduler, whose failure notification is the alert. It checks HTTPS readiness, the certificate, the containers, restarts, backend errors, the disks and the read-only `status` report, never changes anything, and exits non-zero when there is something to report. | runbook §2 |
+| `check.sh` | Run every 15 minutes by the host scheduler, whose failure notification is the alert. It checks HTTPS readiness, the certificate, the containers, restarts, backend errors, the disks, the read-only `status` report and the read-only archival status, never changes anything, and exits non-zero when there is something to report. | runbook §2 |
 | `scheduled-reconcile.sh` | Runs the full reconciliation once a day, after the daily backup. | runbook §7 |
 | `reconcile_regression.py`, `monitor_report.py` | Helpers that the scripts call; never run them by hand. | — |
 
@@ -597,8 +631,9 @@ a branch or with an automatic updater: every release is a tag installed on purpo
 ## 8. Moving to another host
 
 A move (for example from the NAS to a VPS) reinstalls the **same** release on the new host and restores a final backup
-taken inside a write freeze on the old host. The two installations must never accept writes at the same time. The
-procedure is in the runbook §6 (Moving to another host).
+taken inside a write freeze on the old host, and takes the archive folder along (§3.1, Archive folders). The two
+installations must never accept writes at the same time. The procedure is in the runbook §6 (Moving to another
+host).
 
 ## 9. External references
 
@@ -734,6 +769,7 @@ References: [Git tags](https://git-scm.com/docs/git-tag) and
 
 | Date | Commit | Change |
 | --- | --- | --- |
+| 2026-11-17 | uncommitted | §1.2, §3.1, §8: `pf archive`, the `maintenance` service and the role it uses, `archive.sh`, the archive and copy folders and their settings, and the 610 s wait of the history archival routes; the current build step exports and copies archives and never deletes anything. |
 | 2026-11-17 | uncommitted | §1.2, §3.1: `pf delete-permanently` in the list of `pf` commands and as a command of `db-roles`. |
 | 2026-11-17 | `1fc96e1` | §3.1: the rate limits of the passkey requests. |
 | 2026-11-17 | `aa6287d` | §3.1: the rate limits of the second step of two-step sign-in, the own email change and the two-step changes that check the password. |

@@ -2435,6 +2435,10 @@ def test_reconciliation_never_writes() -> None:
                 "delete",
                 "merge",
             }, node.func.attr
+    # The retention period is read only by the archival module
+    # (``app.application.history_archive``, history archival design §9.2):
+    # never by reconciliation, which checks what history holds, not what a
+    # setting allows.
     for forbidden in ("pg_advisory", "with_for_update", "retention_period_months"):
         assert forbidden not in source
 

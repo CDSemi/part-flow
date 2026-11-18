@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0039_security_settings`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0040_phase16_history_archive`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -729,7 +729,7 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/worker-sessions` | `{worker_session_timeout_minutes, badge_confirm_done, badge_confirm_queue, badge_confirm_undo}` |
   | `PUT /api/policies/correction-permissions` | `{undo_reason_required}` |
   | `PUT /api/policies/due-soon` | `{due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days}` |
-  | `PUT /api/policies/data-retention` (đặt hoặc xóa khoảng thời gian) | `{retention_period_months}` |
+  | `PUT /api/policies/data-retention` (History archival & purge) | `{retention_period_months, shortest_retention_months, archive_max_wait_days, archive_start_minute, archive_preview_seconds}`, với metadata `{reason}` khi khoảng ngắn nhất được phép thay đổi (các dòng ghi trước `0040_phase16_history_archive` chỉ có `{retention_period_months}`) |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
   | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, với metadata `{mail_password_changed}`; không bao giờ có mật khẩu (các dòng ghi trước `0037_phase17_two_step` không có key `mail_timeout_seconds`) |
@@ -737,9 +737,11 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/password-rules` | `{password_min_length, password_max_length, password_require_digit, password_require_special, password_require_uppercase, password_require_lowercase}` |
   | `PUT /api/policies/remember-me` | `{remember_me_offered, remember_me_expires, remember_me_days}` |
 
-  Các dòng `sign-in`, `backups`, `mail-server` và `two-step` mang `actor_user_id` là User đã đăng nhập. Một lần đổi mật
-  khẩu mail server mà không đổi gì khác vẫn là thay đổi có hiệu lực: hai snapshot bằng nhau và metadata ghi
-  `mail_password_changed: true`.
+  Các dòng `sign-in`, `backups`, `mail-server`, `two-step` và `data-retention` mang `actor_user_id` là User đã đăng
+  nhập. Ở nơi khoảng retention chưa từng được lưu, `0040_phase16_history_archive` đặt nó thành 24 tháng và append một
+  dòng `data-retention` không có actor với metadata `{"source": "migration", "revision":
+  "0040_phase16_history_archive"}`. Một lần đổi mật khẩu mail server mà không đổi gì khác vẫn là thay đổi có hiệu lực:
+  hai snapshot bằng nhau và metadata ghi `mail_password_changed: true`.
 - Các lần ghi mật khẩu append dòng `UPDATED` cho entity type `User` với snapshot `{password_set, password_temporary,
   password_changed_at}` (`password_changed_at` dạng text ISO-8601; không bao giờ là hash, salt, token hay mật khẩu) và
   khóa metadata `password_change` (`SET_BY_ADMINISTRATOR`, `CHANGED_BY_USER` hoặc `RECOVERY_CLI`; lệnh khôi phục còn ghi
@@ -786,6 +788,10 @@ Các ràng buộc được liệt kê ở §17.
   `0033_phase17_super_user_role` bổ sung cho một role đã có tên Super User thay vì seed một role mới, nó thêm một
   dòng `UPDATED` không có actor với metadata
   `{"source": "migration", "revision": "0033_phase17_super_user_role"}`.
+- `0040_phase16_history_archive` cấp key mới `RUN_HISTORY_ARCHIVAL_AND_PURGE` cho role tên Administrator (tên đúng chữ
+  hoa chữ thường trước, rồi tới bất kỳ cách viết hoa nào) và cho mọi role đang có mọi key khác, và append một dòng
+  `UPDATED` cho mỗi role nó thay đổi, không có actor, với metadata `{"source": "migration", "revision":
+  "0040_phase16_history_archive"}`. Downgrade của nó thu hồi key theo cùng cách, metadata có thêm `"downgrade": true`.
 - Theme ưa thích của User (`users.theme_preference`) là tùy chọn hiển thị chỉ được ghi bởi nút chuyển của chính User
   (`PUT /api/session/theme-preference`). Nó không bao giờ được audit, không bao giờ nằm trong snapshot `User`, và không
   thay đổi `users.updated_at`. Lần ghi của nó chỉ lock dòng User (`FOR NO KEY UPDATE`) và không lấy advisory lock
@@ -899,6 +905,19 @@ Migration `0037_phase17_two_step` thêm những điều sau (IMPLEMENTATION_ROAD
 Beyond-demand correction ghi một dòng `work_order_allocations` chỉ-append (với `exceeds_demand`, lý do bắt buộc,
 `actor_user_id`, và các con số trước và yêu cầu trong metadata command của nó) và không ghi dòng `audit_events` nào. Các
 lần gỡ khỏi Hot list mà nó kích hoạt được audit như mô tả ở trên.
+
+### Các lần chạy lưu trữ lịch sử (history archival runs)
+
+- Mỗi lần đổi trạng thái của một lần chạy lưu trữ lịch sử Movement, và việc xác nhận bản sao ngoài host của nó, append
+  một dòng với `entity_type` `HistoryArchiveRun` và `entity_id` là id của lần chạy dạng text, trong cùng transaction với
+  thay đổi.
+- Yêu cầu trong Administration là `CREATED` (`before_data` NULL); mọi thay đổi sau đó là `UPDATED`. Snapshot là mọi cột
+  của `history_archive_runs` (thời điểm dạng text ISO-8601 UTC) cộng `"groups": ["MOVEMENT_HISTORY"]`.
+- Các dòng ghi từ Administration (yêu cầu, hủy, xác nhận bản sao) mang `actor_user_id` và metadata `{"source": "web",
+  "command": "request" | "cancel" | "copy_confirmation"}`. Các dòng do job trên host ghi không có actor, với metadata
+  `{"source": "maintenance", "command": "export" | "verify" | "copy" | "recover"}`.
+- Database role bảo trì chèn các dòng này không dùng `RETURNING`, vì nó được append dòng audit nhưng không bao giờ được
+  đọc chúng, và trigger `trg_audit_events_maintenance_scope` từ chối mọi entity type khác từ nó (§17).
 
 ### User thực hiện
 
@@ -1144,7 +1163,8 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
 - `event_type NOT NULL` với `ck_audit_events_event_type`: `CREATED`, `UPDATED`, `DELETED`, `ROUTE_ADJUSTED`.
 - `entity_type NOT NULL` với `ck_audit_events_entity_type`: `WorkOrder`, `WorkOrderDemand`, `PartNumber`, `Worker`,
   `Department`, `Area`, `Operation`, `ScanStation`, `MachineAssetTagConfig`, `Machine`, `ApplicationPolicy`,
-  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`. Cả hai danh sách mở rộng theo kiểu chỉ-thêm.
+  `RouteTemplate`, `User`, `Role`, `ScanStationDevice`, `AssignedRoute`, `HistoryArchiveRun`. Cả hai danh sách mở rộng
+  theo kiểu chỉ-thêm.
 - `entity_id NOT NULL` (không foreign key: đa hình, §16).
 - `actor_reference` có thể null; `actor_user_id` FK có thể null `fk_audit_events_actor_user_id_users` tới `users (id)`.
 - `occurred_at timestamptz NOT NULL`; `before_data jsonb` có thể null; `after_data jsonb` có thể null; `metadata jsonb`.
@@ -1157,6 +1177,9 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   bằng SQL thô để biểu thức được lưu là biểu thức mà Application phát ra). Nó làm idempotency của adjustment không có
   race.
 - Cơ chế bảo vệ chỉ-append: thu hồi UPDATE và DELETE, cộng trigger raise `trg_audit_events_forbid_mutation` (§16).
+- `trg_audit_events_maintenance_scope` (`0040_phase16_history_archive`): trigger mức dòng `BEFORE INSERT` với `WHEN
+  (NEW.entity_type <> 'HistoryArchiveRun')`, từ chối dòng khi role đang chèn được ghi bản ghi lưu trữ (INSERT trên
+  `history_archived_flows`) và không sở hữu `audit_events`: role bảo trì chỉ append dòng `HistoryArchiveRun`.
 
 ### Bảng policy và Worker Session
 
@@ -1176,10 +1199,20 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   `due_soon_max_days` (mặc định 7, `ck_application_policy_due_soon_max_days_range`, 0–365), với
   `ck_application_policy_due_soon_window_order` (`due_soon_min_days <= due_soon_max_days`)
   (`0025_phase13_display_settings`). Chúng là `integer NOT NULL` và giữ policy cảnh báo Due Soon toàn cục duy nhất.
-- `retention_period_months integer NULL` với `ck_application_policy_retention_period_range` (NULL hoặc 12–1200)
-  (`0027_phase13_retention_period`): khoảng thời gian retention của lịch sử Movement tính bằng tháng nguyên, NULL nghĩa là
-  không có khoảng retention. Đây là cột policy duy nhất không có server default, vì PROJECT_PROFILE §28 cấm một con số
-  retention cố định trong code. Nó được lưu cho việc bảo trì lưu trữ (archival) và không đường sản xuất nào đọc nó.
+- `retention_period_months integer NULL` (`0027_phase13_retention_period`) với
+  `ck_application_policy_retention_period_range` (`0040_phase16_history_archive`: NULL, hoặc từ
+  `shortest_retention_months` tới 1200): khoảng thời gian retention của lịch sử Movement tính bằng tháng nguyên, NULL
+  nghĩa là không có khoảng retention, nên không gì đủ điều kiện để lưu trữ. Đây là cột policy duy nhất không có server
+  default, vì PROJECT_PROFILE §28 cấm một con số retention cố định trong code; `0040_phase16_history_archive` đặt nó thành
+  24 tháng ở nơi không có dòng audit `data-retention` nào cho thấy nó từng được lưu (§16). Chỉ module lưu trữ
+  (`app.application.history_archive`) đọc nó; không đường sản xuất nào đọc.
+- Các thiết lập khác của History archival & purge (`0040_phase16_history_archive`), mỗi cái `integer NOT NULL` với giá
+  trị mặc định và một CHECK khoảng tên `ck_application_policy_<column>_range`: `shortest_retention_months` (12; 1–1200),
+  khoảng retention ngắn nhất được phép, dưới mức đó guard của lần chạy từ chối một cutoff (§17 Các bảng lưu trữ lịch
+  sử); `archive_max_wait_days` (7; 1–365), số ngày một lần chạy được chờ xác nhận bản sao trước khi status của job
+  trên host báo nó; `archive_start_minute` (20; 0–59), phút trong giờ mà công việc hằng giờ của job trên host bắt đầu;
+  và `archive_preview_seconds` (90; 10–600), giới hạn thời gian của một preview, với giá trị mặc định trả lời trong vòng
+  100 giây mà sau đó Cloudflare kết thúc một request. Downgrade từ chối khi một trong số chúng khác giá trị mặc định.
 - `backup_interval_hours` (mặc định 1, `ck_application_policy_backup_interval_hours_allowed`: 1, 2, 3, 4, 6, 8, 12 hoặc
   24), `backup_keep_hourly` (mặc định 48, `ck_application_policy_backup_keep_hourly_range`, 0–720), `backup_keep_daily`
   (mặc định 30, `ck_application_policy_backup_keep_daily_range`, 1–3650) và `backup_keep_weekly` (mặc định 52,
@@ -1244,9 +1277,11 @@ gắn khóa theo tên của chúng.
 
 **`role_permissions`** (`0028_phase13_users_roles`): một dòng cho mỗi grant. PK `pk_role_permissions` `(role_id,
 permission)`; `role_id` FK `fk_role_permissions_role_id_roles` tới `roles (id)`; `permission text NOT NULL` với
-`ck_role_permissions_permission_known`, chấp nhận đúng bộ từ vựng 35 key (mỗi key cho một khả năng của PROJECT_PROFILE
-§20: `Permission` trong `app/domain/enums.py`, được lặp lại dạng literal trong migration và được một schema test ghim cho
-bằng nhau). Một khả năng mới về sau mở rộng CHECK; một key không bao giờ bị đổi tên.
+`ck_role_permissions_permission_known`, chấp nhận đúng bộ từ vựng 36 key (mỗi key cho một khả năng của PROJECT_PROFILE
+§20: `Permission` trong `app/domain/enums.py`, được lặp lại dạng literal trong migration mở rộng nó gần nhất và được một
+schema test ghim cho bằng nhau). `0040_phase16_history_archive` thêm `RUN_HISTORY_ARCHIVAL_AND_PURGE` vào cuối và cấp nó
+cho role tên Administrator và cho mọi role có mọi key khác (§16). Một khả năng mới về sau mở rộng CHECK; một key không bao
+giờ bị đổi tên.
 
 **`users`** (`0028_phase13_users_roles`): tài khoản ứng dụng, không bao giờ là Worker.
 
@@ -1347,6 +1382,85 @@ allocated_by_worker_id IS NULL AND actor_user_id IS NOT NULL)`). Vì vậy một
 không bao giờ là một reversal, không bao giờ được quy cho một Scan Station hay Worker, và luôn được ghi kèm một User đã
 đăng nhập. Downgrade từ chối khi còn bất kỳ dòng correction nào; nếu không, nó bỏ CHECK và cột.
 
+### Các bảng lưu trữ lịch sử
+
+Migration `0040_phase16_history_archive` thêm hai bảng của các lần chạy lưu trữ lịch sử Movement (Phase 16, bước 1 của
+thiết kế lưu trữ: các lần chạy xuất, kiểm tra và sao chép một archive mà không xóa gì).
+
+**`history_archive_runs`**: một dòng cho mỗi lần chạy.
+
+- PK `pk_history_archive_runs` `id` (identity kiểu integer). `state text NOT NULL` với `ck_history_archive_runs_state`:
+  `APPROVED`, `RUNNING`, `WAITING_FOR_COPY`, `COMPLETED`, `NOTHING_ELIGIBLE`, `CANCELLED` hoặc `FAILED`.
+- Yêu cầu, không bao giờ thay đổi: `cutoff timestamptz NOT NULL` (thời điểm bắt đầu một ngày theo lịch của nhà máy),
+  `reason text NOT NULL` (`ck_history_archive_runs_reason_length`, 1–500 ký tự), `requested_by_user_id` FK tới `users
+  (id)`, `requested_at timestamptz NOT NULL DEFAULT now()`, và các số đếm mà preview của nó tìm được:
+  `preview_components`, `preview_flows`, `preview_movements`, `preview_first_occurred_at`, `preview_last_occurred_at` và
+  `preview_archive_bytes` (`ck_history_archive_runs_preview_shape`).
+- Tiến trình của job trên host, tất cả có thể null: `started_at`; `archive_name`, `exported_at`, `exported_components`,
+  `exported_flows`, `exported_movements`, `exported_lineage_edges`, `exported_assigned_routes`, `archive_bytes` và
+  `manifest_sha256`, được đặt cùng nhau (`ck_history_archive_runs_export_shape`;
+  `ck_history_archive_runs_archive_name_shape`: `run-<id>-<UTC stamp>`; `ck_history_archive_runs_manifest_sha256_shape`:
+  64 ký tự thập lục phân chữ thường); `verified_at` cùng `skipped_components` và `skipped_flows`
+  (`ck_history_archive_runs_verify_shape`); `copied_at`; `copy_confirmed_at` đúng cùng với `copy_confirmed_by_user_id`
+  FK tới `users (id)` (`ck_history_archive_runs_copy_confirmation_shape`); `finished_at`, được đặt đúng ở các trạng thái
+  cuối (`COMPLETED`, `NOTHING_ELIGIBLE`, `CANCELLED`, `FAILED`), và `cancelled_by_user_id` FK tới `users (id)`, được đặt
+  đúng khi `CANCELLED` (`ck_history_archive_runs_finish_shape`); `result` (`EXPORT_ONLY`), được đặt đúng khi
+  `COMPLETED` (`ck_history_archive_runs_result_shape`); `failure_reason`, được đặt đúng khi `FAILED`
+  (`ck_history_archive_runs_failure_shape`, tối đa 2.000 ký tự). `ck_history_archive_runs_progress_shape` gắn
+  `started_at` và `verified_at` với các trạng thái cần chúng, và `ck_history_archive_runs_completed_copy` chỉ cho một
+  lần chạy là `COMPLETED` khi `copied_at` hoặc `copy_confirmed_at` đã được đặt.
+- Partial UNIQUE expression index `uq_history_archive_runs_open` trên `((true)) WHERE state IN ('APPROVED', 'RUNNING',
+  'WAITING_FOR_COPY')`: tối đa một lần chạy đang mở, kể cả khi hai yêu cầu chạy đua.
+- Trigger bảo vệ `trg_history_archive_runs_guard_mutation` (mức dòng, `BEFORE INSERT OR DELETE OR UPDATE`) và
+  `trg_history_archive_runs_forbid_truncate` (hàm `partflow_history_archive_runs_guard_mutation`):
+  - một lần chèn phải là `APPROVED` chưa có tiến trình, và cutoff của nó không được mới hơn `now()` trừ
+    `shortest_retention_months` (đọc từ dòng policy; so sánh theo UTC với độ cho phép bốn ngày, vì ứng dụng, nơi duy
+    nhất biết lịch của nhà máy và áp dụng quy tắc chính xác, đếm lùi các tháng từ ngày của nhà máy, ngày này có thể đi
+    trước UTC một ngày vào cuối tháng); lần từ chối đó báo SQLSTATE 23514 với tên trigger làm constraint, nên yêu cầu
+    trả lời 409;
+  - các cột yêu cầu không bao giờ thay đổi, một lần chạy đã kết thúc không bao giờ thay đổi, và không lần chạy nào bị
+    xóa hay truncate;
+  - role ứng dụng chỉ được hủy một lần chạy `APPROVED` hoặc `WAITING_FOR_COPY` và xác nhận bản sao của một lần chạy
+    `WAITING_FOR_COPY` một lần;
+  - mọi chuyển trạng thái khác (`APPROVED` sang `RUNNING` hoặc `FAILED`; `RUNNING` sang `WAITING_FOR_COPY`, `COMPLETED`,
+    `NOTHING_ELIGIBLE` hoặc `FAILED`; `WAITING_FOR_COPY` sang `COMPLETED` hoặc `FAILED`) cần một role được ghi bản ghi
+    lưu trữ (role bảo trì, hoặc owner) trong khi thiết lập cục bộ của transaction `partflow.archive_run_id` chỉ đúng
+    lần chạy đó; một thay đổi như vậy không bao giờ đặt `copy_confirmed_at`, `copy_confirmed_by_user_id` hay
+    `cancelled_by_user_id`, và role bảo trì (một role được ghi bản ghi lưu trữ và không sở hữu bảng) không thay đổi một
+    lần chạy theo cách nào khác, nên chỉ riêng credential của nó không thể xác nhận một bản sao hay hủy một lần chạy.
+
+**`history_archived_flows`**: bản ghi chuyển tiếp (carry-forward record) của từng flow của một component đã lưu trữ, do
+job trên host ghi lúc xuất.
+
+- PK `pk_history_archived_flows` `(run_id, flow_id)`; `run_id` FK tới `history_archive_runs (id)`; FK ghép
+  `fk_history_archived_flows_flow_id_part_number_quantity_flows` `(flow_id, part_number)` tới `quantity_flows (id,
+  part_number)`, nên một dòng flow không thể bị xóa khi bản ghi của nó còn tồn tại, và `part_number` luôn là PN canonical
+  (`ck_history_archived_flows_part_number_canonical`).
+- `component_id` (flow id nhỏ nhất của component), `flow_status` (một trạng thái đã đóng,
+  `ck_history_archived_flows_flow_status`), `movement_count`, `first_movement_id`, `last_movement_id`,
+  `first_occurred_at`, `last_occurred_at` (`ck_history_archived_flows_movement_shape`) và `content_sha256` (SHA-256 của
+  các Movement của flow như archive ghi chúng, `ck_history_archived_flows_content_sha256_shape`).
+- Những gì các bộ đọc và các kiểm tra suy ra từ các Movement đó: `received_quantity`, `received_demand_id` và
+  `received_at` (dòng `RECEIVED`; không FK tới dòng demand, giống Movement), `adjusted_quantity` (`QUANTITY_ADJUSTED` có
+  hiệu lực), `stocked_quantity` cùng `stocked_area_id` và `scrapped_quantity` cùng `scrapped_area_id` (FK tới `areas
+  (id)`; các dòng `STOCKED` và `SCRAPPED` có hiệu lực), và `void_command_ids text[] NOT NULL DEFAULT '{}'` (các command
+  split và merge đã bị undo của nó), mỗi cái có CHECK hình dạng riêng.
+- `skipped_at` (component đã thay đổi giữa lúc xuất và lúc kiểm tra) và `purged_at` (luôn NULL ở bước 1: không gì bị
+  xóa), không bao giờ cả hai (`ck_history_archived_flows_skipped_or_purged`).
+- Index: `ix_history_archived_flows_flow_id`, và partial UNIQUE `uq_history_archived_flows_flow_id_purged` trên
+  `(flow_id) WHERE purged_at IS NOT NULL` (tối đa một bản ghi đã purge cho mỗi flow).
+- Trigger bảo vệ `trg_history_archived_flows_guard_mutation` (mức dòng, `BEFORE INSERT OR DELETE OR UPDATE`) và
+  `trg_history_archived_flows_forbid_truncate` (hàm `partflow_history_archived_flows_guard_mutation`): một bản ghi chỉ
+  được chèn khi lần chạy của nó đang `RUNNING` và `partflow.archive_run_id` chỉ đúng lần chạy đó; thay đổi duy nhất là
+  đặt một `skipped_at` còn trống (lần chạy `RUNNING`) hoặc một `purged_at` còn trống (lần chạy `PURGING`, một trạng thái
+  của bước sau); không bản ghi nào bị xóa.
+- Ở bước 1 không bộ đọc nào cộng các bản ghi này; khi có purge, các bộ đọc chỉ cộng những bản ghi đã purge.
+
+Downgrade của `0040_phase16_history_archive` từ chối khi có một lần chạy, một bản ghi hoặc một dòng audit
+`HistoryArchiveRun`, hoặc khi một trong các thiết lập mới khác giá trị mặc định; nếu không, nó bỏ cả hai bảng, các guard
+và các thiết lập, khôi phục các CHECK trước đó và thu hồi `RUN_HISTORY_ARCHIVAL_AND_PURGE` (§16). Khoảng retention giữ
+nguyên.
+
 ### Ranh giới migration của slice
 
 Các migration đã tạo schema của slice này (`0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`)
@@ -1375,22 +1489,29 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
 - Production stack có ba database role:
   - owner (`POSTGRES_USER`, một superuser), sở hữu mọi đối tượng và chỉ được `db`, `migrate` và `db-roles` dùng;
   - `partflow_app`, được backend dùng;
-  - `partflow_maintenance`, đã được tạo nhưng không service nào dùng cho tới khi có bảo trì lưu trữ (archival).
+  - `partflow_maintenance`, được job trên host của việc lưu trữ lịch sử Movement dùng (`python -m app.cli
+    history-archive`).
 - Cả hai role ứng dụng là `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, không là thành viên
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (35 at head `0039_security_settings`) |
+| Class | `partflow_app` privileges | Tables (37 at head `0040_phase16_history_archive`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở) |
+| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở), `history_archive_runs` (trigger dòng chỉ cho role ứng dụng yêu cầu, hủy và xác nhận một bản sao) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (bước đã qua bất biến nhờ trigger và đặc quyền; một lần điều chỉnh xóa các bước tương lai chưa được tham chiếu) |
-| `READ_ONLY` | SELECT | `alembic_version` |
+| `READ_ONLY` | SELECT | `alembic_version`, `history_archived_flows` |
 | `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
-- `partflow_maintenance` chỉ có SELECT, trên `alembic_version`, `application_policy`, `areas`, `machines`, `operations`,
-  `part_movements`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`, `scan_stations`, `users`,
-  `worker_sessions` và `workers`.
+- `partflow_maintenance` có đúng những gì việc xuất archive và job trên host cần (`MAINTENANCE_PRIVILEGES`): SELECT trên
+  `alembic_version`, `application_policy`, `areas`, `assigned_route_steps`, `assigned_routes`, `machines`, `operations`,
+  `part_movements`, `part_numbers`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
+  `scan_stations`, `users`, `work_order_demands`, `work_orders`, `worker_sessions` và `workers`; SELECT và UPDATE trên
+  `history_archive_runs` (không có INSERT: chỉ một người yêu cầu một lần chạy, trong Administration) và SELECT, INSERT
+  và UPDATE trên `history_archived_flows`, mà trigger bảo vệ của chúng quyết định nó được thay đổi gì;
+  và INSERT, không có SELECT, trên `audit_events`, mà `trg_audit_events_maintenance_scope` giới hạn ở các dòng
+  `HistoryArchiveRun`. Nó không có DELETE ở đâu cả và không bao giờ đọc các bảng credential, session đăng nhập, mail hay
+  thiết bị Scan Station.
 - Không role nào có đặc quyền sequence (cột identity), hay `CREATE` trên schema `public` hoặc trên database. PUBLIC
   không có gì trên bất kỳ bảng hay sequence nào của PartFlow, và default privilege cho PUBLIC và cả hai role đều bị gỡ.
 - Cơ chế bảo vệ cột trên `areas` và `machines` vẫn chỉ dùng trigger.
@@ -1445,7 +1566,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Trường và đồng bộ ERP | hoãn và chưa được duyệt (IMPLEMENTATION_ROADMAP Deferred) | một ranh giới tích hợp tách biệt; `device_event_id` vẫn tương thích |
 | Đồng bộ quét offline | không lên kế hoạch (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §32); các lần ghi sản xuất vẫn bị chặn khi mất kết nối | `device_event_id` được chọn để một thiết kế offline được duyệt trong tương lai không cần đổi tên (§20) |
 | Đưa số lượng đã nhập kho trở lại sản xuất active | không thuộc PartFlow (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §18) | không có |
-| Lưu trữ và xóa (archival và purge) lịch sử Movement bởi quản trị | được lên kế hoạch trong IMPLEMENTATION_ROADMAP Phase 16; khoảng retention đã được lưu (`application_policy.retention_period_months`) nhưng không đường sản xuất nào đọc | một đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
+| Xóa (purge) lịch sử Movement đã lưu trữ | IMPLEMENTATION_ROADMAP Phase 16: các lần chạy lưu trữ đã có và xuất, kiểm tra và sao chép một archive mà không xóa gì (`0040_phase16_history_archive`, §17 Các bảng lưu trữ lịch sử); purge, guard xóa của nó và các bộ đọc bản ghi chuyển tiếp là bước tiếp theo | một đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
 | Các khả năng import file bổ sung | hoãn cho tới khi một quyết định của owner yêu cầu (IMPLEMENTATION_ROADMAP Deferred) | không có thay đổi schema nào được lên kế hoạch |
 
 ---
@@ -1525,7 +1646,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | `GET /api/part-numbers/resolve` trả về dạng canonical của server cho một PN đã nhập, dùng cho Add Part. |
+| 2026-11-17 | uncommitted | Migration head `0040_phase16_history_archive`: các lần chạy lưu trữ lịch sử và bản ghi chuyển tiếp của chúng, các guard, các thiết lập của History archival & purge với mặc định retention 24 tháng, các dòng audit `HistoryArchiveRun`, key `RUN_HISTORY_ARCHIVAL_AND_PURGE` và đặc quyền của role bảo trì. |
+| 2026-11-17 | `1490927` | `GET /api/part-numbers/resolve` trả về dạng canonical của server cho một PN đã nhập, dùng cho Add Part. |
 | 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: các cột quy tắc mật khẩu và Remember me của `application_policy`, các mục audit của chúng và `user_sessions.remembered`. |
 | 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, các cột passkey của `user_sign_in_challenges`, thứ tự lock và snapshot audit có passkey. |
 | 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: ba bảng của xác thực hai bước, các cột policy xác thực hai bước và timeout của mail server, `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, thứ tự lock và các dòng audit (section `two-step` và việc tự đổi email). |

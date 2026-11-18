@@ -17,7 +17,9 @@
 # Exit status (record.json "outcome"): 0 completed; 1 stopped_unchanged / aborted_reopened (nothing changed, or writes
 # reopened on the current release); 2 could_not_run; 3 stopped_frozen (backend left stopped: follow
 # OPERATIONS_RUNBOOK §6); 4 started_needs_review (a check after the switch failed and the re-freeze failed too).
-# Ctrl-C/TERM records "interrupted" with the last step and never starts or stops a service.
+# Ctrl-C/TERM records "interrupted" with the last step and never starts or stops a service. Before any record, it refuses
+# (exit 1) while <records-dir>/.release.lock exists or archive.sh holds <records-dir>/.archive.lock (OPERATIONS_RUNBOOK
+# §11); a run that merely waits for its archive copy confirmation never holds that lock.
 # Every step's output and record.json are written to <records-dir>/<UTC>-<tag>/ (mode 0700).
 set -eu
 
@@ -239,6 +241,64 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     exit 1
 fi
 LOCK_HELD=1
+# The kernel's process information. A constant: the tests point it at a fake tree.
+PROC=/proc
+# boot_id: this boot's id (empty without /proc).
+boot_id() {
+    sed -n '1p' "$PROC/sys/kernel/random/boot_id" 2>/dev/null
+}
+# start_time PID: when PID started, field 22 of /proc/PID/stat in clock ticks since boot (empty when unreadable). The
+# command name (field 2) is in parentheses and may hold spaces, so the fields are counted after its last ')'.
+start_time() {
+    sed -n '1s/^.*) //p' "$PROC/$1/stat" 2>/dev/null | awk '{ print $20 }'
+}
+# owner_alive PID BOOT START: the archive lock's owner (the rule of archive.sh) still runs. A recorded boot id other than this boot's, or a
+# recorded start time other than PID's, proves that PID is now another process (a reboot, or a pid given again); when
+# a value is missing or unreadable (an older owner file, no /proc), `ps -p` alone decides.
+owner_alive() {
+    printf '%s' "$1" | grep -Eq '^[0-9]+$' || return 1
+    ps -p "$1" >/dev/null 2>&1 || return 1
+    alive_boot=$(boot_id)
+    if [ -n "$2" ] && [ -n "$alive_boot" ] && [ "$2" != "$alive_boot" ]; then
+        return 1
+    fi
+    alive_start=$(start_time "$1")
+    if [ -n "$3" ] && [ -n "$alive_start" ] && [ "$3" != "$alive_start" ]; then
+        return 1
+    fi
+    return 0
+}
+# The archive lock (OPERATIONS_RUNBOOK §11): archive.sh holds it only while it does its hourly work, never while a run
+# merely waits for its copy confirmation. Refused unless its owner provably no longer exists (same host, no
+# `maintenance` container running, and its pid gone, or the boot id or the pid's start time differs from the recorded
+# one); archive.sh itself removes such a stale lock at its next start. archive.sh takes its
+# lock first and then checks the release lock, so one of two concurrent starts always refuses.
+ARCHIVE_LOCK=$RECORDS_DIR/.archive.lock
+if [ -d "$ARCHIVE_LOCK" ]; then
+    a_owner=$ARCHIVE_LOCK/owner
+    a_host=$(sed -n 's/^host=//p' "$a_owner" 2>/dev/null | head -n 1)
+    a_pid=$(sed -n 's/^pid=//p' "$a_owner" 2>/dev/null | head -n 1)
+    a_started=$(sed -n 's/^started_at=//p' "$a_owner" 2>/dev/null | head -n 1)
+    a_boot=$(sed -n 's/^boot=//p' "$a_owner" 2>/dev/null | head -n 1)
+    a_start=$(sed -n 's/^start=//p' "$a_owner" 2>/dev/null | head -n 1)
+    a_stale=
+    if [ -f "$a_owner" ] && [ "$a_host" = "$(uname -n)" ] && ps -p "$$" >/dev/null 2>&1 \
+        && ! owner_alive "$a_pid" "$a_boot" "$a_start"; then
+        if [ -n "$PROJECT" ]; then a_project=$PROJECT; else a_project=$(sed -n 's/^name: *//p' compose.production.yaml | head -n 1); fi
+        a_running=$(docker ps -q --filter "label=com.docker.compose.project=$a_project" \
+            --filter "label=com.docker.compose.service=maintenance" 2>/dev/null) || a_running=unknown
+        [ -n "$a_running" ] || a_stale=1
+    fi
+    if [ -z "$a_stale" ]; then
+        rmdir "$LOCK"
+        echo "release: refused — the history archive job holds its lock $ARCHIVE_LOCK (archive.sh on ${a_host:-unknown}," \
+            "pid ${a_pid:-unknown}, since ${a_started:-unknown}). Start the release again once it has finished; if no" \
+            "archive.sh runs, remove $ARCHIVE_LOCK (OPERATIONS_RUNBOOK §11). Nothing was changed." >&2
+        exit 1
+    fi
+    echo "release: the archive lock $ARCHIVE_LOCK was left by an archive.sh that no longer runs (pid ${a_pid:-unknown}," \
+        "since ${a_started:-unknown}); the release continues and the next archive.sh start removes it." >&2
+fi
 utc() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }

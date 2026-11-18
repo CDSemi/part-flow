@@ -1,7 +1,7 @@
 # Cài đặt PartFlow trên Synology NAS
 
 > **Bản gốc:** [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md). Đồng bộ với bản tiếng Anh tại commit `c1f042b` cộng các thay đổi
-> chưa commit ngày 2026-11-16. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> chưa commit ngày 2026-11-16 và 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này cài PartFlow production trên Synology NAS của công ty, từng bước, từ một NAS trống đến khi mọi người làm
@@ -21,8 +21,8 @@ hành hằng ngày sau khi cài nằm trong [`OPERATIONS_RUNBOOK.vi.md`](./OPERA
 - PartFlow chạy trên NAS trong Compose project `partflow-production`, truy cập được tại `https://<HOSTNAME>` từ mạng
   công ty và, nếu bạn chọn, từ Internet qua Cloudflare;
 - Administrator đầu tiên đã được tạo và các thiết bị Scan Station đã được đăng ký (enroll);
-- sau §11, có bản sao lưu đã được xác minh mỗi giờ cùng một bản sao được mã hóa nằm ngoài NAS, và có email cảnh báo
-  khi một kiểm tra thất bại.
+- sau §11, có bản sao lưu đã được xác minh mỗi giờ cùng một bản sao được mã hóa nằm ngoài NAS, có email cảnh báo khi
+  một kiểm tra thất bại, và có tác vụ lưu trữ lịch sử.
 
 ### Bạn cần chuẩn bị
 
@@ -148,6 +148,7 @@ Cả hai dòng kết quả đều bắt đầu bằng `drwx------` và ghi `root
   repo/       the release checkout; .env.production lives here
   secrets/    the three password files (PARTFLOW_SECRETS_DIR)
   backups/    one sub-folder per database backup (PARTFLOW_BACKUP_DIR)
+  archive/    one sub-folder per history archive (PARTFLOW_ARCHIVE_DIR), created in §11.8
 ```
 
 Không bao giờ cấp cho nhóm DSM `Everyone` quyền truy cập các thư mục này, không bao giờ chia sẻ chúng với người dùng
@@ -419,7 +420,8 @@ PartFlow giờ đã chạy production. Hãy đưa mọi người địa chỉ `h
 ## 11. Sau khi đưa vào sử dụng: sao lưu và giám sát
 
 Các tác vụ này được khuyến nghị và không bao giờ chặn việc sử dụng. Cho đến khi tác vụ sao lưu chạy, các bản sao
-lưu duy nhất là những bản mà `release.sh` tạo trước mỗi bản phát hành. Hãy làm theo thứ tự này.
+lưu duy nhất là những bản mà `release.sh` tạo trước mỗi bản phát hành. Hãy làm theo thứ tự này; §11.8, tác vụ lưu
+trữ lịch sử, chỉ cần có trước lần lưu trữ đầu tiên.
 
 ### 11.1 Thông báo qua email
 
@@ -464,7 +466,9 @@ Một bản sao lưu chỉ nằm trên NAS sẽ mất cùng NAS. Hãy sao chép 
 
 1. Cài **Hyper Backup** từ Package Center, mở nó và tạo một **Data backup task**.
 2. Chọn đích nằm ngoài NAS này: một NAS khác, Synology C2 Storage hoặc một dịch vụ tương thích S3.
-3. Ở phần nguồn, chọn thư mục `docker/partflow/backups`.
+3. Ở phần nguồn, chọn các thư mục `docker/partflow/backups` và `docker/partflow/archive` (thư mục lưu trữ của §11.8;
+   chọn nó khi nó đã tồn tại). Các bản lưu trữ không nằm trong bản sao lưu database nào, nên bản sao này là bản duy
+   nhất của chúng nằm ngoài NAS, trừ khi bạn đặt một thư mục sao chép (§11.8).
 4. Bật **client-side encryption**. Giữ mật khẩu và tệp khóa ngoài NAS: không có chúng thì không đọc được các bản sao.
 5. Lên lịch hằng ngày lúc `03:30`, giữa hai bản sao lưu. Đặt việc xoay vòng phiên bản (version rotation) theo quyết
    định của bạn, bật kiểm tra tính toàn vẹn hằng tuần, và bật thông báo email khi thất bại. Sau khi mất NAS, mọi thứ kể
@@ -505,8 +509,8 @@ chỉnh lệnh check theo phương án HTTPS của bạn:
 - **Phương án B (Cloudflare):** không thêm gì. Lệnh check đến PartFlow qua Cloudflare, giống một người dùng.
 
 Thử tác vụ check: chọn nó, bấm **Run**, rồi đọc kết quả trên NAS. Dòng đầu hiển thị thời gian và mã thoát
-(`exit 0`); mọi dòng khác bắt đầu bằng `PASS`, hoặc `SKIP` với một kiểm tra không áp dụng (dòng `archival_proposal`
-luôn là `SKIP`):
+(`exit 0`); mọi dòng khác bắt đầu bằng `PASS`, hoặc `SKIP` với một kiểm tra không áp dụng (các dòng `disk_archive` và
+`archival_proposal` là `SKIP` cho đến khi làm xong §11.8):
 
 ```sh
 cat /root/partflow-monitoring/last-check.txt
@@ -548,11 +552,92 @@ quy tắc của profile đang dùng:
    docker network inspect partflow-production_internal partflow-production_edge --format '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'
    ```
 
+### 11.8 Tác vụ lưu trữ lịch sử
+
+PartFlow có thể chuyển lịch sử Movement cũ vào các tệp lưu trữ (History archival & purge trong Administration; runbook
+§11). **Bước xây dựng hiện tại chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì.** Job lưu trữ lịch sử cần một
+thư mục lưu trữ trên NAS, tùy chọn một thư mục sao chép trên thiết bị khác, và một tác vụ khởi động nó mỗi 5 phút. Hãy
+làm việc này trước khi lần lưu trữ đầu tiên được yêu cầu trong Administration.
+
+1. **Tạo thư mục lưu trữ**, thuộc sở hữu của `root` (tài khoản chạy tác vụ) và chỉ `root` đọc được:
+
+   ```sh
+   mkdir -p /volume1/docker/partflow/archive
+   chown root:root /volume1/docker/partflow/archive
+   chmod 700 /volume1/docker/partflow/archive
+   ls -ld /volume1/docker/partflow/archive
+   ```
+
+   Dòng in ra bắt đầu bằng `drwx------` và nêu tên `root`. Job lưu trữ lịch sử cũng chạy dưới `root` và ghi vào đó.
+
+2. **Đặt nó trong tệp cấu hình.** Hai lệnh này dùng được dù dòng đó đã có hay chưa:
+
+   ```sh
+   cd /volume1/docker/partflow/repo
+   sed -i '/^PARTFLOW_ARCHIVE_DIR=/d' .env.production
+   echo 'PARTFLOW_ARCHIVE_DIR=/volume1/docker/partflow/archive' >> .env.production
+   grep '^PARTFLOW_ARCHIVE' .env.production
+   ```
+
+3. **Tùy chọn: một thư mục sao chép trên thiết bị khác.** Khi không có nó, mỗi lần lưu trữ chờ cho đến khi bạn xác
+   nhận trong Administration rằng bản lưu trữ của nó đã được sao chép ra ngoài NAS (tác vụ Hyper Backup của §11.3 làm
+   việc sao chép đó; runbook §11 giải thích việc xác nhận). Khi có nó, mỗi lần lưu trữ sao chép bản lưu trữ vào đó,
+   kiểm tra bản sao và tự hoàn tất. Thư mục phải nằm trên **thiết bị khác**, được mount trên NAS, và `root` ghi được:
+   - một ổ USB: DSM mount nó dưới `/volumeUSB1/usbshare`; tạo một thư mục trên đó, ví dụ
+     `mkdir -p /volumeUSB1/usbshare/partflow-archive-copy`;
+   - hoặc một thư mục chia sẻ của máy chủ khác: trong **File Station → Tools → Mount Remote Folder → CIFS Shared
+     Folder**, mount nó vào một thư mục rỗng của NAS, ví dụ `/volume1/docker/partflow/archive-copy`, và chọn **Mount
+     automatically on startup**.
+
+   Sau đó đặt thư mục đó trong tệp cấu hình:
+
+   ```sh
+   sed -i '/^PARTFLOW_ARCHIVE_COPY_DIR=/d' .env.production
+   echo 'PARTFLOW_ARCHIVE_COPY_DIR=/volumeUSB1/usbshare/partflow-archive-copy' >> .env.production
+   ```
+
+   Job chỉ dùng thư mục sao chép khi nó tồn tại và nằm trên một hệ thống tệp không phải của thư mục lưu trữ và không
+   phải phân vùng hệ thống `/` của NAS, và nó kiểm tra lại điều này trước mỗi bước. Khi ổ đĩa hoặc thư mục chia sẻ chưa
+   được mount, đường dẫn của nó là một thư mục trên phân vùng hệ thống: job không sao chép gì vào đó, lần lưu trữ chờ,
+   và `check.sh` báo `copy_dir_unusable` kèm lý do. Không bao giờ tự tạo thư mục sao chép khi ổ đĩa hoặc thư mục chia
+   sẻ đang không có.
+
+4. **Tạo tác vụ** như trong §11.2 (User `root`, chỉ gửi email khi script kết thúc bất thường):
+   - **General:** Task `PartFlow history archive`.
+   - **Schedule:** **Run on the following days: Daily**, giờ chạy đầu tiên `00:00`, **Frequency** mỗi 5 phút, giờ chạy
+     cuối cùng `23:55`.
+   - **Run command:**
+
+     ```sh
+     cd /volume1/docker/partflow/repo && HOME=/root deploy/production/archive.sh --scheduled
+     ```
+
+   Hầu hết các lần khởi động kết thúc trong vài giây. Mỗi giờ một lần, ở lần khởi động đầu tiên vào hoặc sau **Start
+   minute** đặt trong Administration → History archival & purge (ban đầu là 20, tránh bản sao lưu mỗi giờ ở phút 0),
+   tác vụ làm phần việc hằng giờ: nó xuất, kiểm tra và sao chép một lần lưu trữ đã được yêu cầu. Lần khởi động đầu
+   tiên chỉ ghi lại giờ hiện tại, nên phần việc hằng giờ đầu tiên đến vào Start minute kế tiếp. Một lần từ chối hoặc
+   thất bại gửi một email cho giờ của nó.
+
+5. **Thử nó.** Chọn tác vụ và bấm **Run**. Sau đó kiểm tra rằng job đến được thư mục của nó và database; lệnh đầu in
+   các dòng của phần việc hằng giờ và kết thúc bằng một dòng bắt đầu bằng `ARCHIVE`:
+
+   ```sh
+   deploy/production/pf archive
+   deploy/production/check.sh --url https://<HOSTNAME> --only disk_archive --only archival_proposal --no-state
+   ```
+
+   Cả hai dòng kiểm tra bắt đầu bằng `PASS`. Thêm các tùy chọn của tác vụ `PartFlow check` của bạn (`--cacert`,
+   `--resolve-to`).
+
+6. Thêm thư mục lưu trữ vào tác vụ Hyper Backup (§11.3, bước 3), nếu bạn chưa làm.
+
 ## 12. Cài một bản phát hành mới
 
 Mọi bản phát hành sau này được cài bằng `deploy/production/release.sh`. Script tạo một bản sao lưu đã xác minh, build các
 image mới mà không động đến các image đang chạy, migrate database, chuyển PartFlow sang bản phát hành mới và kiểm tra nó.
-Hãy chọn thời điểm không có việc nhập Work Order nào đang chạy, sau giờ tròn vài phút, khi bản sao lưu mỗi giờ đã xong.
+Hãy chọn thời điểm không có việc nhập Work Order nào đang chạy, sau giờ tròn vài phút, khi bản sao lưu mỗi giờ đã xong,
+và khá lâu trước Start minute của tác vụ lưu trữ lịch sử: một bản phát hành bị từ chối khi tác vụ đó đang làm phần việc
+hằng giờ (hãy chạy lại khi phần việc đã xong), và tác vụ từ chối khi một bản phát hành đang chạy.
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -598,13 +683,15 @@ Giữ đủ dung lượng đĩa trống cho database, các image của ít nhấ
 các bản sao lưu cục bộ. Một bản sao lưu cần dung lượng trống bằng hai lần bản sao lưu mới nhất cộng 1 GiB trong thư mục
 sao lưu; một buổi diễn tập khôi phục cần năm lần bản sao lưu cộng 1 GiB trên vùng lưu trữ của Docker. Các kiểm tra đĩa
 của `check.sh` thất bại khi dung lượng trống dưới 15 %: `disk_data` cho volume database, `disk_backup` cho thư mục sao
-lưu và `disk_docker` cho vùng lưu trữ của Docker (image và log của container). `/root/partflow-monitoring/growth.tsv`
-ghi kích thước database mỗi ngày một lần.
+lưu, `disk_docker` cho vùng lưu trữ của Docker (image và log của container) và `disk_archive` cho thư mục lưu trữ
+(§11.8). Thư mục lưu trữ lớn dần theo mỗi lần lưu trữ; không có gì tự động xóa các bản lưu trữ.
+`/root/partflow-monitoring/growth.tsv` ghi kích thước database mỗi ngày một lần.
 
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
+| 2026-11-17 | uncommitted | §11.8: thư mục lưu trữ, thư mục sao chép tùy chọn và tác vụ lưu trữ lịch sử mỗi 5 phút, chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì; §4, §11.3, §11.5, §12 và §13 cho thư mục lưu trữ. |
 | 2026-11-16 | uncommitted | §7, §12: `deploy/production/pf install` và `pf update` chạy các bước này. |
 | 2026-11-16 | `c1f042b` | §1, §11.2: tác vụ sao lưu chạy mỗi giờ với `--kind scheduled`, và Administration → Backups đặt khoảng thời gian và số bản sao lưu được giữ; §11.3, §11.5, §12: các giờ quanh bản sao lưu mỗi giờ. |
 | 2026-11-12 | `de4d99f` | §12: Scan Station hoặc Production Board tự tải lại sau 10 giây đếm ngược trong thông báo thay vì sau một phút, và mọi trang khác khi rảnh 1 phút thay vì 2 phút. |

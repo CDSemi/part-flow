@@ -5,8 +5,8 @@
 > hiệu lực.
 
 Runbook này gồm các thủ tục vận hành PartFlow production sau khi đã cài đặt: kiểm tra tình trạng, sao lưu và thử
-khôi phục, cài bản phát hành (release) mới, quay lui (rollback), chạy đối soát (reconciliation), xử lý sự cố và lịch
-làm việc định kỳ. Tài liệu viết cho người vận hành (operator), hiện cũng là chủ sở hữu (owner). Việc cài đặt nằm
+khôi phục, cài bản phát hành (release) mới, quay lui (rollback), chạy đối soát (reconciliation), xử lý sự cố, lịch
+làm việc định kỳ và việc lưu trữ lịch sử Movement. Tài liệu viết cho người vận hành (operator), hiện cũng là chủ sở hữu (owner). Việc cài đặt nằm
 trong [`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) (hoặc [`VPS.vi.md`](./VPS.vi.md)); mọi thiết lập và giới hạn của
 hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1.
 
@@ -27,6 +27,7 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Tìm xem một bản phát hành trước đây đã làm gì | §1 |
 | Dùng lệnh ngắn `pf` để cài đặt, cập nhật, sao lưu, khôi phục hoặc xem trạng thái | Trước khi chạy bất kỳ lệnh nào |
 | Xóa các Work Order và Part Number chỉ được nhập để thử nghiệm | §10 |
+| Hiểu job lưu trữ lịch sử, kiểm tra hoặc xác nhận một lần lưu trữ, xử lý một lần lưu trữ thất bại, hoặc kiểm tra một bản lưu trữ | §11 |
 
 ## Trước khi chạy bất kỳ lệnh nào
 
@@ -59,10 +60,12 @@ nó.
 | `pf restore <NAME> --approved-by <owner>` | Khôi phục vào instance mới (new-instance restore) của §6 vào một database trống, với sự phê duyệt của chủ sở hữu được ghi vào `restore.json` trước khi `backend` khởi động. |
 | `pf status [--url https://<partflow-host>]` | Các container, `/api/health` và tóm tắt của `status` (§2); với `--url`, `check.sh --no-state`. |
 | `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | Bản xem trước việc xóa các Work Order và Part Number chỉ nhập để thử nghiệm; với `--confirm`, một bản sao lưu thủ công đã kiểm tra rồi việc xóa trong một transaction (§10). |
+| `pf archive` | Chạy ngay phần việc hằng giờ của job lưu trữ lịch sử, tức `archive.sh` không có `--scheduled` (§11). Nó chỉ xuất và sao chép bản lưu trữ, không bao giờ xóa gì. |
 
 Quy ước: tác vụ chạy một lần (one-shot job) đọc hoặc ghi thư mục sao lưu chạy với `--user "$(id -u):$(id -g)"`, vì
 thư mục đó có mode 0700. `<partflow-host>` là tên miền truy cập (host name) mà mọi người gõ trên trình duyệt,
-`<backup-dir>` là giá trị của `PARTFLOW_BACKUP_DIR`, `<secrets-dir>` là giá trị của `PARTFLOW_SECRETS_DIR`,
+`<backup-dir>` là giá trị của `PARTFLOW_BACKUP_DIR`, `<archive-dir>` là giá trị của `PARTFLOW_ARCHIVE_DIR`,
+`<secrets-dir>` là giá trị của `PARTFLOW_SECRETS_DIR`,
 `<records-dir>` là thư mục hồ sơ triển khai (records directory) `~/partflow-deployments`, và `<NAME>` là tên của một
 bản sao lưu. Thời gian trong báo cáo và hồ sơ là giờ phối hợp quốc tế (UTC); báo cáo và hồ sơ là các tài liệu JSON.
 
@@ -78,6 +81,8 @@ kiểm tra những gì.
 | `<UTC>-restore-test-<NAME>/` | `restore-test.sh` | `evidence.json`, kết quả của lần diễn tập (§4) |
 | thư mục của bản phát hành bị hoàn tác | bạn, khi quay lui theo đường 3 (path 3) (§6) | `rollback.json`, `rollback-reconcile.json` |
 | `<UTC>-restore-<NAME>/` | bạn, khi khôi phục sang bản cài mới (§6) | `restore.json` |
+| `archive/<UTC>/` | `archive.sh`, chỉ cho một lần làm việc hằng giờ đã làm gì đó hoặc thất bại (§11) | một báo cáo JSON và một log cho mỗi bước (`recover`, `next`, `export`, `verify`, `copy`, `status`), và `messages.log` |
+| `archive/hourly-slot` | `archive.sh --scheduled` (§11) | dấu mốc hằng giờ: phút của lần làm việc hằng giờ gần nhất đã được thử |
 
 `record.json` chứa bản phát hành (tag, commit, tag trước đó, image ID), các revision của database trước và sau, người
 vận hành và người phê duyệt (approver), thời điểm, bản sao lưu trước phát hành và kết quả kiểm tra nó, kết quả
@@ -133,20 +138,22 @@ Nó in một dòng cho mỗi kiểm tra, `PASS|FAIL|SKIP <id> <reason>`, theo th
 | `disk_data` | volume của database còn trống dưới 15 % (`--min-free-percent`) |
 | `disk_backup` | thư mục sao lưu còn trống dưới 15 % |
 | `disk_docker` | bộ nhớ của Docker (image và log của container) còn trống dưới 15 % |
-| `disk_archive` | thư mục lưu trữ (archive) còn trống dưới 15 %; `SKIP` khi chưa chỉ định thư mục lưu trữ (`--archive-dir`) |
+| `disk_archive` | thư mục lưu trữ (archive, `PARTFLOW_ARCHIVE_DIR`) còn trống dưới 15 %; `SKIP` khi việc lưu trữ chưa được thiết lập (giá trị đang trống) |
 | `database` | báo cáo `status` không chạy được, không trả lời trong 120 s, hoặc báo lỗi database |
 | `schema` | `status` báo schema chưa sẵn sàng |
 | `backup_age` | không tìm thấy bản sao lưu đã công bố, không đọc được thư mục sao lưu, hoặc bản sao lưu mới nhất thuộc bất kỳ loại nào hoàn tất cách đây lâu hơn khoảng thời gian sao lưu theo lịch của Administration → Backups cộng 2 giờ (ban đầu là 3 giờ; `--max-backup-age-hours` đặt giới hạn khác) |
-| `archival_proposal` | luôn `SKIP`: việc lưu trữ lịch sử Movement chưa được triển khai |
+| `archival_proposal` | `history-archive status` chỉ đọc báo một phát hiện, được nêu tên trong dòng: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable` hoặc `copy_dir_unusable` (§11); `SKIP` khi việc lưu trữ chưa được thiết lập |
 
-- Bốn dòng cuối đến từ một lần chạy `status` chỉ đọc. Khi một bản phát hành đang giữ khóa của nó, hoặc `release.sh`
-  đang giữ khóa sao lưu, chúng là `SKIP`. Khi khóa như vậy cũ hơn 4 giờ, lần chạy báo `FAIL database` và nêu tên khóa,
-  vì một `release.sh` bị kill sẽ để lại khóa (§3, Khóa sao lưu và khóa phát hành).
+- Các dòng `database`, `schema` và `backup_age` đến từ một lần chạy `status` chỉ đọc, còn `archival_proposal` đến từ
+  một lần chạy `history-archive status` chỉ đọc trong dịch vụ `maintenance` (§11). Khi một bản phát hành đang giữ khóa
+  của nó, hoặc `release.sh` đang giữ khóa sao lưu, bốn dòng này là `SKIP`. Khi khóa như vậy cũ hơn 4 giờ, lần chạy báo
+  `FAIL database` và nêu tên khóa, vì một `release.sh` bị kill sẽ để lại khóa (§3, Khóa sao lưu và khóa phát hành).
 - Mã thoát (exit code): 0 không có gì để báo, 1 có ít nhất một `FAIL`, 2 không chạy được kiểm tra; cả 1 lẫn 2 đều
   kích hoạt thông báo lỗi của trình lập lịch. Một tập thất bại không đổi chỉ được báo lại sau 6 giờ
   (`--renotify-hours`); khi đó đầu ra ghi `already reported`.
 - `check.sh` giữ trạng thái của nó trong `~/partflow-monitoring` (mode 0700), gồm `last-check.txt` (các dòng của lần
-  chạy gần nhất) và `growth.tsv` (kích thước database mỗi ngày một lần).
+  chạy gần nhất), `growth.tsv` (kích thước database mỗi ngày một lần) và `archive-status.json` (báo cáo
+  `history-archive status` gần nhất).
 - Kiểm tra `errors` chỉ đọc log của container `backend` hiện tại, và Docker xóa log của container cùng với container.
   Sau khi `backend` được tạo lại (do phát hành hoặc đổi mật khẩu), lần chạy thêm một dòng `NOTE errors`. **Trước khi
   bạn tạo lại `backend` bằng tay**, hãy chạy `deploy/production/check.sh --url https://<partflow-host> --only errors --no-state`
@@ -859,6 +866,9 @@ tạm dừng ghi trên máy chủ cũ. Hai bản cài không bao giờ được 
    sống (time to live, TTL) của DNS trước đó, đổi bản ghi và kiểm thử từ các máy khách.
 8. Giữ `backend` của máy chủ cũ ở trạng thái dừng và dữ liệu của nó không bị đụng đến cho đến khi bạn chắc chắn sẽ
    không quay lại. Không bao giờ khởi động lại nó với việc ghi khi máy chủ mới đang chạy.
+9. Chuyển cả thư mục lưu trữ (§11, Chuyển sang máy chủ mới): các bản lưu trữ thuộc về bản cài đặt, và không nơi nào
+   khác giữ chúng. Thư mục sao chép ngoài máy chủ, nếu có, vẫn ở nguyên chỗ; chỉ đặt `PARTFLOW_ARCHIVE_COPY_DIR` trên
+   máy chủ mới khi thư mục đó có thể được mount ở đó.
 
 ## 7. Đối soát
 
@@ -985,6 +995,7 @@ chúng vào ticket hay email. Không công cụ nào xóa chúng; hãy xóa bằ
 | `check.sh`: `FAIL https host name ... not resolved (curl 6)` | Máy chủ không phân giải được tên PartFlow của chính nó: thêm `--resolve-to 127.0.0.1` (phương án A), hoặc sửa DNS. |
 | `check.sh`: `FAIL backup_age` | Sao lưu theo lịch không chạy hoặc thất bại: kiểm tra tác vụ và email của nó, rồi chạy sao lưu thủ công (§3). |
 | `check.sh`: `FAIL disk_...` | Áp lực về database hoặc dung lượng lưu trữ, bên dưới. |
+| `check.sh`: `FAIL archival_proposal`, hoặc email báo lỗi của tác vụ lưu trữ | §11: dòng kiểm tra và email nêu tên phát hiện hoặc bước. |
 | `check.sh` hoặc `release.sh`: một khóa cũ hơn 4 giờ, một bản phát hành khác đang giữ khóa, hoặc `backup_lock_stale` | Một lần chạy bị kill để lại khóa của nó: §3, Khóa sao lưu và khóa phát hành. |
 | `backup_running` | Một bản sao lưu, hoặc một lần phát hành đang giữ khóa sao lưu, đang chạy: chờ rồi chạy lại. |
 | Email của tác vụ theo lịch ghi `HOME is not set` | Thêm `HOME=/root` ở đầu phần script trong lệnh của tác vụ ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.5). |
@@ -1139,8 +1150,9 @@ lấy từ `$PF logs backend | grep "Setup token" | tail -n 1`).
 - Quy tắc về dung lượng: một bản sao lưu cần dung lượng trống gấp hai lần dump mới nhất cộng phần dự phòng trong thư
   mục sao lưu; một lần khôi phục theo đường 3 cần kích thước database cộng hai lần dump cộng 1 GiB trên volume
   database (§6); một khóa sao lưu cũ chặn sao lưu và phát hành cho đến khi nó được xóa (§3).
-- Mở rộng dung lượng lưu trữ. Việc lưu trữ (archival) và xóa hẳn (purge) lịch sử Movement đã được lên kế hoạch nhưng
-  chưa được triển khai ([`../IMPLEMENTATION_ROADMAP.vi.md`](../IMPLEMENTATION_ROADMAP.vi.md), Phase 16).
+- Mở rộng dung lượng lưu trữ. Job lưu trữ lịch sử hiện nay chỉ xuất lịch sử Movement ra các bản lưu trữ và không xóa
+  gì (§11), nên nó không giải phóng dung lượng database; việc xóa hẳn (purge) đã được lên kế hoạch
+  ([`../IMPLEMENTATION_ROADMAP.vi.md`](../IMPLEMENTATION_ROADMAP.vi.md), Phase 16).
 - Chạy đối soát trước khi mở lại việc ghi.
 
 ### Máy chủ hỏng (Host failure)
@@ -1160,10 +1172,11 @@ phục chấp nhận được; các giá trị ở đây là ví dụ làm việ
 
 | Khi nào | Tác vụ |
 | --- | --- |
-| Mỗi 15 phút (tự động) | `check.sh`: tình trạng, các lần khởi động lại, đĩa, chứng chỉ, tuổi bản sao lưu và lỗi backend (§2). Một thất bại không đổi được nhắc lại mỗi 6 giờ. |
+| Mỗi 15 phút (tự động) | `check.sh`: tình trạng, các lần khởi động lại, đĩa, chứng chỉ, tuổi bản sao lưu, lỗi backend và trạng thái lưu trữ (§2). Một thất bại không đổi được nhắc lại mỗi 6 giờ. |
+| Mỗi 5 phút (tự động) | `archive.sh --scheduled`: mỗi giờ một lần, vào Start minute của Administration → History archival & purge, job lưu trữ lịch sử xử lý một lần lưu trữ đã được yêu cầu (§11). |
 | Hằng ngày | Sao lưu theo lịch (mỗi giờ) và đối soát theo lịch lúc 04:00 tự chạy. Đọc mọi email báo lỗi, kể cả của bản sao ngoài máy chủ; mã thoát 4 của một bản sao lưu bao gồm cả trường hợp một bản sao lưu theo lịch không qua kiểm tra. |
 | Hằng tuần | Xem xét mức tăng của database (`~/partflow-monitoring/growth.tsv`) và `docker stats --no-stream`. Xem xét các lần đăng nhập thất bại và quyền bị từ chối: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` và `refusal.code` phân biệt đăng nhập bị từ chối hoặc bị khóa, từ chối quyền, `station_device_required`, `station_device_mismatch` và `csrf_rejected`). Kiểm tra các bản cập nhật bảo mật đang chờ của máy chủ. |
-| Hằng tháng | Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
+| Hằng tháng | Xác nhận bản sao ngoài máy chủ của mọi lần lưu trữ đang chờ việc đó (§11). Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
 | Hằng quý, và sau một thay đổi schema lớn | Diễn tập khôi phục (§4); so sánh các thời gian `restore_to_ready` và `total` của nó với thời gian nhà máy có thể làm việc mà không có PartFlow. |
 | Trước khi đổi image PostgreSQL hoặc glibc của máy chủ | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Trước mỗi lần phát hành | Xem xét các migration, quyết định quay lui và các kiểm tra (§5); `release.sh` tạo bản sao lưu. |
@@ -1197,8 +1210,8 @@ nó, §2).
 
   Sau đó kiểm tra health (§2). Lệnh `up -d backend` thông thường không nhận mật khẩu mới, vì container không được
   tạo lại, và chạy `db-roles` trong khi `backend` đang phục vụ làm các kết nối mới của nó thất bại. Với
-  `partflow_maintenance_password`, thay tệp đó và chỉ chạy lệnh `db-roles`: hiện chưa có dịch vụ nào dùng role đó, nên
-  không cần tạm dừng ghi.
+  `partflow_maintenance_password`, thay tệp đó và chỉ chạy lệnh `db-roles`, tránh thời điểm Start minute của job lưu
+  trữ lịch sử: chỉ job một lần (one-shot) đó dùng role này (§11), nên không cần tạm dừng ghi.
 - **Mật khẩu chủ sở hữu** (`postgres_password`): đổi trong database trước, rồi thay tệp. Không cần khởi động lại,
   vì chỉ `migrate` và `db-roles` chạy một lần đọc nó.
 
@@ -1296,10 +1309,181 @@ Lệnh từ chối, không xóa gì và nêu tên từng liên kết khi dữ li
 | 1 | Bị từ chối: không có gì bị xóa, và với `--confirm` không có bản sao lưu nào được tạo. |
 | 2 | Không thể chạy hoặc thất bại: không có gì bị xóa (ví dụ việc sao lưu thất bại, không kết nối được database, hoặc không được cấp khóa bảng kịp thời). Khi kết nối database bị lỗi đúng lúc commit, báo cáo ghi `outcome_unknown`: hãy chạy lại bản xem trước để biết bản ghi nào còn tồn tại. |
 
+## 11. Lưu trữ lịch sử (History archival)
+
+PartFlow chuyển lịch sử Movement cũ ra khỏi database vào các tệp lưu trữ: đó là History archival & purge
+([`../PROJECT_PROFILE.vi.md`](../PROJECT_PROFILE.vi.md), Administrative Archival and Purge). **Bước xây dựng hiện tại
+chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì:** mỗi lần lưu trữ (run) kết thúc ở `COMPLETED` với kết quả
+`EXPORT_ONLY` (chỉ xuất), hoặc ở `NOTHING_ELIGIBLE`, `CANCELLED` hay `FAILED`, và lịch sử Movement vẫn ở trong
+database. Việc xóa hẳn (purge), bản sao lưu trước đó, các yêu cầu xóa và xem, và các lần lưu trữ tự động là những bước
+xây dựng sau.
+
+Một người dùng có quyền **Run history archival and purge** đặt thời hạn lưu giữ và các thiết lập khác, xem bản xem
+trước và yêu cầu một lần lưu trữ trong **Administration → History archival & purge**; yêu cầu chính là sự phê duyệt.
+Ứng dụng web không bao giờ đụng đến thư mục lưu trữ. **Job lưu trữ lịch sử** (history archive job) trên máy chủ làm
+phần việc đó.
+
+### Job lưu trữ làm gì (What the archive job does)
+
+Một tác vụ trên máy chủ khởi động `deploy/production/archive.sh --scheduled` mỗi 5 phút
+([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8). Mỗi giờ một lần, ở lần khởi động đầu tiên vào hoặc sau **Start
+minute** đặt trong Administration (ban đầu là 20), nó làm **phần việc hằng giờ**; mọi lần khởi động khác kết thúc
+trong vài giây và in `NOT_DUE`. Lần khởi động đầu tiên sau khi tạo tác vụ chỉ ghi lại giờ hiện tại, nên phần việc
+hằng giờ đầu tiên đến vào Start minute kế tiếp. `deploy/production/pf archive` chạy phần việc hằng giờ ngay, bất kể
+giờ nào.
+
+Phần việc hằng giờ chạy các bước sau trong dịch vụ một lần (one-shot) `maintenance`, dịch vụ này kết nối bằng role
+database bảo trì (`partflow_maintenance`, được đọc lịch sử và ghi các bản ghi lưu trữ nhưng không bao giờ xóa) và là
+dịch vụ duy nhất mount thư mục lưu trữ:
+
+1. `recover`: một lần lưu trữ bị bỏ lại ở `RUNNING` bởi một job đã dừng (khởi động lại, mất điện) trở thành `FAILED`,
+   và các thư mục dở dang của những lần đã kết thúc được xóa khỏi `.partial/`.
+2. `next`: lần lưu trữ cần xử lý, nếu có.
+3. Với một lần đã được phê duyệt: `export` ghi bản lưu trữ vào `<archive-dir>/.partial/`, `verify` đọc lại mọi tệp,
+   so sánh với database và công bố thư mục `<archive-dir>/run-<id>-<giờ UTC>/`, và `copy` sao chép nó sang thư mục
+   sao chép ngoài máy chủ và kiểm tra bản sao (Bản sao ngoài máy chủ, bên dưới). Khi không có gì đủ điều kiện, lần lưu
+   trữ kết thúc ở `NOTHING_ELIGIBLE` sau bước export.
+4. Với một lần đang chờ bản sao: chạy lại `copy`, bước này hoàn tất lần lưu trữ khi bản sao đã được tạo hoặc xác nhận.
+5. `status`: lần lưu trữ đang mở, lần đã kết thúc gần nhất và dung lượng trống, cho việc giám sát.
+
+Một lần lưu trữ lớn đầu tiên có thể kéo dài; các lần khởi động sau khi đó sẽ chờ. Start minute thay đổi có hiệu lực từ
+phần việc hằng giờ kế tiếp.
+
+**Mã thoát của `archive.sh`.** Email báo lỗi của tác vụ trên máy chủ là cảnh báo. Khi thành công, nó in một dòng:
+`NOT_DUE`, `DEFERRED archive_running` (lần khởi động trước vẫn đang làm phần việc hằng giờ của nó), hoặc
+`ARCHIVE <outcome> <run> <state>`, ví dụ `ARCHIVE completed 3 COMPLETED`.
+
+| Mã thoát | Ý nghĩa | Cần làm gì |
+| --- | --- | --- |
+| 0 | Xong, hoặc không có gì đến hạn. | Không cần gì. |
+| 1 | Bị từ chối, không có gì thay đổi: một bản phát hành đang chạy, một `archive.sh` khác giữ khóa lưu trữ, hoặc một lệnh history-archive khác đang chạy. | Không cần gì: lần khởi động của giờ sau sẽ thử lại. Nếu bị từ chối lặp lại: Các khóa, bên dưới. |
+| 2 | Không thể chạy: cấu hình, Docker hoặc database, hoặc một bước có kết quả không xác định. | Đọc email; sửa nguyên nhân. Một lần lưu trữ bị bỏ lại ở `RUNNING` sẽ được bước `recover` của lần khởi động sau chuyển sang thất bại. |
+| 3 | Một lần lưu trữ thất bại: nó hiện là `FAILED`. | Một lần lưu trữ thất bại, bên dưới. |
+
+Một lần khởi động theo lịch chỉ báo một lần từ chối hoặc thất bại một lần cho giờ của nó, không bao giờ ở mỗi lần khởi
+động 5 phút. Báo cáo của một lần làm việc hằng giờ đã làm gì đó hoặc thất bại nằm trong `<records-dir>/archive/<UTC>/`
+(§1).
+
+**Các khóa (Locks).** `archive.sh` giữ `<records-dir>/.archive.lock` (tệp `owner` của nó ghi máy chủ, mã tiến trình
+(pid), thời điểm bắt đầu, `archive.sh`, mã lần khởi động (boot id) của kernel và thời điểm bắt đầu của tiến trình
+theo cách kernel đếm) chỉ trong phần việc hằng giờ, không bao giờ khi một lần lưu trữ chỉ đang chờ
+xác nhận bản sao và không bao giờ cho một lần khởi động chỉ kiểm tra giờ. Nó từ chối khi một bản phát hành đang chạy
+(`<records-dir>/.release.lock`), và `release.sh` từ chối, không thay đổi gì, khi khóa lưu trữ đang bị giữ: hãy chạy lại
+bản phát hành vài phút sau. Tốt nhất hãy bắt đầu bản phát hành vài phút sau đầu giờ và trước Start minute khá lâu. Khi
+chủ của khóa vẫn đang chạy, một lần khởi động theo lịch kết thúc bằng `DEFERRED archive_running` (mã thoát 0) và một
+lần khởi động thủ công (`pf archive`) bị từ chối. Một khóa mà chủ của nó chắc chắn không còn tồn tại được `archive.sh` kế tiếp tự động xóa: cùng máy chủ, không có
+container `maintenance` nào đang chạy, và hoặc pid của nó đã mất, hoặc máy chủ đã khởi động lại từ đó (boot id khác),
+hoặc pid đó nay thuộc về một tiến trình khác (thời điểm bắt đầu khác). `release.sh` bỏ qua một khóa như vậy theo cùng
+quy tắc. Trước đó khóa được đổi tên, để trong hai lần khởi động chỉ một lần đi tiếp. Một tệp owner không có boot id và
+thời điểm bắt đầu (do một `archive.sh` cũ hơn ghi), hoặc một máy chủ không có `/proc`, chỉ được xét theo pid. Khi một
+lần từ chối nói rằng khóa không thể kiểm tra, hoặc khi các lần khởi động theo lịch cứ in `DEFERRED` dù không có job
+lưu trữ nào chạy, hãy kiểm tra và xóa nó bằng tay:
+
+```sh
+cat ~/partflow-deployments/.archive.lock/owner
+ps -ef | grep '[a]rchive\.sh'                        # must print nothing
+docker ps --filter label=com.docker.compose.service=maintenance   # must list no container
+rm -r ~/partflow-deployments/.archive.lock
+```
+
+### Kiểm tra một lần lưu trữ (Checking a run)
+
+- **Administration → History archival & purge** liệt kê mọi lần lưu trữ với trạng thái, các số đếm và, khi đã xuất,
+  tên bản lưu trữ và SHA-256 của manifest.
+- `check.sh` in dòng `archival_proposal` (§2): `PASS` với lần đang mở, lần đã kết thúc gần nhất và dung lượng trống,
+  hoặc `FAIL` nêu tên từng phát hiện: `copy_confirmation_overdue` (một lần lưu trữ đã chờ xác nhận bản sao lâu hơn
+  thiết lập **Report a waiting run after**), `last_run_failed` (lần đã kết thúc gần nhất là `FAILED`), `archive_dir_unusable` (thư mục lưu trữ không tồn
+  tại hoặc không ghi được) hoặc `copy_dir_unusable` (thư mục sao chép đã được đặt nhưng chưa mount, không tồn tại, không
+  ghi được hoặc nằm trên chính hệ thống tệp của thư mục lưu trữ).
+- Báo cáo đầy đủ, chỉ đọc:
+
+  ```sh
+  $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status
+  ```
+
+| Trạng thái | Ý nghĩa |
+| --- | --- |
+| `APPROVED` | Đã được yêu cầu trong Administration; phần việc hằng giờ kế tiếp sẽ xuất nó. Vẫn có thể hủy. |
+| `RUNNING` | Job đang xuất, kiểm tra hoặc sao chép nó. Không thể hủy. |
+| `WAITING_FOR_COPY` | Đã kiểm tra và công bố; đang chờ bản sao ngoài máy chủ hoặc một xác nhận. Có thể hủy. |
+| `COMPLETED` | Đã sao chép ra ngoài máy chủ, hoặc bản sao đã được xác nhận. Kết quả là `EXPORT_ONLY`: không có gì bị xóa. |
+| `NOTHING_ELIGIBLE` | Không có gì đủ điều kiện tại mốc cắt (cutoff) của nó khi bước export bắt đầu. |
+| `CANCELLED` | Đã bị hủy trong Administration. Thư mục lưu trữ đã công bố vẫn được giữ. |
+| `FAILED` | Một kiểm tra thất bại; lý do được hiển thị. Không có gì bị xóa. |
+
+### Bản sao ngoài máy chủ và việc xác nhận (The off-host copy and its confirmation)
+
+Một bản lưu trữ chỉ nằm trên máy chủ sẽ mất cùng máy chủ, nên mỗi lần lưu trữ sao chép bản lưu trữ của nó ra ngoài
+máy chủ trước khi hoàn tất. Có hai cách:
+
+- **Có thư mục sao chép** (`PARTFLOW_ARCHIVE_COPY_DIR`, [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1): một thư mục
+  trên **thiết bị khác**, như một thư mục chia sẻ qua mạng hoặc một ổ USB được mount trên máy chủ. Job sao chép bản
+  lưu trữ vào đó, đọc lại bản sao, kiểm tra mọi SHA-256 và hoàn tất lần lưu trữ mà không cần người. `archive.sh` chỉ
+  mount thư mục sao chép khi nó tồn tại, ghi được, và nằm trên một hệ thống tệp không phải của thư mục lưu trữ và không
+  phải hệ thống tệp gốc `/` của máy chủ. Nó kiểm tra lại điều này trước mỗi bước, nên một ổ đĩa hoặc thư mục chia sẻ
+  bị mất kết nối trong một lần export dài được phát hiện trước bước copy, và việc mount không bao giờ tạo ra một thư mục
+  bị thiếu. Khi một ổ đĩa hoặc thư mục chia sẻ chưa được mount, đường dẫn của nó là một thư mục rỗng trên hệ thống tệp
+  chứa thư mục mount, thường là `/`; khi đó job không sao chép gì, ghi lý do trong đầu ra, và lần lưu trữ chờ. Khi thư
+  mục có lại, phần việc hằng giờ kế tiếp sẽ sao chép bản lưu trữ.
+- **Không có thư mục sao chép**, lần lưu trữ chờ ở `WAITING_FOR_COPY`:
+  1. Sao chép thư mục `<archive-dir>/<archive name>` ra ngoài máy chủ. Trên NAS, thư mục lưu trữ nằm trong tác vụ
+     Hyper Backup ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.3): hãy chờ lần chạy thành công kế tiếp của nó.
+     Nếu không, sao chép bằng `scp -r` hoặc sang một ổ USB.
+  2. Kiểm tra bản sao tại nơi nó đang nằm (Kiểm tra một bản lưu trữ, bên dưới).
+  3. Trong Administration → History archival & purge, so sánh SHA-256 của manifest hiển thị cho lần lưu trữ với của bản
+     sao (`sha256sum manifest.json`), rồi chọn **Confirm copy…** trên lần lưu trữ đó, đánh dấu
+     **The archive folder is copied off the server** và chọn **Confirm copy**.
+  4. Phần việc hằng giờ kế tiếp hoàn tất lần lưu trữ (`COMPLETED`).
+
+Một lần lưu trữ chờ xác nhận lâu hơn thiết lập **Report a waiting run after** trong Administration (ban đầu là
+7 ngày) khiến `check.sh` báo
+`FAIL archival_proposal copy_confirmation_overdue`. Một lần lưu trữ đang chờ không bao giờ chặn một bản phát hành.
+
+### Một lần lưu trữ thất bại (A failed run)
+
+Một lần lưu trữ trở thành `FAILED` khi một kiểm tra thất bại: ví dụ mốc cắt trở nên mới hơn thời hạn ngắn nhất được
+phép, số đếm vượt quá bản xem trước, các tệp khác với database, thư mục đã công bố bị thay đổi hoặc biến mất, hoặc job
+dừng khi lần lưu trữ đang `RUNNING`. Khi đó `archive.sh` thoát với mã 3 một lần, và `check.sh` báo `last_run_failed`
+cho đến khi một lần lưu trữ sau kết thúc.
+
+1. Đọc lý do: trong Administration, trong email báo lỗi, hoặc trong `<records-dir>/archive/<UTC>/` (tệp `.json` và
+   `.log` của bước đó).
+2. Sửa nguyên nhân, ví dụ giải phóng dung lượng trong thư mục lưu trữ, hoặc mount thư mục sao chép.
+3. Yêu cầu một lần lưu trữ mới trong Administration. Một lần thất bại không bao giờ được tiếp tục; lần mới ghi một thư
+   mục lưu trữ mới.
+
+Không có gì bị xóa. Một thư mục mà lần thất bại đã công bố vẫn giữ nguyên; giữ nó hoặc xóa nó sau khi xem xét.
+`recover` xóa các thư mục dở dang trong `.partial/` của những lần đã kết thúc và giữ mọi thư mục có tên không thuộc về
+lần lưu trữ nào; thư mục như vậy được nêu tên trong đầu ra: hãy xem xét và xóa nó bằng tay. Không bao giờ thay đổi hoặc
+xóa một thư mục đã công bố của một lần `COMPLETED`.
+
+### Kiểm tra một bản lưu trữ (Checking an archive)
+
+Mỗi thư mục lưu trữ chứa `movements.jsonl.gz`, `flows.jsonl.gz`, `lineage.jsonl.gz`, `assigned_routes.jsonl.gz`,
+`context.json`, `manifest.json`, `README.txt` và `SHA256SUMS`. Chỉ cần các công cụ chuẩn để kiểm tra nó, dù thư mục ở
+đâu (thư mục lưu trữ, thư mục sao chép hoặc một bản sao đã khôi phục):
+
+```sh
+cd <archive-dir>/run-<id>-<UTC time>
+sha256sum -c SHA256SUMS
+```
+
+Mọi dòng phải kết thúc bằng `OK`. SHA-256 của `manifest.json` (`sha256sum manifest.json`) là SHA-256 của manifest mà
+Administration hiển thị. Các tệp đọc được bằng `zcat` và `jq`; `README.txt` mô tả chúng. Lịch sử đã lưu trữ không bao
+giờ được nhập trở lại các bảng đang dùng.
+
+### Chuyển sang máy chủ mới (Moving to a new host)
+
+Thư mục lưu trữ thuộc về bản cài đặt: không bản sao lưu database nào chứa các bản lưu trữ. Khi PartFlow chuyển sang
+máy chủ khác (§6, Chuyển sang máy chủ khác), hãy sao chép toàn bộ thư mục lưu trữ sang máy chủ mới, giữ chủ sở hữu và
+mode 0700 của nó, và đặt `PARTFLOW_ARCHIVE_DIR` ở đó trước lần lưu trữ đầu tiên. Tạo tác vụ lưu trữ lịch sử trên máy
+chủ mới ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8), và xóa nó trên máy chủ cũ.
+
 ## Lịch sử thay đổi
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
+| 2026-11-17 | uncommitted | §11 và bảng `pf`: job lưu trữ lịch sử (`archive.sh`, `pf archive`), chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì; §1, §2, §6, §8 và §9 cho hồ sơ, các dòng kiểm tra, việc chuyển máy chủ, sự cố và lịch làm việc của nó. |
 | 2026-11-17 | uncommitted | Lệnh khôi phục từ chối mật khẩu vi phạm quy tắc mật khẩu, và các thiết lập đăng nhập chuyển sang Administration → Security. |
 | 2026-11-17 | `01ce427` | §10 và bảng `pf`: `pf delete-permanently` xóa các Work Order và Part Number chỉ nhập để thử nghiệm, sau một lần xem trước và một bản sao lưu đã kiểm tra. |
 | 2026-11-17 | `1fc96e1` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất một passkey, và một lần reset cũng xóa các passkey. |

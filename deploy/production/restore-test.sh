@@ -25,8 +25,8 @@ DRILL_DATABASE=partflow_restore_test
 HEALTH_ATTEMPTS=90
 HEALTH_INTERVAL=2
 # The values in the shell would override the generated env file for every Compose command.
-unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR COMPOSE_PROJECT_NAME \
-    COMPOSE_FILE COMPOSE_PROFILES
+unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR PARTFLOW_ARCHIVE_DIR \
+    PARTFLOW_ARCHIVE_COPY_DIR COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
 
 usage() {
     cat <<'EOF'
@@ -481,6 +481,9 @@ write_env() {
         echo "PARTFLOW_ACCEPT_SCHEMA_REVISION="
         echo "PARTFLOW_SECRETS_DIR=$W/secrets"
         echo "PARTFLOW_BACKUP_DIR=$BACKUP_DIR"
+        # The drill never runs the history archive job: never the production archive or copy folder.
+        echo "PARTFLOW_ARCHIVE_DIR="
+        echo "PARTFLOW_ARCHIVE_COPY_DIR="
         echo "PARTFLOW_SITE_TIMEZONE=$SITE_TIMEZONE"
         echo "PARTFLOW_HTTP_PORT=$HTTP_PORT"
         echo "POSTGRES_USER=$PROD_USER"

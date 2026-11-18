@@ -1,7 +1,7 @@
 ;
-; Archive created at 2026-11-17 04:13:37 UTC
+; Archive created at 2026-11-18 03:31:29 UTC
 ;     dbname: partflow_test_s5_capture
-;     TOC Entries: 291
+;     TOC Entries: 317
 ;     Compression: gzip
 ;     Dump Version: 1.15-0
 ;     Format: CUSTOM
@@ -13,290 +13,316 @@
 ;
 ; Selected TOC Entries:
 ;
-277; 1255 21958114 FUNCTION public partflow_areas_forbid_barcode_change() cdsemi
-285; 1255 21958616 FUNCTION public partflow_assigned_route_steps_forbid_update() cdsemi
-281; 1255 21958214 FUNCTION public partflow_audit_events_forbid_mutation() cdsemi
-280; 1255 21958185 FUNCTION public partflow_machine_lifecycle_events_forbid_mutation() cdsemi
-279; 1255 21958156 FUNCTION public partflow_machines_forbid_area_change() cdsemi
-278; 1255 21958154 FUNCTION public partflow_machines_forbid_asset_tag_change() cdsemi
-276; 1255 21958110 FUNCTION public partflow_part_movements_forbid_mutation() cdsemi
-282; 1255 21958276 FUNCTION public partflow_quantity_flow_lineage_forbid_mutation() cdsemi
-283; 1255 21958331 FUNCTION public partflow_work_order_allocations_forbid_mutation() cdsemi
-284; 1255 21958427 FUNCTION public partflow_worker_sessions_guard_mutation() cdsemi
-215; 1259 21957868 TABLE public alembic_version cdsemi
-254; 1259 21958384 TABLE public application_policy cdsemi
-219; 1259 21957887 TABLE public areas cdsemi
-218; 1259 21957886 SEQUENCE public areas_id_seq cdsemi
-234; 1259 21958015 TABLE public assigned_route_steps cdsemi
-233; 1259 21958014 SEQUENCE public assigned_route_steps_id_seq cdsemi
-232; 1259 21958003 TABLE public assigned_routes cdsemi
-231; 1259 21958002 SEQUENCE public assigned_routes_id_seq cdsemi
-247; 1259 21958204 TABLE public audit_events cdsemi
-246; 1259 21958203 SEQUENCE public audit_events_id_seq cdsemi
-217; 1259 21957874 TABLE public departments cdsemi
-216; 1259 21957873 SEQUENCE public departments_id_seq cdsemi
-245; 1259 21958188 TABLE public machine_asset_tag_config cdsemi
-244; 1259 21958187 SEQUENCE public machine_asset_tag_config_id_seq cdsemi
-4099; 0 0 SEQUENCE OWNED BY public machine_asset_tag_config_id_seq cdsemi
-243; 1259 21958159 TABLE public machine_lifecycle_events cdsemi
-242; 1259 21958158 SEQUENCE public machine_lifecycle_events_id_seq cdsemi
-241; 1259 21958134 TABLE public machines cdsemi
-240; 1259 21958133 SEQUENCE public machines_id_seq cdsemi
-267; 1259 21958640 TABLE public mail_server_credentials cdsemi
-221; 1259 21957905 TABLE public operations cdsemi
-220; 1259 21957904 SEQUENCE public operations_id_seq cdsemi
-238; 1259 21958072 TABLE public part_movements cdsemi
-237; 1259 21958071 SEQUENCE public part_movements_id_seq cdsemi
-222; 1259 21957922 TABLE public part_numbers cdsemi
-249; 1259 21958252 TABLE public quantity_flow_lineage cdsemi
-248; 1259 21958251 SEQUENCE public quantity_flow_lineage_id_seq cdsemi
-236; 1259 21958040 TABLE public quantity_flows cdsemi
-235; 1259 21958039 SEQUENCE public quantity_flows_id_seq cdsemi
-259; 1259 21958476 TABLE public role_permissions cdsemi
-258; 1259 21958465 TABLE public roles cdsemi
-257; 1259 21958464 SEQUENCE public roles_id_seq cdsemi
-230; 1259 21957978 TABLE public route_steps cdsemi
-229; 1259 21957977 SEQUENCE public route_steps_id_seq cdsemi
-228; 1259 21957968 TABLE public route_templates cdsemi
-227; 1259 21957967 SEQUENCE public route_templates_id_seq cdsemi
-266; 1259 21958573 TABLE public scan_station_devices cdsemi
-265; 1259 21958572 SEQUENCE public scan_station_devices_id_seq cdsemi
-239; 1259 21958117 TABLE public scan_stations cdsemi
-262; 1259 21958521 TABLE public user_credentials cdsemi
-275; 1259 21958756 TABLE public user_passkey_setups cdsemi
-274; 1259 21958734 TABLE public user_passkeys cdsemi
-273; 1259 21958733 SEQUENCE public user_passkeys_id_seq cdsemi
-270; 1259 21958666 TABLE public user_recovery_codes cdsemi
-269; 1259 21958665 SEQUENCE public user_recovery_codes_id_seq cdsemi
-264; 1259 21958538 TABLE public user_sessions cdsemi
-263; 1259 21958537 SEQUENCE public user_sessions_id_seq cdsemi
-272; 1259 21958683 TABLE public user_sign_in_challenges cdsemi
-271; 1259 21958682 SEQUENCE public user_sign_in_challenges_id_seq cdsemi
-268; 1259 21958650 TABLE public user_totp_factors cdsemi
-261; 1259 21958490 TABLE public users cdsemi
-260; 1259 21958489 SEQUENCE public users_id_seq cdsemi
-251; 1259 21958296 TABLE public work_order_allocations cdsemi
-250; 1259 21958295 SEQUENCE public work_order_allocations_id_seq cdsemi
-226; 1259 21957945 TABLE public work_order_demands cdsemi
-225; 1259 21957944 SEQUENCE public work_order_demands_id_seq cdsemi
-224; 1259 21957933 TABLE public work_orders cdsemi
-223; 1259 21957932 SEQUENCE public work_orders_id_seq cdsemi
-256; 1259 21958396 TABLE public worker_sessions cdsemi
-255; 1259 21958395 SEQUENCE public worker_sessions_id_seq cdsemi
-253; 1259 21958339 TABLE public workers cdsemi
-252; 1259 21958338 SEQUENCE public workers_id_seq cdsemi
-3475; 2604 21958191 DEFAULT public machine_asset_tag_config id cdsemi
-4032; 0 21957868 TABLE DATA public alembic_version cdsemi
-4071; 0 21958384 TABLE DATA public application_policy cdsemi
-4036; 0 21957887 TABLE DATA public areas cdsemi
-4051; 0 21958015 TABLE DATA public assigned_route_steps cdsemi
-4049; 0 21958003 TABLE DATA public assigned_routes cdsemi
-4064; 0 21958204 TABLE DATA public audit_events cdsemi
-4034; 0 21957874 TABLE DATA public departments cdsemi
-4062; 0 21958188 TABLE DATA public machine_asset_tag_config cdsemi
-4060; 0 21958159 TABLE DATA public machine_lifecycle_events cdsemi
-4058; 0 21958134 TABLE DATA public machines cdsemi
-4084; 0 21958640 TABLE DATA public mail_server_credentials cdsemi
-4038; 0 21957905 TABLE DATA public operations cdsemi
-4055; 0 21958072 TABLE DATA public part_movements cdsemi
-4039; 0 21957922 TABLE DATA public part_numbers cdsemi
-4066; 0 21958252 TABLE DATA public quantity_flow_lineage cdsemi
-4053; 0 21958040 TABLE DATA public quantity_flows cdsemi
-4076; 0 21958476 TABLE DATA public role_permissions cdsemi
-4075; 0 21958465 TABLE DATA public roles cdsemi
-4047; 0 21957978 TABLE DATA public route_steps cdsemi
-4045; 0 21957968 TABLE DATA public route_templates cdsemi
-4083; 0 21958573 TABLE DATA public scan_station_devices cdsemi
-4056; 0 21958117 TABLE DATA public scan_stations cdsemi
-4079; 0 21958521 TABLE DATA public user_credentials cdsemi
-4092; 0 21958756 TABLE DATA public user_passkey_setups cdsemi
-4091; 0 21958734 TABLE DATA public user_passkeys cdsemi
-4087; 0 21958666 TABLE DATA public user_recovery_codes cdsemi
-4081; 0 21958538 TABLE DATA public user_sessions cdsemi
-4089; 0 21958683 TABLE DATA public user_sign_in_challenges cdsemi
-4085; 0 21958650 TABLE DATA public user_totp_factors cdsemi
-4078; 0 21958490 TABLE DATA public users cdsemi
-4068; 0 21958296 TABLE DATA public work_order_allocations cdsemi
-4043; 0 21957945 TABLE DATA public work_order_demands cdsemi
-4041; 0 21957933 TABLE DATA public work_orders cdsemi
-4073; 0 21958396 TABLE DATA public worker_sessions cdsemi
-4070; 0 21958339 TABLE DATA public workers cdsemi
-4100; 0 0 SEQUENCE SET public areas_id_seq cdsemi
-4101; 0 0 SEQUENCE SET public assigned_route_steps_id_seq cdsemi
-4102; 0 0 SEQUENCE SET public assigned_routes_id_seq cdsemi
-4103; 0 0 SEQUENCE SET public audit_events_id_seq cdsemi
-4104; 0 0 SEQUENCE SET public departments_id_seq cdsemi
-4105; 0 0 SEQUENCE SET public machine_asset_tag_config_id_seq cdsemi
-4106; 0 0 SEQUENCE SET public machine_lifecycle_events_id_seq cdsemi
-4107; 0 0 SEQUENCE SET public machines_id_seq cdsemi
-4108; 0 0 SEQUENCE SET public operations_id_seq cdsemi
-4109; 0 0 SEQUENCE SET public part_movements_id_seq cdsemi
-4110; 0 0 SEQUENCE SET public quantity_flow_lineage_id_seq cdsemi
-4111; 0 0 SEQUENCE SET public quantity_flows_id_seq cdsemi
-4112; 0 0 SEQUENCE SET public roles_id_seq cdsemi
-4113; 0 0 SEQUENCE SET public route_steps_id_seq cdsemi
-4114; 0 0 SEQUENCE SET public route_templates_id_seq cdsemi
-4115; 0 0 SEQUENCE SET public scan_station_devices_id_seq cdsemi
-4116; 0 0 SEQUENCE SET public user_passkeys_id_seq cdsemi
-4117; 0 0 SEQUENCE SET public user_recovery_codes_id_seq cdsemi
-4118; 0 0 SEQUENCE SET public user_sessions_id_seq cdsemi
-4119; 0 0 SEQUENCE SET public user_sign_in_challenges_id_seq cdsemi
-4120; 0 0 SEQUENCE SET public users_id_seq cdsemi
-4121; 0 0 SEQUENCE SET public work_order_allocations_id_seq cdsemi
-4122; 0 0 SEQUENCE SET public work_order_demands_id_seq cdsemi
-4123; 0 0 SEQUENCE SET public work_orders_id_seq cdsemi
-4124; 0 0 SEQUENCE SET public worker_sessions_id_seq cdsemi
-4125; 0 0 SEQUENCE SET public workers_id_seq cdsemi
-3677; 2606 21957872 CONSTRAINT public alembic_version alembic_version_pkc cdsemi
-3773; 2606 21958393 CONSTRAINT public application_policy pk_application_policy cdsemi
-3683; 2606 21957896 CONSTRAINT public areas pk_areas cdsemi
-3715; 2606 21958021 CONSTRAINT public assigned_route_steps pk_assigned_route_steps cdsemi
-3713; 2606 21958008 CONSTRAINT public assigned_routes pk_assigned_routes cdsemi
-3752; 2606 21958212 CONSTRAINT public audit_events pk_audit_events cdsemi
-3679; 2606 21957883 CONSTRAINT public departments pk_departments cdsemi
-3748; 2606 21958202 CONSTRAINT public machine_asset_tag_config pk_machine_asset_tag_config cdsemi
-3746; 2606 21958168 CONSTRAINT public machine_lifecycle_events pk_machine_lifecycle_events cdsemi
-3740; 2606 21958145 CONSTRAINT public machines pk_machines cdsemi
-3804; 2606 21958649 CONSTRAINT public mail_server_credentials pk_mail_server_credentials cdsemi
-3689; 2606 21957914 CONSTRAINT public operations pk_operations cdsemi
-3732; 2606 21958081 CONSTRAINT public part_movements pk_part_movements cdsemi
-3693; 2606 21957931 CONSTRAINT public part_numbers pk_part_numbers cdsemi
-3757; 2606 21958261 CONSTRAINT public quantity_flow_lineage pk_quantity_flow_lineage cdsemi
-3722; 2606 21958054 CONSTRAINT public quantity_flows pk_quantity_flows cdsemi
-3785; 2606 21958483 CONSTRAINT public role_permissions pk_role_permissions cdsemi
-3781; 2606 21958473 CONSTRAINT public roles pk_roles cdsemi
-3708; 2606 21957984 CONSTRAINT public route_steps pk_route_steps cdsemi
-3705; 2606 21957976 CONSTRAINT public route_templates pk_route_templates cdsemi
-3798; 2606 21958589 CONSTRAINT public scan_station_devices pk_scan_station_devices cdsemi
-3738; 2606 21958127 CONSTRAINT public scan_stations pk_scan_stations cdsemi
-3791; 2606 21958531 CONSTRAINT public user_credentials pk_user_credentials cdsemi
-3822; 2606 21958765 CONSTRAINT public user_passkey_setups pk_user_passkey_setups cdsemi
-3818; 2606 21958747 CONSTRAINT public user_passkeys pk_user_passkeys cdsemi
-3808; 2606 21958674 CONSTRAINT public user_recovery_codes pk_user_recovery_codes cdsemi
-3794; 2606 21958548 CONSTRAINT public user_sessions pk_user_sessions cdsemi
-3813; 2606 21958699 CONSTRAINT public user_sign_in_challenges pk_user_sign_in_challenges cdsemi
-3806; 2606 21958659 CONSTRAINT public user_totp_factors pk_user_totp_factors cdsemi
-3787; 2606 21958504 CONSTRAINT public users pk_users cdsemi
-3763; 2606 21958309 CONSTRAINT public work_order_allocations pk_work_order_allocations cdsemi
-3701; 2606 21957959 CONSTRAINT public work_order_demands pk_work_order_demands cdsemi
-3696; 2606 21957942 CONSTRAINT public work_orders pk_work_orders cdsemi
-3776; 2606 21958407 CONSTRAINT public worker_sessions pk_worker_sessions cdsemi
-3769; 2606 21958352 CONSTRAINT public workers pk_workers cdsemi
-3685; 2606 21957898 CONSTRAINT public areas uq_areas_barcode_value cdsemi
-3687; 2606 21958619 CONSTRAINT public areas uq_areas_department_id_name cdsemi
-3717; 2606 21958023 CONSTRAINT public assigned_route_steps uq_assigned_route_steps_assigned_route_id_sequence cdsemi
-3681; 2606 21957885 CONSTRAINT public departments uq_departments_name cdsemi
-3743; 2606 21958147 CONSTRAINT public machines uq_machines_asset_tag cdsemi
-3691; 2606 21957916 CONSTRAINT public operations uq_operations_area_id_code cdsemi
-3734; 2606 21958243 CONSTRAINT public part_movements uq_part_movements_device_event_id_command_sequence cdsemi
-3736; 2606 21958284 CONSTRAINT public part_movements uq_part_movements_reverses_movement_id cdsemi
-3759; 2606 21958263 CONSTRAINT public quantity_flow_lineage uq_quantity_flow_lineage_parent_flow_id_child_flow_id cdsemi
-3724; 2606 21958056 CONSTRAINT public quantity_flows uq_quantity_flows_assigned_route_id cdsemi
-3726; 2606 21958058 CONSTRAINT public quantity_flows uq_quantity_flows_id_part_number cdsemi
-3783; 2606 21958475 CONSTRAINT public roles uq_roles_name cdsemi
-3710; 2606 21957986 CONSTRAINT public route_steps uq_route_steps_route_template_id_sequence cdsemi
-3800; 2606 21958591 CONSTRAINT public scan_station_devices uq_scan_station_devices_enrollment_code_digest cdsemi
-3802; 2606 21958593 CONSTRAINT public scan_station_devices uq_scan_station_devices_token_digest cdsemi
-3820; 2606 21958749 CONSTRAINT public user_passkeys uq_user_passkeys_credential_id cdsemi
-3810; 2606 21958676 CONSTRAINT public user_recovery_codes uq_user_recovery_codes_user_id_code_digest cdsemi
-3796; 2606 21958550 CONSTRAINT public user_sessions uq_user_sessions_token_digest cdsemi
-3815; 2606 21958701 CONSTRAINT public user_sign_in_challenges uq_user_sign_in_challenges_token_digest cdsemi
-3789; 2606 21958506 CONSTRAINT public users uq_users_login_name cdsemi
-3765; 2606 21958313 CONSTRAINT public work_order_allocations uq_work_order_allocations_device_event_id_command_sequence cdsemi
-3767; 2606 21958311 CONSTRAINT public work_order_allocations uq_work_order_allocations_reverses_allocation_id cdsemi
-3703; 2606 21958336 CONSTRAINT public work_order_demands uq_work_order_demands_priority_rank cdsemi
-3778; 2606 21958409 CONSTRAINT public worker_sessions uq_worker_sessions_id_worker_id_station_id cdsemi
-3771; 2606 21958354 CONSTRAINT public workers uq_workers_badge_barcode cdsemi
-3711; 1259 21958449 INDEX public ix_assigned_routes_source_route_template_id cdsemi
-3749; 1259 21958213 INDEX public ix_audit_events_entity_type_entity_id_id cdsemi
-3750; 1259 21958337 INDEX public ix_audit_events_hot_list_device_event_id cdsemi
-3744; 1259 21958184 INDEX public ix_machine_lifecycle_events_machine_id_id cdsemi
-3727; 1259 21958615 INDEX public ix_part_movements_assigned_route_step_id cdsemi
-3728; 1259 21958333 INDEX public ix_part_movements_part_number_occurred_at_id cdsemi
-3729; 1259 21958109 INDEX public ix_part_movements_quantity_flow_id_id cdsemi
-3730; 1259 21958216 INDEX public ix_part_movements_received_demand_context cdsemi
-3754; 1259 21958275 INDEX public ix_quantity_flow_lineage_child_flow_id cdsemi
-3755; 1259 21958274 INDEX public ix_quantity_flow_lineage_parent_flow_id cdsemi
-3718; 1259 21958070 INDEX public ix_quantity_flows_current_area_id cdsemi
-3719; 1259 21958229 INDEX public ix_quantity_flows_current_machine_id cdsemi
-3720; 1259 21958069 INDEX public ix_quantity_flows_part_number_active cdsemi
-3816; 1259 21958755 INDEX public ix_user_passkeys_user_id cdsemi
-3792; 1259 21958556 INDEX public ix_user_sessions_user_id_open cdsemi
-3811; 1259 21958707 INDEX public ix_user_sign_in_challenges_user_id_open cdsemi
-3760; 1259 21958330 INDEX public ix_work_order_allocations_part_number cdsemi
-3761; 1259 21958329 INDEX public ix_work_order_allocations_work_order_demand_id cdsemi
-3698; 1259 21957966 INDEX public ix_work_order_demands_part_number cdsemi
-3699; 1259 21957965 INDEX public ix_work_order_demands_work_order_id cdsemi
-3694; 1259 21958294 INDEX public ix_work_orders_completed_at_id cdsemi
-3774; 1259 21958426 INDEX public ix_worker_sessions_open_worker cdsemi
-3753; 1259 21958614 INDEX public uq_audit_events_route_adjustment_device_event_id cdsemi
-3741; 1259 21958153 INDEX public uq_machines_area_id_name_active cdsemi
-3706; 1259 21958620 INDEX public uq_route_templates_name_active cdsemi
-3697; 1259 21957943 INDEX public uq_work_orders_work_order_number cdsemi
-3779; 1259 21958425 INDEX public uq_worker_sessions_open_station cdsemi
-3878; 2620 21958115 TRIGGER public areas trg_areas_forbid_barcode_change cdsemi
-3879; 2620 21958617 TRIGGER public assigned_route_steps trg_assigned_route_steps_forbid_update cdsemi
-3884; 2620 21958215 TRIGGER public audit_events trg_audit_events_forbid_mutation cdsemi
-3883; 2620 21958186 TRIGGER public machine_lifecycle_events trg_machine_lifecycle_events_forbid_mutation cdsemi
-3881; 2620 21958157 TRIGGER public machines trg_machines_forbid_area_change cdsemi
-3882; 2620 21958155 TRIGGER public machines trg_machines_forbid_asset_tag_change cdsemi
-3880; 2620 21958111 TRIGGER public part_movements trg_part_movements_forbid_mutation cdsemi
-3885; 2620 21958277 TRIGGER public quantity_flow_lineage trg_quantity_flow_lineage_forbid_mutation cdsemi
-3886; 2620 21958332 TRIGGER public work_order_allocations trg_work_order_allocations_forbid_mutation cdsemi
-3887; 2620 21958429 TRIGGER public worker_sessions trg_worker_sessions_forbid_truncate cdsemi
-3888; 2620 21958428 TRIGGER public worker_sessions trg_worker_sessions_guard_mutation cdsemi
-3863; 2606 21958604 FK CONSTRAINT public application_policy fk_application_policy_scan_station_role_id_roles cdsemi
-3823; 2606 21957899 FK CONSTRAINT public areas fk_areas_department_id_departments cdsemi
-3824; 2606 21958366 FK CONSTRAINT public areas fk_areas_fixed_worker_id_workers cdsemi
-3832; 2606 21958029 FK CONSTRAINT public assigned_route_steps fk_assigned_route_steps_area_id_areas cdsemi
-3833; 2606 21958024 FK CONSTRAINT public assigned_route_steps fk_assigned_route_steps_assigned_route_id_assigned_routes cdsemi
-3834; 2606 21958034 FK CONSTRAINT public assigned_route_steps fk_assigned_route_steps_operation_id_operations cdsemi
-3831; 2606 21958009 FK CONSTRAINT public assigned_routes fk_assigned_routes_source_route_template_id_route_templates cdsemi
-3855; 2606 21958557 FK CONSTRAINT public audit_events fk_audit_events_actor_user_id_users cdsemi
-3851; 2606 21958562 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_actor_user_id_users cdsemi
-3852; 2606 21958174 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_from_area_id_areas cdsemi
-3853; 2606 21958169 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_machine_id_machines cdsemi
-3854; 2606 21958179 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_to_area_id_areas cdsemi
-3850; 2606 21958148 FK CONSTRAINT public machines fk_machines_area_id_areas cdsemi
-3825; 2606 21957917 FK CONSTRAINT public operations fk_operations_area_id_areas cdsemi
-3838; 2606 21958104 FK CONSTRAINT public part_movements fk_part_movements_assigned_route_step_id_assigned_route_steps cdsemi
-3839; 2606 21958235 FK CONSTRAINT public part_movements fk_part_movements_destination_machine_id_machines cdsemi
-3840; 2606 21958089 FK CONSTRAINT public part_movements fk_part_movements_from_area_id_areas cdsemi
-3841; 2606 21958099 FK CONSTRAINT public part_movements fk_part_movements_operation_id_operations cdsemi
-3842; 2606 21958084 FK CONSTRAINT public part_movements fk_part_movements_quantity_flow_id_part_number_quantity_flows cdsemi
-3843; 2606 21958278 FK CONSTRAINT public part_movements fk_part_movements_reverses_movement_id_part_movements cdsemi
-3844; 2606 21958431 FK CONSTRAINT public part_movements fk_part_movements_scan_session_worker_sessions cdsemi
-3845; 2606 21958230 FK CONSTRAINT public part_movements fk_part_movements_source_machine_id_machines cdsemi
-3846; 2606 21958217 FK CONSTRAINT public part_movements fk_part_movements_station_id_scan_stations cdsemi
-3847; 2606 21958094 FK CONSTRAINT public part_movements fk_part_movements_to_area_id_areas cdsemi
-3848; 2606 21958372 FK CONSTRAINT public part_movements fk_part_movements_worker_id_workers cdsemi
-3856; 2606 21958269 FK CONSTRAINT public quantity_flow_lineage fk_quantity_flow_lineage_child_flow_id_quantity_flows cdsemi
-3857; 2606 21958264 FK CONSTRAINT public quantity_flow_lineage fk_quantity_flow_lineage_parent_flow_id_quantity_flows cdsemi
-3835; 2606 21958059 FK CONSTRAINT public quantity_flows fk_quantity_flows_assigned_route_id_assigned_routes cdsemi
-3836; 2606 21958064 FK CONSTRAINT public quantity_flows fk_quantity_flows_current_area_id_areas cdsemi
-3837; 2606 21958224 FK CONSTRAINT public quantity_flows fk_quantity_flows_current_machine_id_machines cdsemi
-3867; 2606 21958484 FK CONSTRAINT public role_permissions fk_role_permissions_role_id_roles cdsemi
-3827; 2606 21957992 FK CONSTRAINT public route_steps fk_route_steps_area_id_areas cdsemi
-3828; 2606 21957997 FK CONSTRAINT public route_steps fk_route_steps_operation_id_operations cdsemi
-3829; 2606 21958444 FK CONSTRAINT public route_steps fk_route_steps_preferred_machine_id_machines cdsemi
-3830; 2606 21957987 FK CONSTRAINT public route_steps fk_route_steps_route_template_id_route_templates cdsemi
-3871; 2606 21958599 FK CONSTRAINT public scan_station_devices fk_scan_station_devices_replaces_device_id_scan_station_devices cdsemi
-3872; 2606 21958594 FK CONSTRAINT public scan_station_devices fk_scan_station_devices_station_id_scan_stations cdsemi
-3849; 2606 21958128 FK CONSTRAINT public scan_stations fk_scan_stations_area_id_areas cdsemi
-3869; 2606 21958532 FK CONSTRAINT public user_credentials fk_user_credentials_user_id_users cdsemi
-3877; 2606 21958766 FK CONSTRAINT public user_passkey_setups fk_user_passkey_setups_user_id_users cdsemi
-3876; 2606 21958750 FK CONSTRAINT public user_passkeys fk_user_passkeys_user_id_users cdsemi
-3874; 2606 21958677 FK CONSTRAINT public user_recovery_codes fk_user_recovery_codes_user_id_users cdsemi
-3870; 2606 21958551 FK CONSTRAINT public user_sessions fk_user_sessions_user_id_users cdsemi
-3875; 2606 21958702 FK CONSTRAINT public user_sign_in_challenges fk_user_sign_in_challenges_user_id_users cdsemi
-3873; 2606 21958660 FK CONSTRAINT public user_totp_factors fk_user_totp_factors_user_id_users cdsemi
-3868; 2606 21958507 FK CONSTRAINT public users fk_users_role_id_roles cdsemi
-3858; 2606 21958567 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_actor_user_id_users cdsemi
-3859; 2606 21958378 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_allocated_by_worker_id_workers cdsemi
-3860; 2606 21958314 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_demand_id_work_order_demands cdsemi
-3861; 2606 21958319 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_reverses_allocation_id cdsemi
-3862; 2606 21958324 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_station_id_scan_stations cdsemi
-3826; 2606 21957960 FK CONSTRAINT public work_order_demands fk_work_order_demands_work_order_id_work_orders cdsemi
-3864; 2606 21958415 FK CONSTRAINT public worker_sessions fk_worker_sessions_area_id_areas cdsemi
-3865; 2606 21958410 FK CONSTRAINT public worker_sessions fk_worker_sessions_station_id_scan_stations cdsemi
-3866; 2606 21958420 FK CONSTRAINT public worker_sessions fk_worker_sessions_worker_id_workers cdsemi
+280; 1255 23591802 FUNCTION public partflow_areas_forbid_barcode_change() cdsemi
+288; 1255 23592304 FUNCTION public partflow_assigned_route_steps_forbid_update() cdsemi
+284; 1255 23591902 FUNCTION public partflow_audit_events_forbid_mutation() cdsemi
+302; 1255 23592568 FUNCTION public partflow_audit_events_maintenance_scope() cdsemi
+300; 1255 23592566 FUNCTION public partflow_history_archive_runs_guard_mutation() cdsemi
+301; 1255 23592567 FUNCTION public partflow_history_archived_flows_guard_mutation() cdsemi
+283; 1255 23591873 FUNCTION public partflow_machine_lifecycle_events_forbid_mutation() cdsemi
+282; 1255 23591844 FUNCTION public partflow_machines_forbid_area_change() cdsemi
+281; 1255 23591842 FUNCTION public partflow_machines_forbid_asset_tag_change() cdsemi
+279; 1255 23591798 FUNCTION public partflow_part_movements_forbid_mutation() cdsemi
+285; 1255 23591964 FUNCTION public partflow_quantity_flow_lineage_forbid_mutation() cdsemi
+286; 1255 23592019 FUNCTION public partflow_work_order_allocations_forbid_mutation() cdsemi
+287; 1255 23592115 FUNCTION public partflow_worker_sessions_guard_mutation() cdsemi
+215; 1259 23591556 TABLE public alembic_version cdsemi
+254; 1259 23592072 TABLE public application_policy cdsemi
+219; 1259 23591575 TABLE public areas cdsemi
+218; 1259 23591574 SEQUENCE public areas_id_seq cdsemi
+234; 1259 23591703 TABLE public assigned_route_steps cdsemi
+233; 1259 23591702 SEQUENCE public assigned_route_steps_id_seq cdsemi
+232; 1259 23591691 TABLE public assigned_routes cdsemi
+231; 1259 23591690 SEQUENCE public assigned_routes_id_seq cdsemi
+247; 1259 23591892 TABLE public audit_events cdsemi
+246; 1259 23591891 SEQUENCE public audit_events_id_seq cdsemi
+217; 1259 23591562 TABLE public departments cdsemi
+216; 1259 23591561 SEQUENCE public departments_id_seq cdsemi
+277; 1259 23592491 TABLE public history_archive_runs cdsemi
+276; 1259 23592490 SEQUENCE public history_archive_runs_id_seq cdsemi
+278; 1259 23592527 TABLE public history_archived_flows cdsemi
+245; 1259 23591876 TABLE public machine_asset_tag_config cdsemi
+244; 1259 23591875 SEQUENCE public machine_asset_tag_config_id_seq cdsemi
+4178; 0 0 SEQUENCE OWNED BY public machine_asset_tag_config_id_seq cdsemi
+243; 1259 23591847 TABLE public machine_lifecycle_events cdsemi
+242; 1259 23591846 SEQUENCE public machine_lifecycle_events_id_seq cdsemi
+241; 1259 23591822 TABLE public machines cdsemi
+240; 1259 23591821 SEQUENCE public machines_id_seq cdsemi
+267; 1259 23592328 TABLE public mail_server_credentials cdsemi
+221; 1259 23591593 TABLE public operations cdsemi
+220; 1259 23591592 SEQUENCE public operations_id_seq cdsemi
+238; 1259 23591760 TABLE public part_movements cdsemi
+237; 1259 23591759 SEQUENCE public part_movements_id_seq cdsemi
+222; 1259 23591610 TABLE public part_numbers cdsemi
+249; 1259 23591940 TABLE public quantity_flow_lineage cdsemi
+248; 1259 23591939 SEQUENCE public quantity_flow_lineage_id_seq cdsemi
+236; 1259 23591728 TABLE public quantity_flows cdsemi
+235; 1259 23591727 SEQUENCE public quantity_flows_id_seq cdsemi
+259; 1259 23592164 TABLE public role_permissions cdsemi
+258; 1259 23592153 TABLE public roles cdsemi
+257; 1259 23592152 SEQUENCE public roles_id_seq cdsemi
+230; 1259 23591666 TABLE public route_steps cdsemi
+229; 1259 23591665 SEQUENCE public route_steps_id_seq cdsemi
+228; 1259 23591656 TABLE public route_templates cdsemi
+227; 1259 23591655 SEQUENCE public route_templates_id_seq cdsemi
+266; 1259 23592261 TABLE public scan_station_devices cdsemi
+265; 1259 23592260 SEQUENCE public scan_station_devices_id_seq cdsemi
+239; 1259 23591805 TABLE public scan_stations cdsemi
+262; 1259 23592209 TABLE public user_credentials cdsemi
+275; 1259 23592444 TABLE public user_passkey_setups cdsemi
+274; 1259 23592422 TABLE public user_passkeys cdsemi
+273; 1259 23592421 SEQUENCE public user_passkeys_id_seq cdsemi
+270; 1259 23592354 TABLE public user_recovery_codes cdsemi
+269; 1259 23592353 SEQUENCE public user_recovery_codes_id_seq cdsemi
+264; 1259 23592226 TABLE public user_sessions cdsemi
+263; 1259 23592225 SEQUENCE public user_sessions_id_seq cdsemi
+272; 1259 23592371 TABLE public user_sign_in_challenges cdsemi
+271; 1259 23592370 SEQUENCE public user_sign_in_challenges_id_seq cdsemi
+268; 1259 23592338 TABLE public user_totp_factors cdsemi
+261; 1259 23592178 TABLE public users cdsemi
+260; 1259 23592177 SEQUENCE public users_id_seq cdsemi
+251; 1259 23591984 TABLE public work_order_allocations cdsemi
+250; 1259 23591983 SEQUENCE public work_order_allocations_id_seq cdsemi
+226; 1259 23591633 TABLE public work_order_demands cdsemi
+225; 1259 23591632 SEQUENCE public work_order_demands_id_seq cdsemi
+224; 1259 23591621 TABLE public work_orders cdsemi
+223; 1259 23591620 SEQUENCE public work_orders_id_seq cdsemi
+256; 1259 23592084 TABLE public worker_sessions cdsemi
+255; 1259 23592083 SEQUENCE public worker_sessions_id_seq cdsemi
+253; 1259 23592027 TABLE public workers cdsemi
+252; 1259 23592026 SEQUENCE public workers_id_seq cdsemi
+3487; 2604 23591879 DEFAULT public machine_asset_tag_config id cdsemi
+4108; 0 23591556 TABLE DATA public alembic_version cdsemi
+4147; 0 23592072 TABLE DATA public application_policy cdsemi
+4112; 0 23591575 TABLE DATA public areas cdsemi
+4127; 0 23591703 TABLE DATA public assigned_route_steps cdsemi
+4125; 0 23591691 TABLE DATA public assigned_routes cdsemi
+4140; 0 23591892 TABLE DATA public audit_events cdsemi
+4110; 0 23591562 TABLE DATA public departments cdsemi
+4170; 0 23592491 TABLE DATA public history_archive_runs cdsemi
+4171; 0 23592527 TABLE DATA public history_archived_flows cdsemi
+4138; 0 23591876 TABLE DATA public machine_asset_tag_config cdsemi
+4136; 0 23591847 TABLE DATA public machine_lifecycle_events cdsemi
+4134; 0 23591822 TABLE DATA public machines cdsemi
+4160; 0 23592328 TABLE DATA public mail_server_credentials cdsemi
+4114; 0 23591593 TABLE DATA public operations cdsemi
+4131; 0 23591760 TABLE DATA public part_movements cdsemi
+4115; 0 23591610 TABLE DATA public part_numbers cdsemi
+4142; 0 23591940 TABLE DATA public quantity_flow_lineage cdsemi
+4129; 0 23591728 TABLE DATA public quantity_flows cdsemi
+4152; 0 23592164 TABLE DATA public role_permissions cdsemi
+4151; 0 23592153 TABLE DATA public roles cdsemi
+4123; 0 23591666 TABLE DATA public route_steps cdsemi
+4121; 0 23591656 TABLE DATA public route_templates cdsemi
+4159; 0 23592261 TABLE DATA public scan_station_devices cdsemi
+4132; 0 23591805 TABLE DATA public scan_stations cdsemi
+4155; 0 23592209 TABLE DATA public user_credentials cdsemi
+4168; 0 23592444 TABLE DATA public user_passkey_setups cdsemi
+4167; 0 23592422 TABLE DATA public user_passkeys cdsemi
+4163; 0 23592354 TABLE DATA public user_recovery_codes cdsemi
+4157; 0 23592226 TABLE DATA public user_sessions cdsemi
+4165; 0 23592371 TABLE DATA public user_sign_in_challenges cdsemi
+4161; 0 23592338 TABLE DATA public user_totp_factors cdsemi
+4154; 0 23592178 TABLE DATA public users cdsemi
+4144; 0 23591984 TABLE DATA public work_order_allocations cdsemi
+4119; 0 23591633 TABLE DATA public work_order_demands cdsemi
+4117; 0 23591621 TABLE DATA public work_orders cdsemi
+4149; 0 23592084 TABLE DATA public worker_sessions cdsemi
+4146; 0 23592027 TABLE DATA public workers cdsemi
+4179; 0 0 SEQUENCE SET public areas_id_seq cdsemi
+4180; 0 0 SEQUENCE SET public assigned_route_steps_id_seq cdsemi
+4181; 0 0 SEQUENCE SET public assigned_routes_id_seq cdsemi
+4182; 0 0 SEQUENCE SET public audit_events_id_seq cdsemi
+4183; 0 0 SEQUENCE SET public departments_id_seq cdsemi
+4184; 0 0 SEQUENCE SET public history_archive_runs_id_seq cdsemi
+4185; 0 0 SEQUENCE SET public machine_asset_tag_config_id_seq cdsemi
+4186; 0 0 SEQUENCE SET public machine_lifecycle_events_id_seq cdsemi
+4187; 0 0 SEQUENCE SET public machines_id_seq cdsemi
+4188; 0 0 SEQUENCE SET public operations_id_seq cdsemi
+4189; 0 0 SEQUENCE SET public part_movements_id_seq cdsemi
+4190; 0 0 SEQUENCE SET public quantity_flow_lineage_id_seq cdsemi
+4191; 0 0 SEQUENCE SET public quantity_flows_id_seq cdsemi
+4192; 0 0 SEQUENCE SET public roles_id_seq cdsemi
+4193; 0 0 SEQUENCE SET public route_steps_id_seq cdsemi
+4194; 0 0 SEQUENCE SET public route_templates_id_seq cdsemi
+4195; 0 0 SEQUENCE SET public scan_station_devices_id_seq cdsemi
+4196; 0 0 SEQUENCE SET public user_passkeys_id_seq cdsemi
+4197; 0 0 SEQUENCE SET public user_recovery_codes_id_seq cdsemi
+4198; 0 0 SEQUENCE SET public user_sessions_id_seq cdsemi
+4199; 0 0 SEQUENCE SET public user_sign_in_challenges_id_seq cdsemi
+4200; 0 0 SEQUENCE SET public users_id_seq cdsemi
+4201; 0 0 SEQUENCE SET public work_order_allocations_id_seq cdsemi
+4202; 0 0 SEQUENCE SET public work_order_demands_id_seq cdsemi
+4203; 0 0 SEQUENCE SET public work_orders_id_seq cdsemi
+4204; 0 0 SEQUENCE SET public worker_sessions_id_seq cdsemi
+4205; 0 0 SEQUENCE SET public workers_id_seq cdsemi
+3734; 2606 23591560 CONSTRAINT public alembic_version alembic_version_pkc cdsemi
+3830; 2606 23592081 CONSTRAINT public application_policy pk_application_policy cdsemi
+3740; 2606 23591584 CONSTRAINT public areas pk_areas cdsemi
+3772; 2606 23591709 CONSTRAINT public assigned_route_steps pk_assigned_route_steps cdsemi
+3770; 2606 23591696 CONSTRAINT public assigned_routes pk_assigned_routes cdsemi
+3809; 2606 23591900 CONSTRAINT public audit_events pk_audit_events cdsemi
+3736; 2606 23591571 CONSTRAINT public departments pk_departments cdsemi
+3881; 2606 23592510 CONSTRAINT public history_archive_runs pk_history_archive_runs cdsemi
+3885; 2606 23592543 CONSTRAINT public history_archived_flows pk_history_archived_flows cdsemi
+3805; 2606 23591890 CONSTRAINT public machine_asset_tag_config pk_machine_asset_tag_config cdsemi
+3803; 2606 23591856 CONSTRAINT public machine_lifecycle_events pk_machine_lifecycle_events cdsemi
+3797; 2606 23591833 CONSTRAINT public machines pk_machines cdsemi
+3861; 2606 23592337 CONSTRAINT public mail_server_credentials pk_mail_server_credentials cdsemi
+3746; 2606 23591602 CONSTRAINT public operations pk_operations cdsemi
+3789; 2606 23591769 CONSTRAINT public part_movements pk_part_movements cdsemi
+3750; 2606 23591619 CONSTRAINT public part_numbers pk_part_numbers cdsemi
+3814; 2606 23591949 CONSTRAINT public quantity_flow_lineage pk_quantity_flow_lineage cdsemi
+3779; 2606 23591742 CONSTRAINT public quantity_flows pk_quantity_flows cdsemi
+3842; 2606 23592171 CONSTRAINT public role_permissions pk_role_permissions cdsemi
+3838; 2606 23592161 CONSTRAINT public roles pk_roles cdsemi
+3765; 2606 23591672 CONSTRAINT public route_steps pk_route_steps cdsemi
+3762; 2606 23591664 CONSTRAINT public route_templates pk_route_templates cdsemi
+3855; 2606 23592277 CONSTRAINT public scan_station_devices pk_scan_station_devices cdsemi
+3795; 2606 23591815 CONSTRAINT public scan_stations pk_scan_stations cdsemi
+3848; 2606 23592219 CONSTRAINT public user_credentials pk_user_credentials cdsemi
+3879; 2606 23592453 CONSTRAINT public user_passkey_setups pk_user_passkey_setups cdsemi
+3875; 2606 23592435 CONSTRAINT public user_passkeys pk_user_passkeys cdsemi
+3865; 2606 23592362 CONSTRAINT public user_recovery_codes pk_user_recovery_codes cdsemi
+3851; 2606 23592236 CONSTRAINT public user_sessions pk_user_sessions cdsemi
+3870; 2606 23592387 CONSTRAINT public user_sign_in_challenges pk_user_sign_in_challenges cdsemi
+3863; 2606 23592347 CONSTRAINT public user_totp_factors pk_user_totp_factors cdsemi
+3844; 2606 23592192 CONSTRAINT public users pk_users cdsemi
+3820; 2606 23591997 CONSTRAINT public work_order_allocations pk_work_order_allocations cdsemi
+3758; 2606 23591647 CONSTRAINT public work_order_demands pk_work_order_demands cdsemi
+3753; 2606 23591630 CONSTRAINT public work_orders pk_work_orders cdsemi
+3833; 2606 23592095 CONSTRAINT public worker_sessions pk_worker_sessions cdsemi
+3826; 2606 23592040 CONSTRAINT public workers pk_workers cdsemi
+3742; 2606 23591586 CONSTRAINT public areas uq_areas_barcode_value cdsemi
+3744; 2606 23592307 CONSTRAINT public areas uq_areas_department_id_name cdsemi
+3774; 2606 23591711 CONSTRAINT public assigned_route_steps uq_assigned_route_steps_assigned_route_id_sequence cdsemi
+3738; 2606 23591573 CONSTRAINT public departments uq_departments_name cdsemi
+3800; 2606 23591835 CONSTRAINT public machines uq_machines_asset_tag cdsemi
+3748; 2606 23591604 CONSTRAINT public operations uq_operations_area_id_code cdsemi
+3791; 2606 23591931 CONSTRAINT public part_movements uq_part_movements_device_event_id_command_sequence cdsemi
+3793; 2606 23591972 CONSTRAINT public part_movements uq_part_movements_reverses_movement_id cdsemi
+3816; 2606 23591951 CONSTRAINT public quantity_flow_lineage uq_quantity_flow_lineage_parent_flow_id_child_flow_id cdsemi
+3781; 2606 23591744 CONSTRAINT public quantity_flows uq_quantity_flows_assigned_route_id cdsemi
+3783; 2606 23591746 CONSTRAINT public quantity_flows uq_quantity_flows_id_part_number cdsemi
+3840; 2606 23592163 CONSTRAINT public roles uq_roles_name cdsemi
+3767; 2606 23591674 CONSTRAINT public route_steps uq_route_steps_route_template_id_sequence cdsemi
+3857; 2606 23592279 CONSTRAINT public scan_station_devices uq_scan_station_devices_enrollment_code_digest cdsemi
+3859; 2606 23592281 CONSTRAINT public scan_station_devices uq_scan_station_devices_token_digest cdsemi
+3877; 2606 23592437 CONSTRAINT public user_passkeys uq_user_passkeys_credential_id cdsemi
+3867; 2606 23592364 CONSTRAINT public user_recovery_codes uq_user_recovery_codes_user_id_code_digest cdsemi
+3853; 2606 23592238 CONSTRAINT public user_sessions uq_user_sessions_token_digest cdsemi
+3872; 2606 23592389 CONSTRAINT public user_sign_in_challenges uq_user_sign_in_challenges_token_digest cdsemi
+3846; 2606 23592194 CONSTRAINT public users uq_users_login_name cdsemi
+3822; 2606 23592001 CONSTRAINT public work_order_allocations uq_work_order_allocations_device_event_id_command_sequence cdsemi
+3824; 2606 23591999 CONSTRAINT public work_order_allocations uq_work_order_allocations_reverses_allocation_id cdsemi
+3760; 2606 23592024 CONSTRAINT public work_order_demands uq_work_order_demands_priority_rank cdsemi
+3835; 2606 23592097 CONSTRAINT public worker_sessions uq_worker_sessions_id_worker_id_station_id cdsemi
+3828; 2606 23592042 CONSTRAINT public workers uq_workers_badge_barcode cdsemi
+3768; 1259 23592137 INDEX public ix_assigned_routes_source_route_template_id cdsemi
+3806; 1259 23591901 INDEX public ix_audit_events_entity_type_entity_id_id cdsemi
+3807; 1259 23592025 INDEX public ix_audit_events_hot_list_device_event_id cdsemi
+3883; 1259 23592564 INDEX public ix_history_archived_flows_flow_id cdsemi
+3801; 1259 23591872 INDEX public ix_machine_lifecycle_events_machine_id_id cdsemi
+3784; 1259 23592303 INDEX public ix_part_movements_assigned_route_step_id cdsemi
+3785; 1259 23592021 INDEX public ix_part_movements_part_number_occurred_at_id cdsemi
+3786; 1259 23591797 INDEX public ix_part_movements_quantity_flow_id_id cdsemi
+3787; 1259 23591904 INDEX public ix_part_movements_received_demand_context cdsemi
+3811; 1259 23591963 INDEX public ix_quantity_flow_lineage_child_flow_id cdsemi
+3812; 1259 23591962 INDEX public ix_quantity_flow_lineage_parent_flow_id cdsemi
+3775; 1259 23591758 INDEX public ix_quantity_flows_current_area_id cdsemi
+3776; 1259 23591917 INDEX public ix_quantity_flows_current_machine_id cdsemi
+3777; 1259 23591757 INDEX public ix_quantity_flows_part_number_active cdsemi
+3873; 1259 23592443 INDEX public ix_user_passkeys_user_id cdsemi
+3849; 1259 23592244 INDEX public ix_user_sessions_user_id_open cdsemi
+3868; 1259 23592395 INDEX public ix_user_sign_in_challenges_user_id_open cdsemi
+3817; 1259 23592018 INDEX public ix_work_order_allocations_part_number cdsemi
+3818; 1259 23592017 INDEX public ix_work_order_allocations_work_order_demand_id cdsemi
+3755; 1259 23591654 INDEX public ix_work_order_demands_part_number cdsemi
+3756; 1259 23591653 INDEX public ix_work_order_demands_work_order_id cdsemi
+3751; 1259 23591982 INDEX public ix_work_orders_completed_at_id cdsemi
+3831; 1259 23592114 INDEX public ix_worker_sessions_open_worker cdsemi
+3810; 1259 23592302 INDEX public uq_audit_events_route_adjustment_device_event_id cdsemi
+3882; 1259 23592526 INDEX public uq_history_archive_runs_open cdsemi
+3886; 1259 23592565 INDEX public uq_history_archived_flows_flow_id_purged cdsemi
+3798; 1259 23591841 INDEX public uq_machines_area_id_name_active cdsemi
+3763; 1259 23592308 INDEX public uq_route_templates_name_active cdsemi
+3754; 1259 23591631 INDEX public uq_work_orders_work_order_number cdsemi
+3836; 1259 23592113 INDEX public uq_worker_sessions_open_station cdsemi
+3949; 2620 23591803 TRIGGER public areas trg_areas_forbid_barcode_change cdsemi
+3950; 2620 23592305 TRIGGER public assigned_route_steps trg_assigned_route_steps_forbid_update cdsemi
+3955; 2620 23591903 TRIGGER public audit_events trg_audit_events_forbid_mutation cdsemi
+3956; 2620 23592573 TRIGGER public audit_events trg_audit_events_maintenance_scope cdsemi
+3961; 2620 23592570 TRIGGER public history_archive_runs trg_history_archive_runs_forbid_truncate cdsemi
+3962; 2620 23592569 TRIGGER public history_archive_runs trg_history_archive_runs_guard_mutation cdsemi
+3963; 2620 23592572 TRIGGER public history_archived_flows trg_history_archived_flows_forbid_truncate cdsemi
+3964; 2620 23592571 TRIGGER public history_archived_flows trg_history_archived_flows_guard_mutation cdsemi
+3954; 2620 23591874 TRIGGER public machine_lifecycle_events trg_machine_lifecycle_events_forbid_mutation cdsemi
+3952; 2620 23591845 TRIGGER public machines trg_machines_forbid_area_change cdsemi
+3953; 2620 23591843 TRIGGER public machines trg_machines_forbid_asset_tag_change cdsemi
+3951; 2620 23591799 TRIGGER public part_movements trg_part_movements_forbid_mutation cdsemi
+3957; 2620 23591965 TRIGGER public quantity_flow_lineage trg_quantity_flow_lineage_forbid_mutation cdsemi
+3958; 2620 23592020 TRIGGER public work_order_allocations trg_work_order_allocations_forbid_mutation cdsemi
+3959; 2620 23592117 TRIGGER public worker_sessions trg_worker_sessions_forbid_truncate cdsemi
+3960; 2620 23592116 TRIGGER public worker_sessions trg_worker_sessions_guard_mutation cdsemi
+3927; 2606 23592292 FK CONSTRAINT public application_policy fk_application_policy_scan_station_role_id_roles cdsemi
+3887; 2606 23591587 FK CONSTRAINT public areas fk_areas_department_id_departments cdsemi
+3888; 2606 23592054 FK CONSTRAINT public areas fk_areas_fixed_worker_id_workers cdsemi
+3896; 2606 23591717 FK CONSTRAINT public assigned_route_steps fk_assigned_route_steps_area_id_areas cdsemi
+3897; 2606 23591712 FK CONSTRAINT public assigned_route_steps fk_assigned_route_steps_assigned_route_id_assigned_routes cdsemi
+3898; 2606 23591722 FK CONSTRAINT public assigned_route_steps fk_assigned_route_steps_operation_id_operations cdsemi
+3895; 2606 23591697 FK CONSTRAINT public assigned_routes fk_assigned_routes_source_route_template_id_route_templates cdsemi
+3919; 2606 23592245 FK CONSTRAINT public audit_events fk_audit_events_actor_user_id_users cdsemi
+3942; 2606 23592521 FK CONSTRAINT public history_archive_runs fk_history_archive_runs_cancelled_by_user_id_users cdsemi
+3943; 2606 23592516 FK CONSTRAINT public history_archive_runs fk_history_archive_runs_copy_confirmed_by_user_id_users cdsemi
+3944; 2606 23592511 FK CONSTRAINT public history_archive_runs fk_history_archive_runs_requested_by_user_id_users cdsemi
+3945; 2606 23592549 FK CONSTRAINT public history_archived_flows fk_history_archived_flows_flow_id_part_number_quantity_flows cdsemi
+3946; 2606 23592544 FK CONSTRAINT public history_archived_flows fk_history_archived_flows_run_id_history_archive_runs cdsemi
+3947; 2606 23592559 FK CONSTRAINT public history_archived_flows fk_history_archived_flows_scrapped_area_id_areas cdsemi
+3948; 2606 23592554 FK CONSTRAINT public history_archived_flows fk_history_archived_flows_stocked_area_id_areas cdsemi
+3915; 2606 23592250 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_actor_user_id_users cdsemi
+3916; 2606 23591862 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_from_area_id_areas cdsemi
+3917; 2606 23591857 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_machine_id_machines cdsemi
+3918; 2606 23591867 FK CONSTRAINT public machine_lifecycle_events fk_machine_lifecycle_events_to_area_id_areas cdsemi
+3914; 2606 23591836 FK CONSTRAINT public machines fk_machines_area_id_areas cdsemi
+3889; 2606 23591605 FK CONSTRAINT public operations fk_operations_area_id_areas cdsemi
+3902; 2606 23591792 FK CONSTRAINT public part_movements fk_part_movements_assigned_route_step_id_assigned_route_steps cdsemi
+3903; 2606 23591923 FK CONSTRAINT public part_movements fk_part_movements_destination_machine_id_machines cdsemi
+3904; 2606 23591777 FK CONSTRAINT public part_movements fk_part_movements_from_area_id_areas cdsemi
+3905; 2606 23591787 FK CONSTRAINT public part_movements fk_part_movements_operation_id_operations cdsemi
+3906; 2606 23591772 FK CONSTRAINT public part_movements fk_part_movements_quantity_flow_id_part_number_quantity_flows cdsemi
+3907; 2606 23591966 FK CONSTRAINT public part_movements fk_part_movements_reverses_movement_id_part_movements cdsemi
+3908; 2606 23592119 FK CONSTRAINT public part_movements fk_part_movements_scan_session_worker_sessions cdsemi
+3909; 2606 23591918 FK CONSTRAINT public part_movements fk_part_movements_source_machine_id_machines cdsemi
+3910; 2606 23591905 FK CONSTRAINT public part_movements fk_part_movements_station_id_scan_stations cdsemi
+3911; 2606 23591782 FK CONSTRAINT public part_movements fk_part_movements_to_area_id_areas cdsemi
+3912; 2606 23592060 FK CONSTRAINT public part_movements fk_part_movements_worker_id_workers cdsemi
+3920; 2606 23591957 FK CONSTRAINT public quantity_flow_lineage fk_quantity_flow_lineage_child_flow_id_quantity_flows cdsemi
+3921; 2606 23591952 FK CONSTRAINT public quantity_flow_lineage fk_quantity_flow_lineage_parent_flow_id_quantity_flows cdsemi
+3899; 2606 23591747 FK CONSTRAINT public quantity_flows fk_quantity_flows_assigned_route_id_assigned_routes cdsemi
+3900; 2606 23591752 FK CONSTRAINT public quantity_flows fk_quantity_flows_current_area_id_areas cdsemi
+3901; 2606 23591912 FK CONSTRAINT public quantity_flows fk_quantity_flows_current_machine_id_machines cdsemi
+3931; 2606 23592172 FK CONSTRAINT public role_permissions fk_role_permissions_role_id_roles cdsemi
+3891; 2606 23591680 FK CONSTRAINT public route_steps fk_route_steps_area_id_areas cdsemi
+3892; 2606 23591685 FK CONSTRAINT public route_steps fk_route_steps_operation_id_operations cdsemi
+3893; 2606 23592132 FK CONSTRAINT public route_steps fk_route_steps_preferred_machine_id_machines cdsemi
+3894; 2606 23591675 FK CONSTRAINT public route_steps fk_route_steps_route_template_id_route_templates cdsemi
+3935; 2606 23592287 FK CONSTRAINT public scan_station_devices fk_scan_station_devices_replaces_device_id_scan_station_devices cdsemi
+3936; 2606 23592282 FK CONSTRAINT public scan_station_devices fk_scan_station_devices_station_id_scan_stations cdsemi
+3913; 2606 23591816 FK CONSTRAINT public scan_stations fk_scan_stations_area_id_areas cdsemi
+3933; 2606 23592220 FK CONSTRAINT public user_credentials fk_user_credentials_user_id_users cdsemi
+3941; 2606 23592454 FK CONSTRAINT public user_passkey_setups fk_user_passkey_setups_user_id_users cdsemi
+3940; 2606 23592438 FK CONSTRAINT public user_passkeys fk_user_passkeys_user_id_users cdsemi
+3938; 2606 23592365 FK CONSTRAINT public user_recovery_codes fk_user_recovery_codes_user_id_users cdsemi
+3934; 2606 23592239 FK CONSTRAINT public user_sessions fk_user_sessions_user_id_users cdsemi
+3939; 2606 23592390 FK CONSTRAINT public user_sign_in_challenges fk_user_sign_in_challenges_user_id_users cdsemi
+3937; 2606 23592348 FK CONSTRAINT public user_totp_factors fk_user_totp_factors_user_id_users cdsemi
+3932; 2606 23592195 FK CONSTRAINT public users fk_users_role_id_roles cdsemi
+3922; 2606 23592255 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_actor_user_id_users cdsemi
+3923; 2606 23592066 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_allocated_by_worker_id_workers cdsemi
+3924; 2606 23592002 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_demand_id_work_order_demands cdsemi
+3925; 2606 23592007 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_reverses_allocation_id cdsemi
+3926; 2606 23592012 FK CONSTRAINT public work_order_allocations fk_work_order_allocations_station_id_scan_stations cdsemi
+3890; 2606 23591648 FK CONSTRAINT public work_order_demands fk_work_order_demands_work_order_id_work_orders cdsemi
+3928; 2606 23592103 FK CONSTRAINT public worker_sessions fk_worker_sessions_area_id_areas cdsemi
+3929; 2606 23592098 FK CONSTRAINT public worker_sessions fk_worker_sessions_station_id_scan_stations cdsemi
+3930; 2606 23592108 FK CONSTRAINT public worker_sessions fk_worker_sessions_worker_id_workers cdsemi

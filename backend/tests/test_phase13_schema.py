@@ -196,6 +196,9 @@ _DISPLAY_SETTINGS_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0025_phase13_displa
 _STATION_THEME_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0026_phase13_station_theme.py"
 _RETENTION_PERIOD_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0027_phase13_retention_period.py"
 _USERS_ROLES_MIGRATION_FILE = _VERSIONS_DIR / "20261006_0028_phase13_users_roles.py"
+# 0040 (Phase 16, history archival) widens the permission vocabulary, the audit
+# entity types and the retention CHECK these Phase 13 literals started.
+_HISTORY_ARCHIVE_MIGRATION_FILE = _VERSIONS_DIR / "20261117_0040_phase16_history_archive.py"
 _PHASE3_MIGRATION_FILE = _VERSIONS_DIR / "20260818_0002_phase3_minimum_domain_foundation.py"
 _PHASE10_MIGRATION_FILE = _VERSIONS_DIR / "20260901_0011_phase10_stock_allocation.py"
 # Python 3.12 (Unicode 15) leaves `ɤ` (U+0264) unchanged; the glibc
@@ -544,6 +547,7 @@ def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> N
     assert set(re.findall(r"'([^']*)'", entity_check)) == {e.value for e in AuditEntityType} - {
         AuditEntityType.SCAN_STATION_DEVICE.value,
         AuditEntityType.ASSIGNED_ROUTE.value,
+        AuditEntityType.HISTORY_ARCHIVE_RUN.value,
     }
 
 
@@ -1477,6 +1481,7 @@ def test_worker_sessions_migration_repeats_the_model_literals() -> None:
         AuditEntityType.ROLE.value,
         AuditEntityType.SCAN_STATION_DEVICE.value,
         AuditEntityType.ASSIGNED_ROUTE.value,
+        AuditEntityType.HISTORY_ARCHIVE_RUN.value,
     }
 
 
@@ -2546,6 +2551,7 @@ def test_planned_routes_migration_restores_the_0020_literal() -> None:
         AuditEntityType.ROLE.value,
         AuditEntityType.SCAN_STATION_DEVICE.value,
         AuditEntityType.ASSIGNED_ROUTE.value,
+        AuditEntityType.HISTORY_ARCHIVE_RUN.value,
     }
 
 
@@ -3414,7 +3420,13 @@ def test_retention_period_check_has_exact_name_and_literal(migrated_engine: Engi
         for constraint in cast(sa.Table, models.ApplicationPolicy.__table__).constraints
         if isinstance(constraint, sa.CheckConstraint)
     }
-    assert model_checks[_RETENTION_CHECK] == models.POLICY_RETENTION_PERIOD_SQL
+    # 0040 (Phase 16) bounds the period below by the shortest allowed period.
+    history_archive = _load_migration(_HISTORY_ARCHIVE_MIGRATION_FILE)
+    assert (
+        history_archive._PREVIOUS_RETENTION_SQL
+        == _load_migration(_RETENTION_PERIOD_MIGRATION_FILE)._RETENTION_SQL
+    )
+    assert model_checks[_RETENTION_CHECK] == history_archive._RETENTION_SQL
 
 
 def test_retention_period_migration_repeats_the_model_literals() -> None:
@@ -3422,11 +3434,14 @@ def test_retention_period_migration_repeats_the_model_literals() -> None:
     assert migration.down_revision == _STATION_THEME_REVISION
     assert migration._CHECK == _RETENTION_CHECK
     assert migration._COLUMN == "retention_period_months"
+    # 0040 (Phase 16) made the minimum the shortest allowed period, a setting
+    # whose default is the 0027 minimum.
     assert (migration._RETENTION_MIN, migration._RETENTION_MAX) == (
-        models.RETENTION_PERIOD_MONTHS_MIN,
+        models.SHORTEST_RETENTION_MONTHS_DEFAULT,
         models.RETENTION_PERIOD_MONTHS_MAX,
     )
-    assert migration._RETENTION_SQL == models.POLICY_RETENTION_PERIOD_SQL
+    history_archive = _load_migration(_HISTORY_ARCHIVE_MIGRATION_FILE)
+    assert migration._RETENTION_SQL == history_archive._PREVIOUS_RETENTION_SQL
     assert migration._SECTION == policies.DATA_RETENTION_SECTION
 
 
@@ -3701,8 +3716,16 @@ def test_users_roles_migration_repeats_the_model_literals() -> None:
     migration = _load_migration(_USERS_ROLES_MIGRATION_FILE)
     assert migration.revision == _USERS_ROLES_REVISION
     assert migration.down_revision == _RETENTION_PERIOD_REVISION
-    assert tuple(permission.value for permission in Permission) == migration._PERMISSIONS
-    assert migration._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
+    # 0040 (Phase 16) appends RUN_HISTORY_ARCHIVAL_AND_PURGE: the 0028
+    # vocabulary stays the enum's prefix.
+    history_archive = _load_migration(_HISTORY_ARCHIVE_MIGRATION_FILE)
+    assert history_archive._PREVIOUS_PERMISSIONS == migration._PERMISSIONS
+    assert tuple(permission.value for permission in Permission) == (
+        *migration._PERMISSIONS,
+        Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE.value,
+    )
+    assert history_archive._PREVIOUS_PERMISSION_SQL == migration._PERMISSION_SQL
+    assert history_archive._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
     assert migration._LOGIN_NAME_SQL == models.USER_LOGIN_NAME_SQL
     assert migration._THEME_SQL == models.USER_THEME_PREFERENCE_SQL
     assert set(re.findall(r"'([^']*)'", models.USER_THEME_PREFERENCE_SQL)) == {
@@ -3734,9 +3757,10 @@ def test_users_roles_migration_repeats_the_model_literals() -> None:
         and constraint.name == "ck_audit_events_entity_type"
     ]
     # 0030 (Phase 14 slice 4) appends ScanStationDevice to this literal,
-    # 0032 (Phase 14 slice 6) AssignedRoute.
+    # 0032 (Phase 14 slice 6) AssignedRoute, 0040 (Phase 16) HistoryArchiveRun.
     assert entity_checks == [
-        migration._USER_ROLE_ENTITY_TYPES[:-1] + ", 'ScanStationDevice', 'AssignedRoute')"
+        migration._USER_ROLE_ENTITY_TYPES[:-1]
+        + ", 'ScanStationDevice', 'AssignedRoute', 'HistoryArchiveRun')"
     ]
     planned_routes = _load_migration(_PLANNED_ROUTES_MIGRATION_FILE)
     assert migration._PREVIOUS_ENTITY_TYPES == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES

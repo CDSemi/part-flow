@@ -67,11 +67,12 @@ const CONTRACT_KEYS = [
   'PERFORM_QUANTITY_CORRECTIONS',
   'EDIT_WORK_ORDER_ALLOCATION',
   'PERFORM_HISTORICAL_CORRECTIONS',
+  'RUN_HISTORY_ARCHIVAL_AND_PURGE',
 ];
 
-test('PERMISSIONS is the 35-key server vocabulary, in order', () => {
+test('PERMISSIONS is the 36-key server vocabulary, in order', () => {
   expect([...PERMISSIONS]).toEqual(CONTRACT_KEYS);
-  expect(new Set(PERMISSIONS).size).toBe(35);
+  expect(new Set(PERMISSIONS).size).toBe(36);
 });
 
 test('every permission sits in exactly one editable group or the correction subset', () => {
@@ -79,7 +80,7 @@ test('every permission sits in exactly one editable group or the correction subs
     ...ROLE_PERMISSION_GROUPS.flatMap((group) => group.permissions),
     ...CORRECTION_PERMISSIONS,
   ];
-  expect(placed).toHaveLength(35);
+  expect(placed).toHaveLength(36);
   expect([...placed].sort()).toEqual([...CONTRACT_KEYS].sort());
   expect(ROLE_PERMISSION_GROUPS.map((group) => group.label)).toEqual([
     'Administration',
@@ -112,6 +113,14 @@ test('labels are unique and non-empty, with the GUI-vocabulary renames', () => {
   expect(PERMISSION_LABELS.UNDO_RECENT_SCANS).toBe(
     'Undo recent eligible scans',
   );
+  expect(PERMISSION_LABELS.RUN_HISTORY_ARCHIVAL_AND_PURGE).toBe(
+    'Run history archival and purge',
+  );
+  // The archival key follows Configure system settings in Administration.
+  expect(ROLE_PERMISSION_GROUPS[0].permissions.slice(-2)).toEqual([
+    'CONFIGURE_SYSTEM_SETTINGS',
+    'RUN_HISTORY_ARCHIVAL_AND_PURGE',
+  ]);
 });
 
 test('the protected and reserved permissions are the contract literals', () => {
@@ -184,7 +193,7 @@ test('each Administration section names the permission its changes need', () => 
     'worker-sessions': 'MANAGE_WORKER_SESSION_POLICIES',
     'machine-assignment': null,
     'correction-permissions': 'MANAGE_CORRECTION_PERMISSIONS',
-    'data-retention': 'CONFIGURE_SYSTEM_SETTINGS',
+    'data-retention': 'RUN_HISTORY_ARCHIVAL_AND_PURGE',
     backups: 'CONFIGURE_SYSTEM_SETTINGS',
     'department-display': 'MANAGE_DEPARTMENTS',
     settings: 'CONFIGURE_SYSTEM_SETTINGS',

@@ -1773,6 +1773,7 @@ The initial Administrator role grants:
 - edit Work Order Demand,
 - edit Work Order Allocation,
 - perform authorized historical corrections,
+- run history archival and purge — its settings, the retention period among them, and its runs (§28 Administrative Archival and Purge),
 - configure system settings.
 
 ---
@@ -2375,16 +2376,17 @@ Normal production runtime is append-only and never silently rewrites or deletes 
 The archival files become the long-term historical storage for the purged portion of history. Mandatory rules:
 
 - **Normal production runtime may never UPDATE or DELETE `PartMovement` rows** — the append-only guard (UPDATE/DELETE revoked from the application role plus a raise-on-write trigger) stays in force at all times for the application. Archive/purge is executed only through a **separate privileged Admin maintenance path** with its own authorization — never through the application role, the normal application workflows, or any production write path.
-- **Never purge before a successful, verified archive export.**
+- **Never purge before a successful, verified archive export, and never before the verified archive also exists off the host**: the maintenance job copies it to a second folder on another device and checks the copy, or a person copies it and confirms the copy in Administration.
 - The archive must retain enough data to identify the PN, quantity, Movement type, Area, Operation, Machine, Worker, timestamps, relationships/correction context, and the required audit fields.
 - The PN in archived history is stored directly as the canonical PN string — never dependent on the PN master.
-- **Purge must never break relationships between Movement records.** Related Movements — for example a `REVERSED` correction and the original Movement it references through `reverses_movement_id`, or the Movements of one atomic application command — are archived and purged together: a retained Movement may never be left referencing a purged row. The retention cutoff selection must keep such chains whole (retain the whole chain until every member falls behind the cutoff), and the archive preserves the relationship context.
+- **Purge must never break relationships between Movement records.** Related Movements — for example a `REVERSED` correction and the original Movement it references through `reverses_movement_id`, or the Movements of one atomic application command — are archived and purged together: a retained Movement may never be left referencing a purged row. The retention cutoff selection must keep such chains whole (retain the whole chain until every member falls behind the cutoff), and the archive preserves the relationship context. Selection therefore works on whole flow components — the Quantity Flows joined by split and merge — and takes a component only when every flow in it is closed (no longer `ACTIVE`) and every Movement of it is older than the cutoff.
+- **The cutoff never reaches into the retention period.** A run's cutoff is the start of a day on the site calendar, never later than the day that lies the retention period before the day of the run; a manual request may choose an earlier cutoff, never a later one. The retention period is a whole number of months, never shorter than the shortest allowed retention period — itself a setting that changes only with a reason — or no retention period at all, in which case nothing is eligible.
 - Retention/purge is explicit administrative maintenance, never part of a normal production workflow; it may be triggered by the Admin-configured retention policy, an Admin-configured data-size threshold, or a manual Admin request.
-- Maintenance operations require explicit Admin authorization, show a scope/impact preview before execution, require a reason, and are fully auditable: scope, cutoff, who/what initiated it, when, and the result.
+- Maintenance operations require explicit authorization — the permission to run history archival and purge (§20) —, show a scope/impact preview before execution, require a reason, and are fully auditable: scope, cutoff, who/what initiated it, when, and the result. Each request is recorded as a run that keeps its reason and the preview it was approved with; at most one run is open at a time.
 - Records still needed to reconstruct active production state are never archived/purged; active production state and current projections must always remain reconcilable after archival.
 - The purge deletes exactly the archived rows (archive/export first, then purge what was archived) — whole-table truncation is never used.
 - Retention settings live in Administration/configuration, not in production workflow logic.
-- The archive file format and transport are implementation-phase decisions; no archival engine is implemented before the roadmap phase that builds it, and no additional storage infrastructure is presumed here.
+- The archive is a set of files on the server, outside the database, with a checksum for each file, which standard tools can check and read; no additional storage infrastructure is presumed (the off-host copy may go to any second device, or be made by hand).
 
 Note the distinction: *production identity must remain traceable* (always true — production records carry their canonical PN, and archived history remains part of the permanent record) is **not** the same as *all raw Movement rows must remain forever in the primary database* (not required — retention archival applies).
 
@@ -2499,7 +2501,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §20 and §21: Administration → Security gathers the sign-in settings, with configurable password rules and Remember me. |
+| 2026-11-17 | uncommitted | §20 and §28: the permission to run history archival and purge, the cutoff and flow-component rules of a run, and the off-host copy of the archive. |
+| 2026-11-17 | 4539a2b | §20 and §21: Administration → Security gathers the sign-in settings, with configurable password rules and Remember me. |
 | 2026-11-17 | 4be2389 | §15 and §20: a User who may manage Scan Stations can view any Scan Station from a browser that is not enrolled, read-only. |
 | 2026-11-17 | 4cfaf35 | Machines and Part Numbers: printing many barcode labels at once; the date added and last-use orders of the Part Number master records. |
 | 2026-11-17 | 01ce427 | Administrative Archival and Purge: the interim operator command that permanently deletes Work Orders and Part Numbers entered only for testing. |

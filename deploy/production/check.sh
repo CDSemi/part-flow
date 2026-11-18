@@ -5,10 +5,13 @@
 #
 # One run evaluates 13 checks in a fixed order and prints one line per check, `PASS|FAIL|SKIP <id> <reason>`, then
 # optional `NOTE` lines: https, certificate, containers, restarts, errors, disk_data, disk_backup, disk_docker,
-# disk_archive, then database, schema, backup_age and archival_proposal from one read-only `status` run (the `status`
-# ops service, as the application database role, the backup directory mounted read-only). It never starts, stops or
-# changes a service, never writes in the backup or archive directories and never repairs; after a `status` run that hit
-# its time bound it removes the one-off `status` container that run left (one that was not there before it).
+# disk_archive (PARTFLOW_ARCHIVE_DIR), then database, schema and backup_age from one read-only `status` run (the `status`
+# ops service, as the application database role, the backup directory mounted read-only), and archival_proposal from
+# one read-only `history-archive status` run (the `maintenance` ops service, as the maintenance database role, with the
+# archive folder and, when archive.sh would mount it, the copy folder; OPERATIONS_RUNBOOK §11). It never starts, stops
+# or changes a service, never writes in the backup or archive directories and never repairs; after a `status` run that
+# hit its time bound it removes the one-off container that run left (one that was not there before it), and after a
+# `maintenance` run that hit its bound only the container of that run (its own --name), never a step of archive.sh.
 #
 # Exit status: 0 nothing to notify (every line PASS/SKIP, or the failing set was already reported less than
 # --renotify-hours ago); 1 at least one FAIL to notify; 2 could not run (one line `ERROR check could not run: ...`).
@@ -18,8 +21,8 @@
 set -eu
 
 # The values in the shell would override the env file for every Compose command.
-unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR COMPOSE_PROJECT_NAME \
-    COMPOSE_FILE COMPOSE_PROFILES
+unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR PARTFLOW_ARCHIVE_DIR \
+    PARTFLOW_ARCHIVE_COPY_DIR COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
 umask 077
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -34,7 +37,7 @@ RELEASE_LOCK_HOURS=4
 usage() {
     cat <<'EOF'
 Usage: deploy/production/check.sh --url URL [--env-file .env.production] [--state-dir DIR]
-           [--cacert FILE] [--resolve-to ADDRESS] [--archive-dir DIR]
+           [--cacert FILE] [--resolve-to ADDRESS]
            [--max-backup-age-hours N] [--min-free-percent N] [--min-cert-days N]
            [--renotify-hours N] [--allow-accepted-schema] [--only ID]... [--quiet]
            [--records-dir DIR] [--no-state] [--rehearsal --project NAME]
@@ -45,7 +48,6 @@ Run from the repository root of the running release's checkout, as the account t
   --state-dir DIR            default $HOME/partflow-monitoring (created with mode 0700)
   --cacert FILE              CA certificate for curl (a private CA)
   --resolve-to ADDRESS       connect to this IPv4 address for HOST (the host cannot resolve its own name)
-  --archive-dir DIR          measure this directory as disk_archive (P16-S8); SKIP without it
   --max-backup-age-hours N   1-720, default: the interval of Administration → Backups plus 2
   --min-free-percent N       0-100, default 15 (100 fails every measured disk: the notification test)
   --min-cert-days N          1-365, default 21
@@ -59,6 +61,8 @@ Run from the repository root of the running release's checkout, as the account t
   --rehearsal --project NAME a throwaway Compose project (never partflow, partflow-production or partflow-staging)
 Check ids: https certificate containers restarts errors disk_data disk_backup disk_docker disk_archive
            database schema backup_age archival_proposal
+disk_archive and archival_proposal use PARTFLOW_ARCHIVE_DIR and PARTFLOW_ARCHIVE_COPY_DIR of the env file; both are
+SKIP while PARTFLOW_ARCHIVE_DIR is empty (DEPLOYMENT §3.1).
 Output: one line per check, PASS|FAIL|SKIP <id> <reason>, then NOTE lines.
 Exit: 0 nothing to notify, 1 notify (a FAIL), 2 could not run.
 EOF
@@ -124,7 +128,6 @@ ENV_FILE=.env.production
 STATE_DIR_OPTION=
 CACERT=
 RESOLVE_TO=
-ARCHIVE_DIR=
 MAX_AGE=
 MIN_FREE=15
 MIN_CERT_DAYS=21
@@ -154,7 +157,15 @@ while [ "$#" -gt 0 ]; do
         --quiet) QUIET=1; shift; continue ;;
         --no-state) NO_STATE=1; shift; continue ;;
         --rehearsal) REHEARSAL=1; shift; continue ;;
-        --url | --env-file | --state-dir | --cacert | --resolve-to | --archive-dir | --max-backup-age-hours | \
+        --archive-dir)
+            # Accepted for compatibility with commands written before archival step 1, then ignored.
+            [ "$#" -ge 2 ] || usage_error "$option needs a value."
+            echo "check: --archive-dir is ignored: disk_archive measures PARTFLOW_ARCHIVE_DIR of the env file" \
+                "(DEPLOYMENT §3.1); remove the option." >&2
+            shift 2
+            continue
+            ;;
+        --url | --env-file | --state-dir | --cacert | --resolve-to | --max-backup-age-hours | \
             --min-free-percent | --min-cert-days | --renotify-hours | --only | --records-dir | --project)
             [ "$#" -ge 2 ] || usage_error "$option needs a value."
             value=$2
@@ -168,7 +179,6 @@ while [ "$#" -gt 0 ]; do
         --state-dir) STATE_DIR_OPTION=$value ;;
         --cacert) CACERT=$value ;;
         --resolve-to) RESOLVE_TO=$value ;;
-        --archive-dir) ARCHIVE_DIR=$value ;;
         --max-backup-age-hours) check_count "$option" "$value" 1 720; MAX_AGE=$value ;;
         --min-free-percent) check_count "$option" "$value" 0 100; MIN_FREE=$value ;;
         --min-cert-days) check_count "$option" "$value" 1 365; MIN_CERT_DAYS=$value ;;
@@ -272,6 +282,24 @@ case "$BACKUP_DIR" in
     *\"* | *\'* | *[[:space:]]*) could_not_run "PARTFLOW_BACKUP_DIR in $ENV_FILE must be unquoted and without spaces." ;;
 esac
 BACKUP_DIR=${BACKUP_DIR%/}
+# Movement-history archival (OPERATIONS_RUNBOOK §11): optional until it is set up; a malformed value is reported by
+# disk_archive and archival_proposal instead of stopping every other check.
+ARCHIVE_DIR=$(sed -n 's/^PARTFLOW_ARCHIVE_DIR=//p' "$ENV_FILE" | tail -n 1)
+COPY_DIR=$(sed -n 's/^PARTFLOW_ARCHIVE_COPY_DIR=//p' "$ENV_FILE" | tail -n 1)
+ARCHIVE_PROBLEM=
+for value in "$ARCHIVE_DIR" "$COPY_DIR"; do
+    [ -n "$value" ] || continue
+    case "$value" in
+        /*) ;;
+        *) ARCHIVE_PROBLEM="PARTFLOW_ARCHIVE_DIR and PARTFLOW_ARCHIVE_COPY_DIR in $ENV_FILE must be absolute paths" ;;
+    esac
+    case "$value" in
+        *\"* | *\'* | *[[:space:]]* | *:*)
+            ARCHIVE_PROBLEM="PARTFLOW_ARCHIVE_DIR and PARTFLOW_ARCHIVE_COPY_DIR in $ENV_FILE must be unquoted, without spaces or ':'" ;;
+    esac
+done
+[ -z "$ARCHIVE_DIR" ] || ARCHIVE_DIR=${ARCHIVE_DIR%/}
+[ -z "$COPY_DIR" ] || COPY_DIR=${COPY_DIR%/}
 printf '%s' "$HTTP_PORT" | grep -Eq '^[0-9]{1,5}$' || could_not_run "PARTFLOW_HTTP_PORT in $ENV_FILE must be a port number."
 if [ -n "$PROJECT" ]; then
     PROJECT_NAME=$PROJECT
@@ -654,11 +682,108 @@ check_disk_docker() {
 # ---------------------------------------------------------------------------
 
 STATUS_IDS='database schema backup_age archival_proposal'
-# one_off_status: the ids of this project's one-off `status` containers (`docker compose run`).
-one_off_status() {
+ARCHIVE_NOT_SET_UP="archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in $ENV_FILE (DEPLOYMENT §3.1)"
+# one_off SERVICE: the ids of this project's one-off containers of SERVICE (`docker compose run`).
+one_off() {
     dk ps -a -q --filter "label=com.docker.compose.project=$PROJECT_NAME" \
-        --filter "label=com.docker.compose.service=status" --filter "label=com.docker.compose.oneoff=True" \
+        --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=True" \
         2>>"$WORK/docker.err"
+}
+# remove_new_one_off SERVICE BEFORE: remove the one-off containers of SERVICE that were not in BEFORE (a timed-out run).
+remove_new_one_off() {
+    for id in $(one_off "$1" || true); do
+        case " $(printf '%s' "$2" | tr '\n' ' ') " in
+            *" $id "*) ;;
+            *) dk rm -f "$id" >/dev/null 2>>"$WORK/docker.err" || true ;;
+        esac
+    done
+}
+# mount_point PATH: the mount point of the file system holding PATH (empty when df cannot tell).
+mount_point() {
+    timeout "$DOCKER_SECONDS" df -P "$1" 2>/dev/null | awk 'NR == 2 { print $6 }'
+}
+# check_archival: archival_proposal from one read-only `history-archive status` run in the maintenance service. The
+# copy folder is mounted exactly as archive.sh mounts it (a long-syntax bind with create_host_path: false in an override
+# file), only while it is a writable folder on a file system that is neither the archive folder's nor `/`; otherwise
+# the run reports copy_dir_unusable, and the line gives the reason.
+check_archival() {
+    if [ -n "$ARCHIVE_PROBLEM" ]; then
+        emit FAIL archival_proposal "$ARCHIVE_PROBLEM (DEPLOYMENT §3.1)"
+        return 0
+    fi
+    if [ -z "$ARCHIVE_DIR" ]; then
+        emit SKIP archival_proposal "$ARCHIVE_NOT_SET_UP"
+        return 0
+    fi
+    if [ ! -d "$ARCHIVE_DIR" ]; then
+        emit FAIL archival_proposal "archive_dir_unusable: the archive folder $ARCHIVE_DIR (PARTFLOW_ARCHIVE_DIR) does not exist"
+        return 0
+    fi
+    copy_mount=
+    copy_reason=
+    if [ -n "$COPY_DIR" ]; then
+        if [ ! -d "$COPY_DIR" ]; then
+            copy_reason="$COPY_DIR does not exist (is the share or disk mounted?)"
+        elif [ ! -w "$COPY_DIR" ]; then
+            copy_reason="$COPY_DIR is not writable by this account"
+        else
+            a_mount=$(mount_point "$ARCHIVE_DIR") || a_mount=
+            c_mount=$(mount_point "$COPY_DIR") || c_mount=
+            if [ -z "$a_mount" ] || [ -z "$c_mount" ]; then
+                copy_reason="the file systems of $ARCHIVE_DIR and $COPY_DIR could not be read (df -P)"
+            elif [ "$c_mount" = / ]; then
+                copy_reason="$COPY_DIR is on the host's root file system (/), not on another device (is the share or disk mounted?)"
+            elif [ "$c_mount" = "$a_mount" ]; then
+                copy_reason="$COPY_DIR is on the archive folder's file system ($c_mount), not on another device"
+            else
+                copy_mount=1
+            fi
+        fi
+    fi
+    # Its own container name: a timed-out check removes only its own run, never an archive.sh step.
+    run_name=$PROJECT_NAME-archive-check-$$
+    set -- --profile ops run --rm --no-deps -T --user "$USER_IDS" --name "$run_name" maintenance status
+    arc=0
+    if [ -n "$copy_mount" ]; then
+        cat >"$WORK/copy-mount.yaml" <<EOF
+services:
+    maintenance:
+        volumes:
+            - type: bind
+              source: '$COPY_DIR'
+              target: /archive-copy
+              bind:
+                  create_host_path: false
+EOF
+        if [ -n "$PROJECT" ]; then
+            timeout "$STATUS_SECONDS" docker compose -p "$PROJECT" -f compose.production.yaml -f "$WORK/copy-mount.yaml" \
+                --env-file "$ENV_FILE" "$@" >"$WORK/archive-status.json" 2>"$WORK/archive-status.err" || arc=$?
+        else
+            timeout "$STATUS_SECONDS" docker compose -f compose.production.yaml -f "$WORK/copy-mount.yaml" \
+                --env-file "$ENV_FILE" "$@" >"$WORK/archive-status.json" 2>"$WORK/archive-status.err" || arc=$?
+        fi
+    else
+        pf "$STATUS_SECONDS" "$@" >"$WORK/archive-status.json" 2>"$WORK/archive-status.err" || arc=$?
+    fi
+    for name in archive-status.json archive-status.err; do
+        cp "$WORK/$name" "$STATE_DIR/$name.tmp" && replace "$STATE_DIR/$name"
+    done
+    if [ "$arc" -eq 124 ]; then
+        dk rm -f "$run_name" >/dev/null 2>>"$WORK/docker.err" || true
+        emit FAIL archival_proposal "history-archive status gave no answer within $STATUS_SECONDS s"
+        return 0
+    fi
+    set -- archive "$WORK/archive-status.json" "$arc"
+    [ -z "$copy_reason" ] || set -- "$@" --copy-reason "$copy_reason"
+    python3 "$SCRIPT_DIR/monitor_report.py" "$@" >"$WORK/archive.out" 2>"$WORK/archive-monitor.err" || true
+    text=$(tr -d '\r' <"$WORK/archive.out" | grep -E '^(PASS|FAIL|SKIP) archival_proposal ' | head -n 1) || text=
+    if [ -z "$text" ]; then
+        emit FAIL archival_proposal "the history-archive status report could not be evaluated (monitor_report.py)"
+        return 0
+    fi
+    word=${text%% *}
+    rest=${text#* }
+    emit "$word" archival_proposal "${rest#* }"
 }
 # lock_age_seconds PATH: seconds since PATH was last modified (nothing when that cannot be read).
 lock_age_seconds() {
@@ -688,7 +813,7 @@ check_status() {
         done
         return 0
     fi
-    before=$(one_off_status) || before=
+    before=$(one_off status) || before=
     src=0
     # Without --max-backup-age-hours, status takes the limit from the interval of Administration → Backups.
     set -- status
@@ -701,12 +826,7 @@ check_status() {
     done
     if [ "$src" -eq 124 ]; then
         # Remove only the one-off status container this run left (one that was not there before the run).
-        for id in $(one_off_status || true); do
-            case " $(printf '%s' "$before" | tr '\n' ' ') " in
-                *" $id "*) ;;
-                *) dk rm -f "$id" >/dev/null 2>>"$WORK/docker.err" || true ;;
-            esac
-        done
+        remove_new_one_off status "$before"
         emit FAIL database "no answer within $STATUS_SECONDS s"
         for id in schema backup_age archival_proposal; do
             emit SKIP "$id" "status did not run"
@@ -725,6 +845,8 @@ check_status() {
     while IFS= read -r text; do
         case "$text" in
             NOTE\ *) note "${text#NOTE }" ;;
+            # The status report's archival line is replaced by the history-archive status (check_archival).
+            *\ archival_proposal\ *) ;;
             PASS\ * | FAIL\ * | SKIP\ *)
                 word=${text%% *}
                 rest=${text#* }
@@ -732,6 +854,7 @@ check_status() {
                 ;;
         esac
     done <"$WORK/status.lines"
+    if selected archival_proposal; then check_archival; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -748,10 +871,12 @@ if selected disk_data; then check_disk_data; fi
 if selected disk_backup; then host_disk disk_backup "$BACKUP_DIR" "on the backup directory"; fi
 if selected disk_docker; then check_disk_docker; fi
 if selected disk_archive; then
-    if [ -n "$ARCHIVE_DIR" ]; then
-        host_disk disk_archive "$ARCHIVE_DIR" "on the archive directory"
+    if [ -n "$ARCHIVE_PROBLEM" ]; then
+        emit FAIL disk_archive "$ARCHIVE_PROBLEM (DEPLOYMENT §3.1)"
+    elif [ -n "$ARCHIVE_DIR" ]; then
+        host_disk disk_archive "$ARCHIVE_DIR" "on the archive folder"
     else
-        emit SKIP disk_archive "no archive directory configured (P16-S8)"
+        emit SKIP disk_archive "$ARCHIVE_NOT_SET_UP"
     fi
 fi
 # shellcheck disable=SC2086

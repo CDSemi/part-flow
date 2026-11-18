@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `4be2389` cộng các thay đổi chưa commit ngày 2026-11-17.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `4539a2b` cộng các thay đổi chưa commit ngày 2026-11-17.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -1776,6 +1776,7 @@ Vai trò Administrator ban đầu cấp các quyền:
 - chỉnh sửa Work Order Demand,
 - chỉnh sửa Work Order Allocation,
 - thực hiện các sửa sai lịch sử được ủy quyền,
+- chạy lưu trữ và xóa dọn lịch sử — các thiết lập của nó, trong đó có thời hạn lưu giữ, và các lần chạy của nó (§28 Administrative Archival and Purge),
 - cấu hình thiết lập hệ thống.
 
 ---
@@ -2380,16 +2381,17 @@ Vận hành sản xuất bình thường chỉ ghi thêm (append-only) và khôn
 Các tệp lưu trữ trở thành nơi lưu trữ lịch sử dài hạn cho phần lịch sử đã bị xóa dọn. Quy tắc bắt buộc:
 
 - **Vận hành sản xuất bình thường không bao giờ được UPDATE hoặc DELETE các dòng `PartMovement`** — cơ chế bảo vệ chỉ-ghi-thêm (thu hồi quyền UPDATE/DELETE khỏi role của ứng dụng cùng một trigger báo lỗi khi ghi) luôn có hiệu lực đối với ứng dụng. Lưu trữ/xóa dọn chỉ được thực hiện qua một **đường bảo trì Admin đặc quyền riêng** với cơ chế ủy quyền riêng — không bao giờ qua role của ứng dụng, các quy trình thông thường của ứng dụng hay bất kỳ đường ghi sản xuất nào.
-- **Không bao giờ xóa dọn trước khi có một lần xuất lưu trữ thành công và đã được kiểm tra.**
+- **Không bao giờ xóa dọn trước khi có một lần xuất lưu trữ thành công và đã được kiểm tra, và trước khi bản lưu trữ đã kiểm tra cũng nằm ngoài máy chủ**: job bảo trì chép nó sang một thư mục thứ hai trên một thiết bị khác và kiểm tra bản sao, hoặc một người tự chép rồi xác nhận bản sao trong Administration.
 - Bản lưu trữ phải giữ đủ dữ liệu để xác định PN, số lượng, loại Movement, Area, Operation, Machine, Worker, các mốc thời gian, quan hệ/ngữ cảnh sửa sai và các trường audit bắt buộc.
 - PN trong lịch sử lưu trữ được lưu trực tiếp dưới dạng chuỗi PN chuẩn — không bao giờ phụ thuộc vào master PN.
-- **Việc xóa dọn không bao giờ được làm đứt quan hệ giữa các bản ghi Movement.** Các Movement liên quan — ví dụ một bản sửa sai `REVERSED` và Movement gốc mà nó tham chiếu qua `reverses_movement_id`, hoặc các Movement của cùng một lệnh ứng dụng nguyên tử — được lưu trữ và xóa dọn cùng nhau: một Movement còn giữ lại không bao giờ được tham chiếu tới một dòng đã bị xóa dọn. Việc chọn theo mốc cắt lưu giữ phải giữ nguyên vẹn các chuỗi như vậy (giữ lại cả chuỗi cho tới khi mọi thành phần đều nằm sau mốc cắt), và bản lưu trữ bảo toàn ngữ cảnh quan hệ.
+- **Việc xóa dọn không bao giờ được làm đứt quan hệ giữa các bản ghi Movement.** Các Movement liên quan — ví dụ một bản sửa sai `REVERSED` và Movement gốc mà nó tham chiếu qua `reverses_movement_id`, hoặc các Movement của cùng một lệnh ứng dụng nguyên tử — được lưu trữ và xóa dọn cùng nhau: một Movement còn giữ lại không bao giờ được tham chiếu tới một dòng đã bị xóa dọn. Việc chọn theo mốc cắt lưu giữ phải giữ nguyên vẹn các chuỗi như vậy (giữ lại cả chuỗi cho tới khi mọi thành phần đều nằm sau mốc cắt), và bản lưu trữ bảo toàn ngữ cảnh quan hệ. Vì vậy việc chọn làm việc trên trọn từng cụm flow — các Quantity Flow nối với nhau qua tách (split) và gộp (merge) — và chỉ lấy một cụm khi mọi flow trong đó đã đóng (không còn `ACTIVE`) và mọi Movement của nó đều cũ hơn mốc cắt.
+- **Mốc cắt không bao giờ lấn vào thời hạn lưu giữ.** Mốc cắt của một lần chạy là đầu một ngày theo lịch của site, không bao giờ muộn hơn ngày nằm trước ngày chạy đúng bằng thời hạn lưu giữ; một yêu cầu thủ công có thể chọn mốc cắt sớm hơn, không bao giờ muộn hơn. Thời hạn lưu giữ là một số nguyên tháng, không bao giờ ngắn hơn thời hạn lưu giữ ngắn nhất được phép — bản thân nó là một thiết lập chỉ đổi được khi có lý do — hoặc không có thời hạn lưu giữ nào, khi đó không có gì đủ điều kiện.
 - Lưu giữ/xóa dọn là việc bảo trì quản trị tường minh, không bao giờ là một phần của quy trình sản xuất thông thường; nó có thể được kích hoạt bởi chính sách lưu giữ do Admin cấu hình, một ngưỡng kích thước dữ liệu do Admin cấu hình, hoặc một yêu cầu thủ công của Admin.
-- Các thao tác bảo trì đòi hỏi ủy quyền Admin tường minh, hiển thị bản xem trước phạm vi/tác động trước khi thực hiện, bắt buộc có lý do và được audit đầy đủ: phạm vi, mốc cắt, ai/cái gì khởi tạo, khi nào và kết quả.
+- Các thao tác bảo trì đòi hỏi ủy quyền tường minh — quyền chạy lưu trữ và xóa dọn lịch sử (§20) —, hiển thị bản xem trước phạm vi/tác động trước khi thực hiện, bắt buộc có lý do và được audit đầy đủ: phạm vi, mốc cắt, ai/cái gì khởi tạo, khi nào và kết quả. Mỗi yêu cầu được ghi thành một lần chạy, giữ lý do và bản xem trước mà nó được duyệt cùng; tại mỗi thời điểm chỉ có nhiều nhất một lần chạy đang mở.
 - Các bản ghi còn cần để dựng lại trạng thái sản xuất đang hoạt động không bao giờ bị lưu trữ/xóa dọn; trạng thái sản xuất đang hoạt động và các projection hiện tại phải luôn đối chiếu khớp được sau khi lưu trữ.
 - Việc xóa dọn xóa đúng những dòng đã được lưu trữ (lưu trữ/xuất trước, rồi xóa dọn những gì đã được lưu trữ) — không bao giờ dùng việc truncate toàn bảng.
 - Thiết lập lưu giữ nằm trong Administration/cấu hình, không nằm trong logic quy trình sản xuất.
-- Định dạng tệp lưu trữ và cách truyền tải là các quyết định của giai đoạn triển khai; không có engine lưu trữ nào được triển khai trước giai đoạn roadmap xây dựng nó, và ở đây không giả định thêm hạ tầng lưu trữ nào.
+- Bản lưu trữ là một tập tệp trên máy chủ, nằm ngoài cơ sở dữ liệu, mỗi tệp có một checksum, mà các công cụ chuẩn kiểm tra và đọc được; không giả định thêm hạ tầng lưu trữ nào (bản sao ngoài máy chủ có thể nằm trên bất kỳ thiết bị thứ hai nào, hoặc được chép bằng tay).
 
 Lưu ý sự phân biệt: *định danh sản xuất phải luôn truy vết được* (luôn đúng — bản ghi sản xuất mang PN chuẩn của chúng, và lịch sử đã lưu trữ vẫn là một phần của hồ sơ vĩnh viễn) **không** giống với *mọi dòng Movement thô phải nằm mãi mãi trong cơ sở dữ liệu chính* (không bắt buộc — có áp dụng lưu trữ theo chính sách lưu giữ).
 
@@ -2504,7 +2506,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §20 và §21: Administration → Security gom các thiết lập đăng nhập, với quy tắc mật khẩu và Remember me có thể cấu hình. |
+| 2026-11-17 | uncommitted | §20 và §28: quyền chạy lưu trữ và xóa dọn lịch sử, quy tắc mốc cắt và cụm flow của một lần chạy, và bản sao ngoài máy chủ của bản lưu trữ. |
+| 2026-11-17 | 4539a2b | §20 và §21: Administration → Security gom các thiết lập đăng nhập, với quy tắc mật khẩu và Remember me có thể cấu hình. |
 | 2026-11-17 | 4be2389 | §15 và §20: một User có quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, chỉ để đọc. |
 | 2026-11-17 | 4cfaf35 | Machines và Part Numbers: in nhiều nhãn barcode cùng lúc; thứ tự theo ngày thêm và lần dùng cuối của các bản ghi master Part Number. |
 | 2026-11-17 | 01ce427 | Administrative Archival and Purge: lệnh vận hành tạm thời xóa vĩnh viễn các Work Order và Part Number chỉ nhập để thử nghiệm. |

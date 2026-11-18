@@ -122,6 +122,20 @@ server {
         include /etc/nginx/partflow/proxy-api.conf;
     }
 
+    # History archival & purge: the preview (and the request, which recomputes it) runs up to the preview
+    # time limit of Administration (at most 600 s). Both only read, or write in one transaction at the end, so
+    # backend's 200 s stop grace may cut one off without a partial change.
+    location = /api/history-archive/preview {
+        proxy_send_timeout 610s;
+        proxy_read_timeout 610s;
+        include /etc/nginx/partflow/proxy-api.conf;
+    }
+    location = /api/history-archive/runs {
+        proxy_send_timeout 610s;
+        proxy_read_timeout 610s;
+        include /etc/nginx/partflow/proxy-api.conf;
+    }
+
     location @partflow_too_large {
         default_type application/json;
         add_header Cache-Control "no-store" always;

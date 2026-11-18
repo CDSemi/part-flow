@@ -40,10 +40,12 @@ flow that stays (released for a Work Order that stays, or quantity added
 without a Work Order of a Part Number that stays); a Movement command or
 reversal that also concerns a flow that stays; an Assigned Route
 snapshot whose steps a staying Movement names; a Movement that stays and
-names a deleted demand line or flow in its metadata; and stocked
+names a deleted demand line or flow in its metadata; stocked
 quantity of the flows to delete that the allocations of the Work Orders
 that stay still need (``projections.stocked_quantity_of`` and
-``allocations.active_allocated_quantity_of`` before and after).
+``allocations.active_allocated_quantity_of`` before and after); and a
+flow whose history a Movement-history archival run recorded
+(``history_archived_flows``: archived history is never deleted here).
 
 Audit rows
 ----------
@@ -436,6 +438,23 @@ def _flow_labels(session: Session, flow_ids: Collection[int]) -> dict[int, str]:
             label += f", released for {owners.get(received[flow_id], 'a demand line')}"
         labels[flow_id] = label + ")"
     return labels
+
+
+def _check_archived_history(session: Session, flow_ids: set[int], refusals: list[Refusal]) -> None:
+    """A flow whose history an archival run recorded keeps that record (and so its row)."""
+    for row in _rows(
+        session,
+        "SELECT flow_id, min(run_id) AS run_id FROM history_archived_flows"
+        " WHERE flow_id = ANY(:ids) GROUP BY flow_id ORDER BY flow_id",
+        ids=sorted(flow_ids),
+    ):
+        refusals.append(
+            Refusal(
+                "archived_history",
+                f"The history of Quantity Flow {int(row.flow_id)} was archived by archival run"
+                f" {int(row.run_id)}; this command never deletes archived history.",
+            )
+        )
 
 
 def _check_flow_components(
@@ -1003,6 +1022,7 @@ def build_plan(session: Session, request: DeletionRequest) -> Plan:
     }
     flow_ids, edges = _lineage_closure(session, seeds)
     _check_flow_components(session, flow_ids, seeds, demand_ids, deleted_pns, refusals)
+    _check_archived_history(session, flow_ids, refusals)
     movements = _rows(
         session,
         "SELECT id, quantity_flow_id, part_number, movement_type, quantity, device_event_id,"

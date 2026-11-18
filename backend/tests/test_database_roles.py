@@ -44,7 +44,7 @@ from app.infrastructure.database_privileges import (
     GUARD_FUNCTION_SHA256,
     GUARD_TABLES,
     GUARD_TRIGGERS,
-    MAINTENANCE_SELECT,
+    MAINTENANCE_PRIVILEGES,
     TABLE_CLASSES,
     TableClass,
 )
@@ -67,7 +67,7 @@ _DATABASE = "partflow_test_database_roles"
 _FRESH_DATABASE = "partflow_test_database_roles_fresh"
 _OWNED_DATABASE = "partflow_test_database_roles_owned"
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0038_phase17_passkeys"
+_PREVIOUS = "0039_security_settings"
 _NOT_SUPERUSER = (
     "The database-role tests need a superuser test database role (the Compose and CI"
     " partflow_user is one)."
@@ -79,7 +79,17 @@ _APPEND_ONLY = (
     "quantity_flow_lineage",
     "work_order_allocations",
 )
-_GUARDED = (*_APPEND_ONLY, "assigned_route_steps", "worker_sessions")
+_GUARDED = (
+    *_APPEND_ONLY,
+    "assigned_route_steps",
+    "worker_sessions",
+    "history_archive_runs",
+    "history_archived_flows",
+)
+#: The tables whose row trigger judges each insert and update the class grants
+#: (history archival, Phase 16): the application role's run request,
+#: cancellation and copy confirmation.
+_ROW_JUDGED = {"history_archive_runs": {"INSERT", "UPDATE"}, "worker_sessions": {"UPDATE"}}
 _GRANT_KEYS = [
     "report_version",
     "command",
@@ -341,22 +351,29 @@ def test_every_model_table_is_classified() -> None:
     """DC-1."""
     assert set(Base.metadata.tables) | {"alembic_version"} == set(TABLE_CLASSES)
     assert all(isinstance(value, TableClass) for value in TABLE_CLASSES.values())
-    assert set(MAINTENANCE_SELECT) <= set(TABLE_CLASSES)
-    assert len(MAINTENANCE_SELECT) == 14
-    assert (
-        not {
-            "user_credentials",
-            "user_sessions",
-            "scan_station_devices",
-            "mail_server_credentials",
-            "user_totp_factors",
-            "user_recovery_codes",
-            "user_sign_in_challenges",
-            "user_passkeys",
-            "user_passkey_setups",
-        }
-        & MAINTENANCE_SELECT
-    )
+    assert set(MAINTENANCE_PRIVILEGES) <= set(TABLE_CLASSES)
+    assert len(MAINTENANCE_PRIVILEGES) == 22
+    # Reads what the archive export reads; writes the archival tables and its
+    # own audit rows (history archival design §8.3, step 1); never deletes.
+    assert {
+        table for table, privileges in MAINTENANCE_PRIVILEGES.items() if privileges != {"SELECT"}
+    } == {"audit_events", "history_archive_runs", "history_archived_flows"}
+    assert MAINTENANCE_PRIVILEGES["audit_events"] == {"INSERT"}
+    # It never requests a run: only a person does, in Administration.
+    assert MAINTENANCE_PRIVILEGES["history_archive_runs"] == {"SELECT", "UPDATE"}
+    assert MAINTENANCE_PRIVILEGES["history_archived_flows"] == {"SELECT", "INSERT", "UPDATE"}
+    assert not any("DELETE" in privileges for privileges in MAINTENANCE_PRIVILEGES.values())
+    assert not {
+        "user_credentials",
+        "user_sessions",
+        "scan_station_devices",
+        "mail_server_credentials",
+        "user_totp_factors",
+        "user_recovery_codes",
+        "user_sign_in_challenges",
+        "user_passkeys",
+        "user_passkey_setups",
+    } & set(MAINTENANCE_PRIVILEGES)
 
 
 def test_the_migrated_relations_are_the_classified_ones(context: Context) -> None:
@@ -372,7 +389,7 @@ def test_the_migrated_relations_are_the_classified_ones(context: Context) -> Non
             ).scalars()
         )
     assert relations == set(TABLE_CLASSES)
-    assert len(relations) == 35
+    assert len(relations) == 37
 
 
 def _triggers(engine: Engine) -> dict[str, tuple[str, str, str, str]]:
@@ -436,14 +453,17 @@ def test_guards_and_grants_are_consistent() -> None:
             continue
         events = set(match.group(1).split(" OR "))
         overlap = events & APP_PRIVILEGES[TABLE_CLASSES[guard.table]]
-        expected = events & {"UPDATE"} if guard.table == "worker_sessions" else set()
+        expected = events & _ROW_JUDGED.get(guard.table, set())
         assert overlap == expected, guard
     guarded = {
         table
         for table, table_class in TABLE_CLASSES.items()
         if table_class in (TableClass.APPEND_ONLY, TableClass.GUARDED_UPDATE, TableClass.NO_UPDATE)
     }
-    assert set(GUARD_TABLES) - {"areas", "machines"} == guarded == set(_GUARDED)
+    # history_archived_flows is read-only for the application role; its guard
+    # binds the maintenance role, which writes it.
+    assert set(GUARD_TABLES) - {"areas", "machines"} == guarded | {"history_archived_flows"}
+    assert guarded | {"history_archived_flows"} == set(_GUARDED)
 
 
 # ---------------------------------------------------------------------------
@@ -470,16 +490,16 @@ def _as_role(
 
 
 _MATRIX = (
-    "UPDATE {t} SET id = id WHERE false",
+    "UPDATE {t} SET {c} = {c} WHERE false",
     "DELETE FROM {t} WHERE false",
     "TRUNCATE {t}",
 )
 
 
 def _allowed(table: str, statement: str) -> bool:
-    return (table == "worker_sessions" and statement.startswith("UPDATE")) or (
-        table == "assigned_route_steps" and statement.startswith("DELETE")
-    )
+    return (
+        table in ("worker_sessions", "history_archive_runs") and statement.startswith("UPDATE")
+    ) or (table == "assigned_route_steps" and statement.startswith("DELETE"))
 
 
 @pytest.mark.parametrize("disabled", [False, True])
@@ -487,9 +507,10 @@ def test_the_application_role_cannot_change_guarded_history(
     context: Context, disabled: bool
 ) -> None:
     """GR-1: privilege checks precede triggers (also with the triggers disabled)."""
+    columns = _first_columns(context)
     for table in _GUARDED:
         for template in _MATRIX:
-            statement = template.format(t=table)
+            statement = template.format(t=table, c=columns[table])
             outcome = _as_role(
                 context,
                 context.roles.app,
@@ -513,7 +534,7 @@ def test_a_real_login_of_the_application_role_is_refused_too(context: Context) -
         assert connection.execute("SELECT current_user").fetchone() == (context.roles.app,)
         for template in _MATRIX:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                connection.execute(template.format(t="part_movements"))
+                connection.execute(template.format(t="part_movements", c="id"))
             connection.rollback()
 
 
@@ -532,30 +553,36 @@ def _first_columns(context: Context) -> dict[str, str]:
         }
 
 
-def test_the_maintenance_role_reads_its_tables_only(context: Context) -> None:
-    """GR-2."""
+def test_the_maintenance_role_holds_exactly_its_privileges(context: Context) -> None:
+    """GR-2: the reads of the archive export, the writes of the archival tables."""
     role = context.roles.maintenance
-    for table in sorted(MAINTENANCE_SELECT):
-        assert _as_role(context, role, f"SELECT * FROM {table} WHERE false") is None, table
+    for table, privileges in sorted(MAINTENANCE_PRIVILEGES.items()):
+        if "SELECT" in privileges:
+            assert _as_role(context, role, f"SELECT * FROM {table} WHERE false") is None, table
     for table in (
         "user_credentials",
         "user_sessions",
         "scan_station_devices",
         "mail_server_credentials",
         "audit_events",
-        "work_orders",
+        "work_order_allocations",
     ):
         assert _as_role(context, role, f"SELECT * FROM {table} WHERE false") == "42501", table
     columns = _first_columns(context)
     for table in sorted(TABLE_CLASSES):
         column = columns[table]
-        for statement in (
-            f"INSERT INTO {table} DEFAULT VALUES",
-            f"UPDATE {table} SET {column} = {column} WHERE false",
-            f"DELETE FROM {table} WHERE false",
-            f"TRUNCATE {table}",
+        held = MAINTENANCE_PRIVILEGES.get(table, frozenset())
+        for privilege, statement in (
+            ("INSERT", f"INSERT INTO {table} DEFAULT VALUES"),
+            ("UPDATE", f"UPDATE {table} SET {column} = {column} WHERE false"),
+            ("DELETE", f"DELETE FROM {table} WHERE false"),
+            ("TRUNCATE", f"TRUNCATE {table}"),
         ):
-            assert _as_role(context, role, statement) == "42501", statement
+            outcome = _as_role(context, role, statement)
+            if privilege in held:
+                assert outcome != "42501", statement
+            else:
+                assert outcome == "42501", statement
 
 
 def test_identity_inserts_need_no_sequence_privilege(context: Context) -> None:
@@ -627,13 +654,13 @@ def test_apply_grants_on_a_fresh_database_twice(
                     "application": context.roles.app,
                     "maintenance": context.roles.maintenance,
                 },
-                "tables": 35,
-                "sequences": 26,
+                "tables": 37,
+                "sequences": 27,
                 "default_privileges_removed": 0,
                 "foreign_grantees": [],
             }
             assert result.stderr.startswith(
-                f"apply-grants: granted 35 tables to {context.roles.app} and"
+                f"apply-grants: granted 37 tables to {context.roles.app} and"
                 f" {context.roles.maintenance} at revision {_HEAD} ("
             )
             # AG-11: no URL, password or path.
@@ -1393,10 +1420,10 @@ def test_check_h_passes_through_the_cli(
     assert check["title"] == "Append-only guards and database-role privileges intact"
     assert check["examined"] == {
         "roles": 2,
-        "tables": 35,
-        "sequences": 26,
-        "triggers": 11,
-        "guard_functions": 10,
+        "tables": 37,
+        "sequences": 27,
+        "triggers": 16,
+        "guard_functions": 13,
     }
 
 
@@ -1860,7 +1887,7 @@ def test_check_h_under_another_search_path(context: Context) -> None:
                 connection, roles=context.roles, required=True
             )
             assert integrity.findings == []
-            assert integrity.examined["triggers"] == 11
+            assert integrity.examined["triggers"] == 16
             assert connection.execute(sa.text("SHOW search_path")).scalar_one() == "pg_catalog"
         report = reconciliation.run_reconciliation(
             context.engine,

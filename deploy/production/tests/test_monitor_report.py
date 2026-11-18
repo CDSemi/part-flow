@@ -226,6 +226,42 @@ class Status(Helper):
         self.assertIn("line one?line two", lines[2])
 
 
+def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None):
+    """A `python -m app.cli history-archive status` report (Movement-history archival step 1, contract §2.3)."""
+    document = {
+        "report_version": 1, "command": "history-archive status", "result": "finding" if findings else "ok",
+        "exit_code": exit_code, "started_at": "2026-10-08T10:00:00Z", "finished_at": "2026-10-08T10:00:01Z",
+        "duration_ms": 10, "run_id": None, "state": None, "open_run": open_run, "last_finished_run": last,
+        "archive_dir": {"path": "/archive", "usable": True, "free_bytes": 3 * 1073741824,
+                        "total_bytes": 4 * 1073741824, "partial": []},
+        "copy_dir": None, "max_wait_days": 7, "findings": list(findings),
+        "error": {"code": error[0], "message": error[1]} if error else None,
+    }
+    return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
+
+
+class Archive(Helper):
+    # MR-10 (archival step 1): the archival_proposal line from `history-archive status`.
+    def test_mr10_archive_lines(self):
+        rc, lines = self.run_helper("archive", self.write("a.json", archive_status_doc()), 0)
+        self.assertEqual((rc, lines), (0, ["PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB free"]))
+        last = {"id": 2, "state": "FAILED", "failure_reason": "The copy into /archive-copy failed."}
+        rc, lines = self.run_helper("archive", self.write("f.json", archive_status_doc(1, ["last_run_failed"], last=last)), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal last_run_failed: run 2 FAILED: The copy into"
+                                           " /archive-copy failed."]))
+        rc, lines = self.run_helper("archive", self.write("e.json", archive_status_doc(
+            2, error=("database_unavailable", "PartFlow could not reach its database. Nothing was changed."))), 2)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal PartFlow could not reach its database. Nothing was changed."]))
+        for name, text, code in (("empty.json", "", 2), ("differs.json", archive_status_doc(0), 1),
+                                 ("status.json", status_doc(), 0)):
+            with self.subTest(case=name):
+                rc, lines = self.run_helper("archive", self.write(name, text), code)
+                self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal history-archive status could not run (exit"
+                                                   f" {code}); see archive-status.err"]))
+        rc, lines = self.run_helper("archive", "x.json")
+        self.assertEqual((rc, lines), (2, []))
+
+
 class Reconcile(Helper):
     # MR-7
     def test_mr7_results(self):

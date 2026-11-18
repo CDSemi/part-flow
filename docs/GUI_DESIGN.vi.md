@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `4539a2b` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `1490927` cộng các thay đổi chưa commit ngày 2026-11-17.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2700,7 +2700,7 @@ dừng tối thiểu mỗi trang 1–300 s; mặc định 3 và 6).
 ### Data & system
 
 - **Backups** (Configure system settings) được mô tả dưới heading riêng của nó bên dưới.
-- **History archival & purge** (Admin-only) được mô tả dưới heading riêng của nó bên dưới.
+- **History archival & purge** (Run history archival and purge) được mô tả dưới heading riêng của nó bên dưới.
 - **Settings** chứa hai panel:
   - panel **Due Soon warning** sở hữu cấu hình đứng sau mọi due countdown được suy ra (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ
@@ -2800,7 +2800,7 @@ ID mode: Disabled, Fixed Worker kèm Fixed Worker của nó, hoặc Scanned sess
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, Department display settings, các panel Due
 Soon warning và Outgoing mail server của section Settings, các panel User sign-in, Remember me, Password rules và
-Two-step sign-in của section Security, retention period của History archival & purge, chính sách Backups và statement
+Two-step sign-in của section Security, các thiết lập và các lần chạy của History archival & purge, chính sách Backups và statement
 Machine assignment cũng là cấu hình được lưu. Users và Roles &
 permissions nêu rằng người dùng đăng nhập bằng login name và mật khẩu, và những permission nào đã được kiểm tra cho đến
 nay.
@@ -2821,7 +2821,6 @@ Mọi thứ khác tự trình bày một cách trung thực: không gì chưa kh
     server khi cài PartFlow), Date format (`Jul 24, 2026`), Production Board refresh (5 s), Area Board refresh (15 s) và
     Update countdown (10 s; các trang khác ngoài Scan Station và Production Board còn chờ đến khi không ai dùng chúng
     trong 60 s, §3 rule 13).
-- History archival & purge nêu rằng các lần chạy archival và purge chưa khả dụng (xem bên dưới).
 - Một section hoàn toàn không có nội dung được định nghĩa sẽ nêu rằng nó chưa khả dụng, với entry action bị vô hiệu
   hóa; hiện không section nào ở trạng thái đó.
 
@@ -2841,8 +2840,9 @@ quyền.
   `Choose a new password` (công việc đang mở của cùng người dùng được giữ lại).
 - **Xem và thay đổi.** Mọi người dùng đã đăng nhập đều được xem các section. Các thay đổi của mỗi section cần permission riêng
   của nó (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, Security, Backups, và Roles & permissions / Users đều nêu permission của mình). Không có nó thì section
-  là view-only: các control của nó bị ẩn và một dòng `View only` nêu permission. Server kiểm tra các permission này.
+  permissions, Settings, Security, Backups, History archival & purge, và Roles & permissions / Users đều nêu permission của
+  mình). Không có nó thì section là view-only: các control của nó bị ẩn và một dòng `View only` nêu permission. Server
+  kiểm tra các permission này.
 - Badge của Worker chỉ được hiển thị cho người dùng được quản lý Workers.
 - **Bảo vệ Correction permissions.** Việc thay đổi các correction permission, permission quản lý chúng, hoặc người dùng có
   role giữ chúng cần permission quản lý correction permission. Các correction permission trong Production rules →
@@ -2853,8 +2853,9 @@ quyền.
   permissions và Correction permissions; một quyền đã cấp trước đó vẫn được hiển thị.
 - **Applied at Scan Stations.** Role được đánh dấu **Applied at Scan Stations** (ban đầu là Operator) quyết định mọi Scan
   Station đã enroll được làm gì.
-- Chỗ nào tài liệu này nói "Admin-only" (History archival & purge), nó có nghĩa là permission cấu hình system settings,
-  ban đầu được cấp cho role Administrator (PROJECT_PROFILE §20).
+- **History archival & purge** có permission riêng, **Run history archival and purge**, ban đầu được cấp cho role
+  Administrator và cho Super User (role giữ mọi permission); Configure system settings không bảo vệ section này
+  (PROJECT_PROFILE §20).
 
 ### Scan Stations
 
@@ -2916,23 +2917,68 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
 
 ### History archival & purge
 
-Đây là việc bảo trì Admin-only đối với retention của lịch sử Movement (PROJECT_PROFILE §28 Administrative Archival and
-Purge).
+History archival & purge xuất lịch sử Movement cũ ra các file archive trên server (PROJECT_PROFILE §28 Administrative
+Archival and Purge). **Trong phiên bản này một lần chạy chỉ xuất và không xóa gì**: toàn bộ lịch sử Movement vẫn nằm
+trong database, và kết quả của một lần chạy đã hoàn tất ghi `Exported to files; nothing deleted.` Mọi người
+dùng đã đăng nhập đều đọc được các thiết lập và các lần chạy. Preview, việc yêu cầu một lần chạy và mọi thay đổi cần
+permission **Run history archival and purge**; không có nó thì một dòng `View only` nêu permission đó, thẻ Preview
+không hiển thị và không có thao tác nào được cung cấp. Section theo quy tắc thẻ, với tối đa hai cột: thẻ **Retention and
+schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng nhau khi đủ chỗ cho hai cột (mỗi thẻ rộng ít nhất
+25rem, bề rộng mà nhãn và giá trị rộng nhất của nó vẫn nằm trên một dòng), nếu không thì một cột rộng hết trang; rồi thẻ
+**Runs** rộng hết trang.
 
-- **Thiết kế mục tiêu.** Một retention policy cấu hình được (ví dụ N năm trong database chính), một ngưỡng dung lượng,
-  hoặc một yêu cầu thủ công kích hoạt một chuỗi archive export không mất dữ liệu → verification → purge đúng chính xác
-  các dòng đã được archive, không bao giờ purge trước. Nó chỉ chạy qua đường bảo trì Admin có đặc quyền (runtime thông
-  thường không bao giờ được UPDATE hay DELETE các dòng Movement) và giữ các Movement liên quan đi cùng nhau (ví dụ một
-  correction `REVERSED` và bản gốc của nó), nên không dòng nào được giữ lại tham chiếu tới một dòng đã bị purge. Nó có
-  preview phạm vi và tác động, một reason bắt buộc, và audit đầy đủ về ai đã chạy gì và khi nào. Các setting retention
-  nằm ở đây, không bao giờ trong logic của production workflow.
-- **Retention period.** Section lưu **retention period** dưới dạng cấu hình có audit mà không production workflow nào
-  đọc. Form cung cấp **No retention period** (trạng thái ban đầu) hoặc **`Keep a set period of history`** với một số
-  tháng nguyên từ 12 đến 1200, và một dòng trung tính nhắc lại period theo năm và tháng (ví dụ
-  `Retention period: 10 years.`). Việc lưu không hỏi xác nhận nào, vì nó không archive hay xóa gì.
-- **Chưa khả dụng.** Các lần chạy archival và purge (archive export, verification, purge, preview phạm vi và tác động,
-  reason), ngưỡng dung lượng dữ liệu và các yêu cầu thủ công chưa khả dụng (IMPLEMENTATION_ROADMAP). Cho đến khi chúng
-  khả dụng, section nêu rằng chúng chưa khả dụng và toàn bộ lịch sử Movement vẫn nằm trong database.
+- **Retention and schedule** — `How long Movement history stays in the database, and when the server's archival job
+  does its work.` Thẻ hiển thị **Retention period** (ban đầu `24 months (2 years)`; `No retention period` nghĩa là không
+  có gì đủ điều kiện), **Shortest allowed period** (ban đầu 12 tháng), **Start minute** của phần việc hằng giờ của job
+  (`20 minutes past each hour`), **Preview time limit** (90 giây) và **Report a waiting run after** (7 ngày). Trường
+  `Preview time limit (seconds)` của dialog giải thích: `Keep it below the wait of every proxy in front of PartFlow:
+  through Cloudflare a request ends after 100 seconds.` Trường `Report a waiting run after (days)` giải thích: `When a run waits longer than this for its off-host copy
+  to be confirmed, the server's monitoring check reports it.` (Một lần chạy gần nhất bị thất bại luôn được báo, bất kể
+  thiết lập này.) `Edit retention and schedule…` mở dialog: `No retention period` hoặc `Keep a set period of history` kèm số
+  tháng, rồi bốn con số còn lại. Thay đổi shortest allowed period thêm một trường reason bắt buộc. Lưu chỉ gửi các giá
+  trị đã đổi; server kiểm tra mọi khoảng giá trị và thông báo của nó được hiển thị trong dialog, còn dialog chỉ tự từ
+  chối một giá trị không phải số nguyên.
+- **Preview** — `What a run would export at a cutoff date, before you request it.` Trường **Cutoff date** ban đầu để
+  trống, nghĩa là hỏi ngày mới nhất mà retention period cho phép; một lần chạy xuất lịch sử trước đầu ngày đó.
+  `Run preview` hiển thị `Running the preview… N s (time limit N s)` trong khi server làm việc, có thể kéo dài tới
+  preview time limit, và phần còn lại của trang vẫn dùng được trong lúc đó. Kết quả hiển thị cutoff date (cũng được điền
+  vào trường, với ngày mới nhất được phép ở bên dưới), số component, flow và Movement, Movement đầu tiên và cuối cùng,
+  dung lượng archive ước tính và thời gian preview đã mất. Chọn một ngày khác sẽ xóa kết quả cho đến khi preview chạy
+  lại. Một lần từ chối (không có retention period, cutoff quá mới, hết time limit) được hiển thị đúng như server diễn
+  đạt. Khi không có gì đủ điều kiện, thẻ nói như vậy và không cho yêu cầu chạy.
+- **Request a run** — `Request a run…`, sau một lần preview, mở một dialog với cutoff date, các con số preview và một
+  reason bắt buộc. `Request run` gửi reason và cutoff date đã preview; server kiểm tra lại các con số (tối đa preview
+  time limit) và lưu chúng cùng lần chạy, rồi lần chạy chờ job. Một lần từ chối (một lần chạy khác vẫn đang mở, không
+  có gì đủ điều kiện) ở lại trong dialog và reason được giữ. Khi yêu cầu không nhận được câu trả lời rõ ràng (không có
+  câu trả lời, hoặc lỗi gateway hay timeout như 502, 504 hoặc 524), dialog đóng lại, danh sách lần chạy được tải lại, và
+  thẻ nói rằng lần chạy có thể đã hoặc chưa được yêu cầu và phải kiểm tra bảng các lần chạy trước khi yêu cầu lại.
+- **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server; in this version
+  nothing is deleted.` Một nút `Reload`, rồi các lần chạy, mới nhất trước: số của lần chạy; trạng thái bằng lời thường
+  dưới dạng status pill (`Requested — waiting for the job`, `Running`, `Waiting for the off-host copy`, `Copy
+  confirmed — waiting for the job`, `Completed`, `Nothing eligible`, `Cancelled`, `Failed`); cutoff date; các con số;
+  ai đã yêu cầu, kèm reason; các mốc thời gian; tên và dung lượng thư mục archive; và kết quả hoặc lý do thất bại. Bảng
+  rộng giữ một lần chạy điển hình trong khoảng năm dòng:
+  - **Các con số** hiển thị các con số đã xuất khi đã có, nếu không thì con số của preview: số Movement trước
+    (`4,210 Movements`), rồi `120 components · 310 flows` trên một dòng nhỏ hơn. Thêm một dòng `From the preview` khi
+    chưa xuất gì, hoặc các con số của preview khi con số đã xuất khác chúng, và một dòng `Skipped (changed during the
+    run)` chỉ xuất hiện khi có component bị bỏ qua;
+  - **Các mốc thời gian** chỉ hiển thị `Requested` và bước gần nhất (`Finished`, `Verified`, `Exported` hoặc
+    `Started`), mỗi mốc giữ ngày và giờ đi liền nhau; toàn bộ dòng thời gian được gập dưới `All times`, một phần mở
+    rộng mở được bằng bàn phím;
+  - **tên thư mục archive** dùng font monospace nhỏ hơn, xuống dòng ở bất kỳ chỗ nào, với dung lượng ở bên dưới.
+
+  Dưới 800 px các dòng xếp chồng.
+  - `Cancel…` trên một lần chạy đã được yêu cầu hoặc đang chờ bản sao ngoài server hỏi trước (`Cancel run N?`, với
+    `Cancel run` và `Keep run (Esc)`); thư mục archive của một lần chạy đang chờ vẫn ở lại trên server.
+  - `Confirm copy…` (tên truy cập `Confirm the off-host copy of run N…`) trên một lần chạy đang chờ bản sao ngoài server
+    mở `Confirm the off-host copy of run N`, dialog hiển thị tên thư mục archive và manifest
+    SHA-256, và giải thích rằng trước hết thư mục phải được sao chép từ thư mục archive của server sang nơi lưu trữ
+    ngoài server, ví dụ bằng cách thêm thư mục archive vào task Hyper Backup. `Confirm copy` được bật khi đã đánh dấu
+    `The archive folder is copied off the server` và gửi SHA-256 đang hiển thị; job hoàn tất lần chạy ở lần khởi động
+    kế tiếp.
+  - Một lần từ chối được hiển thị trong dialog đúng như server diễn đạt. Khi một lần hủy hay một lần xác nhận không nhận
+    được câu trả lời rõ ràng, danh sách lần chạy được tải lại và thẻ nhắc kiểm tra trạng thái của lần chạy; làm lại cả
+    hai thao tác đều an toàn.
 
 ### Backups
 
@@ -4187,7 +4233,9 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: mọi section thiết lập của Administration hiển thị mỗi nhóm thiết lập thành một thẻ riêng, như Security. |
+| 2026-11-17 | uncommitted | §9: History archival & purge hiển thị các thiết lập, preview, việc yêu cầu một lần chạy và các lần chạy với Cancel và Confirm off-host copy; một lần chạy xuất lịch sử và không xóa gì, và permission mới Run history archival and purge bảo vệ section. |
+| 2026-11-17 | 1490927 | §11: Add Part đề xuất, xem trước và tạo dạng chuẩn của một PN mới mà server suy ra từ giá trị đã nhập. |
+| 2026-11-17 | 1a553f2 | §9: mọi section thiết lập của Administration hiển thị mỗi nhóm thiết lập thành một thẻ riêng, như Security. |
 | 2026-11-17 | 932473a | §9: các thẻ Security lấp đầy bề rộng trang theo các cột rộng bằng nhau, mỗi thẻ ít nhất đủ rộng cho nhãn và giá trị rộng nhất của nó. |
 | 2026-11-17 | c31f061 | §9: mỗi nhóm thiết lập của Security là một thẻ riêng với mô tả ngắn và nút `Edit…`, và các nhóm của sidebar thành Organization, Production setup, Production rules, Access và Data & system. |
 | 2026-11-17 | 2d7c9f0 | §12.3, §12.6 và §14.3: mọi lần in nhãn dùng một tờ in không bao giờ thêm trang trắng. |

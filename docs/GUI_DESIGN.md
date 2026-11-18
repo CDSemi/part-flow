@@ -2671,7 +2671,7 @@ dwell 1–300 s; defaults 3 and 6).
 ### Data & system
 
 - **Backups** (Configure system settings) is described under its own heading below.
-- **History archival & purge** (Admin-only) is described under its own heading below.
+- **History archival & purge** (Run history archival and purge) is described under its own heading below.
 - **Settings** hosts two panels:
   - the **Due Soon warning** panel owns the configuration behind every derived due countdown (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) and **Maximum warning days** (0–365, never below
@@ -2770,7 +2770,7 @@ editor configure the Worker ID mode: Disabled, Fixed Worker with its Fixed Worke
 
 Workers, Users, Roles & permissions, Correction permissions, Worker sessions, the Department display settings, the
 Settings section's Due Soon warning and Outgoing mail server panels, the Security section's User sign-in, Remember
-me, Password rules and Two-step sign-in panels, the History archival & purge retention period, the Backups policy and
+me, Password rules and Two-step sign-in panels, the History archival & purge settings and runs, the Backups policy and
 the Machine-assignment statement are persisted configuration as well. Users and Roles & permissions state that users
 sign in with a login name and password and which permissions are checked so far.
 
@@ -2790,7 +2790,6 @@ Everything else presents itself honestly: nothing that is not available yet is m
     PartFlow is installed), Date format (`Jul 24, 2026`), Production Board refresh (5 s), Area Board refresh (15 s) and
     Update countdown (10 s; pages other than the Scan Station and the Production Board also wait until nobody has used
     them for 60 s, §3 rule 13).
-- History archival & purge states that archival and purge runs are not available yet (see below).
 - A section with no defined content at all would state that it is not available yet, with its entry action disabled; no
   section is in that state today.
 
@@ -2809,8 +2808,9 @@ Routes and Part Numbers stay managed in Management by authorized production role
   the `Choose a new password` dialog (the same user's open work stays).
 - **Viewing and changing.** Any signed-in user may view the sections. Each section's changes need its own permission
   (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, Security, Backups, and Roles & permissions / Users each name theirs). Without it the section is
-  view-only: its controls are hidden and a `View only` line names the permission. The server checks these permissions.
+  permissions, Settings, Security, Backups, History archival & purge, and Roles & permissions / Users each name theirs).
+  Without it the section is view-only: its controls are hidden and a `View only` line names the permission. The server
+  checks these permissions.
 - Worker badges are shown only to users who may manage Workers.
 - **Correction permissions guard.** Changing correction permissions, the permission to manage them, or users whose role
   holds them needs the permission to manage correction permissions. The correction permissions in Production rules →
@@ -2821,8 +2821,9 @@ Routes and Part Numbers stay managed in Management by authorized production role
   permissions and in Correction permissions; a grant that already exists stays shown.
 - **Applied at Scan Stations.** The role marked **Applied at Scan Stations** (initially Operator) decides what every
   enrolled Scan Station may do.
-- Where this document says "Admin-only" (History archival & purge), it means the permission to configure system
-  settings, initially granted to the Administrator role (PROJECT_PROFILE §20).
+- **History archival & purge** has a permission of its own, **Run history archival and purge**, initially granted to
+  the Administrator role and to Super User (which holds every permission); Configure system settings does not guard it
+  (PROJECT_PROFILE §20).
 
 ### Scan Stations
 
@@ -2883,22 +2884,67 @@ entity (§4.12, PROJECT_PROFILE §8.13).
 
 ### History archival & purge
 
-This is Admin-only maintenance of the Movement-history retention (PROJECT_PROFILE §28 Administrative Archival and
-Purge).
+History archival & purge exports old Movement history to archive files on the server (PROJECT_PROFILE §28
+Administrative Archival and Purge). **In this version a run exports and deletes nothing**: all Movement history stays in
+the database, and a completed run's result reads `Exported to files; nothing deleted.` Every signed-in user
+reads the settings and the runs. The preview, a request and every change need the **Run history archival and purge**
+permission; without it one `View only` line names that permission, the Preview card is not shown and no action is
+offered. The section follows the card rule, with at most two columns: the **Retention and schedule** and **Preview**
+cards side by side in two equal columns when two fit (each at least 25rem, the width at which its widest label and
+value stay on one line), otherwise one full-width column; then the **Runs** card at the full width of the page.
 
-- **Target design.** A configurable retention policy (for example N years in the primary database), a size threshold,
-  or a manual request triggers a lossless archive export → verification → purge of exactly the archived rows, never
-  purge first. It runs only through the privileged Admin maintenance path (normal runtime can never UPDATE or DELETE
-  Movement rows) and keeps related Movements together (for example a `REVERSED` correction and its original), so no
-  retained row references a purged one. It has a scope and impact preview, a required reason, and a full audit of who
-  ran what and when. Retention settings live here, never in production workflow logic.
-- **Retention period.** The section stores the **retention period** as audited configuration that no production
-  workflow reads. The form offers **No retention period** (the initial state) or **`Keep a set period of history`** with
-  a whole number of months from 12 to 1200, and a neutral line restates the period in years and months (for example
-  `Retention period: 10 years.`). Saving asks for no confirmation, because it archives or deletes nothing.
-- **Not available yet.** Archival and purge runs (archive export, verification, purge, the scope and impact preview,
-  the reason), the data-size threshold and manual requests are not available yet (IMPLEMENTATION_ROADMAP). Until they
-  are, the section states that they are not available yet and that all Movement history stays in the database.
+- **Retention and schedule** — `How long Movement history stays in the database, and when the server's archival job
+  does its work.` The card shows the **Retention period** (initially `24 months (2 years)`; `No retention period` makes
+  nothing eligible), the **Shortest allowed period** (initially 12 months), the **Start minute** of the job's hourly work
+  (`20 minutes past each hour`), the **Preview time limit** (90 seconds) and **Report a waiting run after** (7 days).
+  The dialog's field `Preview time limit (seconds)` explains: `Keep it below the wait of every proxy in front of
+  PartFlow: through Cloudflare a request ends after 100 seconds.` The field `Report a waiting run after (days)` explains: `When a run waits longer than this for its off-host
+  copy to be confirmed, the server's monitoring check reports it.` (A failed last run is reported whatever this
+  setting says.)
+  `Edit retention and schedule…` opens the dialog: `No retention period` or `Keep a set period of history` with the
+  months, then the other four numbers. A change of the shortest allowed period adds a required reason field. A save
+  sends only the changed values; the server checks every range and its message is shown in the dialog, which itself
+  refuses only a value that is not a whole number.
+- **Preview** — `What a run would export at a cutoff date, before you request it.` The **Cutoff date** field starts
+  empty, which asks for the latest date the retention period allows; a run exports the history before the start of
+  that day. `Run preview` shows `Running the preview… N s (time limit N s)` while the server works, which can take up
+  to the preview time limit, and the rest of the page stays usable meanwhile. The result shows the cutoff date (also
+  filled into the field, with the latest allowed date under it), the components, flows and Movements, the first and
+  last Movement, the estimated archive size and how long the preview took. Choosing another date clears the result
+  until the preview runs again. A refusal (no retention period, a cutoff that is too new, the time limit reached) is
+  shown as the server words it. When nothing is eligible, the card says so and offers no request.
+- **Request a run** — `Request a run…`, after a preview, opens a dialog with the cutoff date, the preview numbers and a
+  required reason. `Request run` sends the reason and the previewed cutoff date; the server checks the numbers again
+  (up to the preview time limit) and stores them with the run, which then waits for the job. A refusal (another run
+  still open, nothing eligible) stays in the dialog with the reason kept. When the request gets no clear answer (no
+  answer, or a gateway error or timeout such as 502, 504 or 524), the dialog closes, the runs reload, and the card says
+  that the run may or may not have been requested and that the runs table must be checked before requesting again.
+- **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server; in this version
+  nothing is deleted.` A `Reload` button, then the runs, newest first: the run number; the state in plain words as a
+  status pill (`Requested — waiting for the job`, `Running`, `Waiting for the off-host copy`, `Copy confirmed — waiting
+  for the job`, `Completed`, `Nothing eligible`, `Cancelled`, `Failed`); the cutoff date; the counts; who requested
+  the run, with the reason; the times; the archive folder name and size; and the result or the failure reason. The
+  wide table keeps a typical run to about five lines:
+  - **Counts** show the exported numbers once there are any, otherwise the preview's: the Movements first
+    (`4,210 Movements`), then `120 components · 310 flows` on a smaller line. A further line says `From the preview`
+    while nothing is exported, or gives the preview's numbers when the export differs from them, and a `Skipped
+    (changed during the run)` line appears only when components were skipped;
+  - **Times** show `Requested` and the latest step only (`Finished`, `Verified`, `Exported` or `Started`), each with
+    its date and time kept together; the full timeline is folded under `All times`, a disclosure that the keyboard
+    opens;
+  - the **archive folder name** is in a smaller monospace that wraps anywhere, with the size under it.
+
+  Below 800 px the rows stack.
+  - `Cancel…` on a run that is requested or waiting for its off-host copy asks first (`Cancel run N?`, with `Cancel run`
+    and `Keep run (Esc)`); the archive folder of a waiting run stays on the server.
+  - `Confirm copy…` (accessible name `Confirm the off-host copy of run N…`) on a run waiting for its off-host copy
+    opens `Confirm the off-host copy of run N`, which shows the archive folder name and the manifest
+    SHA-256, and explains that the folder must first be copied from the server's archive folder to storage off the
+    server, for example by adding the archive folder to the Hyper Backup task. `Confirm copy` is enabled once `The
+    archive folder is copied off the server` is ticked and sends the SHA-256 shown; the job completes the run at its
+    next start.
+  - A refusal is shown in the dialog as the server words it. When a cancel or a confirmation gets no clear answer, the
+    runs reload and the card says to check the run's state; both are safe to repeat.
 
 ### Backups
 
@@ -4141,7 +4187,9 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: every Administration settings section shows each group of settings as its own card, as Security does. |
+| 2026-11-17 | uncommitted | §9: History archival & purge shows its settings, the preview, the request of a run and the runs with Cancel and Confirm off-host copy; a run exports history and deletes nothing, and the new Run history archival and purge permission guards the section. |
+| 2026-11-17 | 1490927 | §11: Add Part offers, previews and creates the canonical form of a new PN that the server derives from the entry. |
+| 2026-11-17 | 1a553f2 | §9: every Administration settings section shows each group of settings as its own card, as Security does. |
 | 2026-11-17 | 932473a | §9: the Security cards fill the page width in equal columns, each at least as wide as its widest label and value need. |
 | 2026-11-17 | c31f061 | §9: each group of Security settings is its own card with a short description and an `Edit…` button, and the sidebar groups become Organization, Production setup, Production rules, Access and Data & system. |
 | 2026-11-17 | 2d7c9f0 | §12.3, §12.6 and §14.3: every label print uses one print sheet that never adds a blank page. |

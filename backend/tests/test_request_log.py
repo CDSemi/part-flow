@@ -1120,6 +1120,22 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "worker.name",
     ],
     "first_run": ["chosen_role_id"],
+    # Phase 16 history archival: dates, run numbers and states from the
+    # database or a parsed date (cutoff_date), never raw text; the job's
+    # are file names and folders of the host job, which has no request.
+    "history_archive": [
+        "EARLIEST_CUTOFF_DATE.isoformat()",
+        "cutoff.day.isoformat()",
+        "existing.id",
+        "existing.state",
+        "latest.isoformat()",
+        "run.id",
+        "run.manifest_sha256",
+        "run.state",
+        "run_id",
+        "settings.retention_period_months",
+    ],
+    "history_archive_job": ["SUMS_FILE", "file", "folder"],
     "hot_list": [
         "demand.allocated_quantity",
         "demand.part_number",
@@ -1184,6 +1200,8 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "sorted(r.tgname for r in disabled)",
         "table",
     ],
+    # The stored retention period (history archival settings).
+    "policies": ["retention"],
     "production_board": ["department_id", "names"],
     "production_release": [
         "allocated",

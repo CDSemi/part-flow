@@ -167,12 +167,12 @@ export const ADMIN_SECTIONS: AdminSection[] = [
   },
   {
     id: 'data-retention',
-    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
+    writePermission: 'RUN_HISTORY_ARCHIVAL_AND_PURGE',
     phase: 'full',
     group: 'Data & system',
     label: 'History archival & purge',
     subtitle:
-      'Admin-only Movement-history retention maintenance: configurable retention period, size threshold or manual request — lossless archive export, verification, then purge exactly the archived rows, with scope preview, reason and full audit; normal workflows never delete history',
+      'Export Movement history older than the retention period to archive files, with a preview, a reason and a full audit',
   },
   {
     id: 'settings',

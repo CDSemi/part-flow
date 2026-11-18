@@ -1817,6 +1817,9 @@ _IDENTITY_MODULES = {
     "undo.py",
     "tracking.py",
     "allocations.py",
+    # Phase 16 history archival: the archive names the Workers of its
+    # Movements in context.json; no rule reads them.
+    "history_archive_job.py",
 }
 _STAMPS = {
     "intake.py": 1,

@@ -63,9 +63,9 @@ Các script trong `deploy/production/` làm giúp bạn những việc rủi ro:
 | Tra cứu một thiết lập, một giới hạn hoặc chức năng của một container | §3.1 của hướng dẫn này |
 | Đặt tên và công bố một bản phát hành (dành cho lập trình viên) | §10 của hướng dẫn này |
 
-`deploy/production/pf` là lệnh ngắn cho production stack: `install`, `update`, `backup`, `restore`, `status` và
-`delete-permanently` (các Work Order và Part Number chỉ nhập để thử nghiệm, runbook §10), mỗi lệnh chạy quy trình đã
-mô tả ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md), Trước khi chạy bất kỳ lệnh
+`deploy/production/pf` là lệnh ngắn cho production stack: `install`, `update`, `backup`, `restore`, `status`,
+`archive` (chạy ngay phần việc hằng giờ của job lưu trữ lịch sử, runbook §11) và `delete-permanently` (các Work Order
+và Part Number chỉ nhập để thử nghiệm, runbook §10), mỗi lệnh chạy quy trình đã mô tả ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md), Trước khi chạy bất kỳ lệnh
 nào).
 
 ### 1.3 Những gì được hỗ trợ
@@ -164,18 +164,19 @@ liệu đó trỏ về đây khi bạn cần một chi tiết.
 | Service | Chức năng | Chi tiết |
 | --- | --- | --- |
 | `db` | PostgreSQL 16 (`postgres:16.14`, biến thể Debian) | Chỉ ở network `internal`; không công bố port. Dữ liệu nằm trong volume `partflow-production_postgres_data`. Không bao giờ dùng image `-alpine`: việc sắp xếp văn bản (collation) và kiểm tra định danh "Canonical identity under the running interpreter and database" (kiểm tra đối soát (j)) phụ thuộc vào GNU C Library (glibc). Ghi lỗi không kèm dòng chi tiết (`log_error_verbosity=terse`). Thời gian chờ dừng (stop grace period) 60 s. |
-| `backend` | API, image `partflow/backend:<release>` | Các network `internal` và `edge`. Kết nối bằng database role `partflow_app` và chỉ mount tệp mật khẩu của role đó. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` và `DATABASE_ROLES_REQUIRED` được cố định là `true`. Số worker lấy từ `PARTFLOW_BACKEND_WORKERS`; chỉ tin các header được chuyển tiếp từ subnet `edge`. Thời gian chờ dừng 200 s, cao hơn thời gian yêu cầu dài nhất của `web` (180 s), để một lần import đang chạy có thể hoàn tất. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lỗi cấu hình thoát với mã 0. Khi một outgoing mail server được đặt trong Administration → Settings, `backend` kết nối tới nó qua network `edge` để gửi email. |
+| `backend` | API, image `partflow/backend:<release>` | Các network `internal` và `edge`. Kết nối bằng database role `partflow_app` và chỉ mount tệp mật khẩu của role đó. `SESSION_COOKIE_SECURE`, `ENFORCE_CLIENT_RELEASE` và `DATABASE_ROLES_REQUIRED` được cố định là `true`. Số worker lấy từ `PARTFLOW_BACKEND_WORKERS`; chỉ tin các header được chuyển tiếp từ subnet `edge`. Thời gian chờ dừng 200 s, cao hơn thời gian yêu cầu dài nhất của `web` cho một thay đổi được ghi từng bước (180 s, việc import), để một lần import đang chạy có thể hoàn tất; bản xem trước và yêu cầu lưu trữ lịch sử (đến 610 s) chỉ đọc, hoặc ghi trong một transaction ở cuối, nên việc dừng có thể cắt ngang chúng mà không để lại thay đổi dở dang. `restart: unless-stopped`, không bao giờ `on-failure`, vì với nhiều worker một lỗi cấu hình thoát với mã 0. Khi một outgoing mail server được đặt trong Administration → Settings, `backend` kết nối tới nó qua network `edge` để gửi email. |
 | `web` | nginx, image `partflow/web:<release>` | Network `edge`. Port được công bố duy nhất: `127.0.0.1:${PARTFLOW_HTTP_PORT}` tới port 80 của container; cố ý không có thiết lập nào cho địa chỉ bind. Không có `depends_on`, nên nó vẫn phục vụ các màn hình khi `backend` đang dừng. Thời gian chờ dừng 200 s. |
 | `migrate` | Ops job: `python -m app.cli migrate` | Áp dụng các migration database và quyền (grants) trong một transaction. Cần một tùy chọn sao lưu (Migrations, bên dưới). Mount thư mục sao lưu ở chế độ chỉ đọc tại `/backups`. |
 | `db-roles` | Ops job: `python -m app.cli provision-roles` (mặc định), `apply-grants` hoặc `delete-permanently` | Tạo hoặc sửa các database role và áp dụng các quyền (Database roles, bên dưới); `pf delete-permanently` chạy việc xóa dữ liệu thử nghiệm trong đó ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) §10). Kết nối bằng owner role và mount ba tệp bí mật. |
 | `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` hoặc `backup-rotate` | Do `backup.sh` dùng. Không có network, không có database và không có bí mật; chỉ mount thư mục sao lưu tại `/backups`. |
 | `status` | Ops job: `python -m app.cli status` | Báo cáo chỉ đọc dưới role `partflow_app`, với thư mục sao lưu được mount chỉ đọc. Do `check.sh` dùng. |
+| `maintenance` | Ops job: `python -m app.cli history-archive <step>` | Job lưu trữ lịch sử ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) §11), do `archive.sh` chạy (và `status` do `check.sh` chạy). Kết nối bằng database role `partflow_maintenance` và chỉ mount tệp mật khẩu của role đó. Là dịch vụ duy nhất mount thư mục lưu trữ (tại `/archive`); `archive.sh` thêm thư mục sao chép tại `/archive-copy` khi nó dùng được (Các thư mục lưu trữ, bên dưới). Chỉ ở network `internal`. Nó xuất và sao chép bản lưu trữ và không bao giờ xóa gì. |
 
 Mỗi service có chính sách restart, giới hạn bộ nhớ và bộ xử lý lấy từ `.env.production`, và xoay vòng log (`json-file`,
 10 MiB mỗi tệp, 5 tệp). Mỗi service chạy lâu dài đều có health check; health check của `backend` gọi route liveness, nên
 một schema không khớp không bao giờ đánh dấu container là unhealthy. Network `internal` không có đường ra ngoài máy
-chủ. Hãy chạy các ops job đọc hoặc ghi thư mục sao lưu với `--user "$(id -u):$(id -g)"`, vì thư mục đó có mode 0700 và
-thuộc về tài khoản vận hành.
+chủ. Hãy chạy các ops job đọc hoặc ghi thư mục sao lưu hoặc thư mục lưu trữ với `--user "$(id -u):$(id -g)"`, vì các thư
+mục đó có mode 0700 và thuộc về tài khoản vận hành.
 
 #### Tệp cấu hình
 
@@ -190,6 +191,8 @@ rằng các key của tệp mẫu đúng bằng các tham chiếu `${NAME}` củ
 | `PARTFLOW_ACCEPT_SCHEMA_REVISION` | Chỉ dành cho đường quay lui 2 (runbook §6): revision database duy nhất mà bản phát hành đang chạy được phép phục vụ. `release.sh` xóa nó. | trống |
 | `PARTFLOW_SECRETS_DIR` | Đường dẫn tuyệt đối của thư mục bí mật, nằm ngoài release checkout (thư mục mode 0700, tệp mode 0444). | bắt buộc |
 | `PARTFLOW_BACKUP_DIR` | Đường dẫn tuyệt đối của thư mục sao lưu production: nằm ngoài release checkout, thư mục bí mật và mọi thư mục lưu trữ (archive), không bao giờ dùng chung với bản cài đặt khác hay một lần diễn tập khôi phục, mode 0700, thuộc về tài khoản vận hành. Nó phải tồn tại trước lệnh `$PF` đầu tiên, vì **mọi** lệnh `$PF` đều cần nó. | bắt buộc |
+| `PARTFLOW_ARCHIVE_DIR` | Đường dẫn tuyệt đối của thư mục lưu trữ của History archival & purge (Các thư mục lưu trữ, bên dưới). Chỉ dịch vụ `maintenance` mount nó. | bắt buộc trước lần lưu trữ đầu tiên; trống cho đến lúc đó |
+| `PARTFLOW_ARCHIVE_COPY_DIR` | Đường dẫn tuyệt đối của thư mục sao chép ngoài máy chủ trên một thiết bị khác (Các thư mục lưu trữ, bên dưới). Trống: một lần lưu trữ chờ bản sao của nó được xác nhận trong Administration. | trống (tùy chọn) |
 | `PARTFLOW_SITE_TIMEZONE` | Múi giờ của nhà máy, theo tên IANA như `America/Los_Angeles` (§6). | bắt buộc |
 | `PARTFLOW_HTTP_PORT` | Port loopback mà reverse proxy kết nối tới. | `18080` |
 | `POSTGRES_USER`, `POSTGRES_DB` | Tên của database owner role và của database. | `partflow_owner`, `partflow` |
@@ -217,7 +220,7 @@ trong thư mục bí mật, được mount vào các container dưới `/run/sec
 | --- | --- | --- |
 | `postgres_password` | owner role: `db`, `migrate`, `db-roles` | Một dòng. `db` chỉ đọc nó **khi tạo một volume database mới, trống**; `migrate` và `db-roles` đọc nó mỗi lần chạy. `backend` không bao giờ mount nó. |
 | `partflow_app_password` | `backend`, `status`, `db-roles` | Một dòng gồm 16 đến 128 ký tự ASCII in được, không có khoảng trắng. |
-| `partflow_maintenance_password` | `db-roles` | Cùng quy tắc, và khác với `partflow_app_password`. |
+| `partflow_maintenance_password` | `db-roles`, `maintenance` | Cùng quy tắc, và khác với `partflow_app_password`. |
 
 Hãy tạo ba tệp trước lệnh đầu tiên khởi động `backend` hoặc một ops job. Nếu thiếu một tệp, Compose sẽ tạo một
 **thư mục** rỗng có tên đó; hãy xóa thư mục đó trước (`rmdir <path>`), rồi mới tạo tệp. `release.sh` từ chối chạy và
@@ -235,6 +238,31 @@ done
 Mỗi tệp chứa đúng một dòng (dấu xuống dòng cuối bị bỏ qua), vì PostgreSQL chỉ lấy mật khẩu của role mới từ dòng đầu
 tiên. Tệp có nhiều dòng, rỗng, không đọc được hoặc không phải UTF-8 bị từ chối kèm thông báo nêu tên tệp, không bao giờ
 nêu nội dung. Đổi mật khẩu về sau là một việc thường quy (runbook §9).
+
+#### Các thư mục lưu trữ (Archive folders)
+
+History archival & purge xuất lịch sử Movement cũ ra các tệp lưu trữ (runbook §11). **Bước xây dựng hiện tại chỉ xuất
+và sao chép bản lưu trữ và không bao giờ xóa gì.** Hai thư mục trên máy chủ giữ các bản lưu trữ; backend không bao giờ
+thấy thư mục nào trong số đó.
+
+| Thư mục | Thiết lập | Quy tắc |
+| --- | --- | --- |
+| Thư mục lưu trữ | `PARTFLOW_ARCHIVE_DIR` | Bắt buộc trước lần lưu trữ đầu tiên. Một đường dẫn tuyệt đối, viết không có dấu nháy, không có khoảng trắng hay `:`; nằm ngoài bản checkout của bản phát hành, thư mục bí mật và thư mục sao lưu. Thuộc sở hữu của tài khoản chạy `archive.sh` và `check.sh` (cùng tài khoản với thư mục sao lưu; `root` trên NAS), mode 0700: job `maintenance` chạy dưới tài khoản đó (`--user`) và ghi vào đây. Khi không có thiết lập này, dịch vụ `maintenance` mount một đường dẫn không tồn tại, nên một lần lưu trữ thất bại thay vì ghi vào nơi khác. Được sao chép ra ngoài máy chủ cùng các bản sao lưu (hướng dẫn NAS §11.3). |
+| Thư mục sao chép | `PARTFLOW_ARCHIVE_COPY_DIR` | Tùy chọn. Một thư mục trên **thiết bị khác**, như một thư mục chia sẻ qua mạng hoặc một ổ USB được mount trên máy chủ, ghi được bởi cùng tài khoản. Khi có nó, mỗi bản lưu trữ được sao chép vào đó và được kiểm tra, và lần lưu trữ hoàn tất mà không cần người. `archive.sh` và `check.sh` chỉ mount nó tại `/archive-copy` khi nó tồn tại, ghi được và nằm trên một hệ thống tệp không phải của thư mục lưu trữ và không phải hệ thống tệp gốc `/`, và `archive.sh` kiểm tra lại điều này trước mỗi bước. Việc mount là một bind dạng cú pháp dài với `create_host_path: false` trong một tệp Compose override được tạo ra (`docker compose run -v` sẽ tạo ra thư mục bị thiếu), nên Docker từ chối một thư mục đã biến mất trong lúc đó. Vì vậy một ổ đĩa hoặc thư mục chia sẻ chưa được mount không bao giờ bị nhầm là bản sao. Khi không có nó, một lần lưu trữ chờ cho đến khi bản sao của nó được xác nhận trong Administration. |
+
+Bố cục của thư mục lưu trữ (thư mục sao chép giữ cùng các tên):
+
+```text
+<PARTFLOW_ARCHIVE_DIR>/
+  .partial/run-<id>-<UTC time>/   while a run is exported and verified (mode 0700)
+  run-<id>-<UTC time>/            published by the verification with one rename, never changed afterwards:
+                                  movements.jsonl.gz, flows.jsonl.gz, lineage.jsonl.gz, assigned_routes.jsonl.gz,
+                                  context.json, manifest.json, README.txt, SHA256SUMS
+```
+
+Các tệp có mode 0600 và các thư mục 0700, như trong thư mục sao lưu. `sha256sum -c SHA256SUMS` bên trong một thư mục
+lần lưu trữ kiểm tra mọi tệp chỉ bằng các công cụ chuẩn. Một lần chuyển sang máy chủ khác mang theo thư mục lưu trữ
+(runbook §6 và §11).
 
 #### Image và định danh bản phát hành
 
@@ -324,14 +352,14 @@ Database production có ba role:
 | --- | --- | --- |
 | Owner (`POSTGRES_USER`, mặc định `partflow_owner`) | `db`, `migrate`, `db-roles`, các bản sao lưu | Superuser PostgreSQL được tạo cùng database; nó sở hữu mọi object. Tên của nó phải khác hai role bên dưới. |
 | `partflow_app` | `backend` (API và các lệnh `reconcile`, `revision` cùng các lệnh khôi phục của nó) và `status` | Chỉ giữ các đặc quyền trong bảng tiếp theo. |
-| `partflow_maintenance` | chưa có service nào | Dành riêng cho việc bảo trì lưu trữ (archival) đã được lên kế hoạch; chỉ giữ `SELECT` trên một danh sách bảng có tên. |
+| `partflow_maintenance` | `maintenance` (job lưu trữ lịch sử, runbook §11) | Đọc lịch sử mà nó lưu trữ và ghi các bản ghi lưu trữ (`history_archive_runs`, `history_archived_flows`) cùng các audit row của chúng; nó giữ `SELECT` trên một danh sách bảng có tên, `SELECT`, `INSERT` và `UPDATE` trên hai bảng đó và `INSERT` trên `audit_events`, và không bao giờ có `DELETE`. |
 
 | Loại bảng | Đặc quyền của `partflow_app` | Bảng |
 | --- | --- | --- |
 | append-only | `SELECT`, `INSERT` | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
-| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions` (một row trigger giới hạn các cột) |
+| guarded update | `SELECT`, `INSERT`, `UPDATE` | `worker_sessions` và `history_archive_runs` (một row trigger giới hạn các thay đổi) |
 | no update | `SELECT`, `INSERT`, `DELETE` | `assigned_route_steps` |
-| read only | `SELECT` | `alembic_version` |
+| read only | `SELECT` | `alembic_version`, `history_archived_flows` |
 | ordinary | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | mọi bảng khác |
 
 - `provision-roles` (mặc định của `db-roles`) tạo hoặc sửa `partflow_app` và `partflow_maintenance` với
@@ -423,9 +451,13 @@ openssl s_client -connect <host>:443 -servername <host> </dev/null 2>/dev/null |
 | `PUT /api/workers/{id}/avatar`, `PUT /api/users/{id}/avatar`, `PUT /api/part-numbers/image` | 4 MiB | 60 s |
 | `POST /api/work-orders/import/preview` | 4 MiB | 60 s |
 | `POST /api/work-orders/import` | 4 MiB | 180 s |
+| `GET /api/history-archive/preview`, `GET` và `POST /api/history-archive/runs` | 1 MiB | 610 s |
 
 Giới hạn 4 MiB cao hơn các giới hạn riêng của ứng dụng (ảnh 2 MiB, tệp import 1 MiB), nên ứng dụng tự trả lời một tệp quá
-lớn hợp lý. Lần import lớn nhất được phép, 2,000 Work Order, mất khoảng nửa phút. `web` không bao giờ thử lại một yêu
+lớn hợp lý. Bản xem trước của việc lưu trữ lịch sử, và một yêu cầu lưu trữ tính lại bản xem trước đó, chạy đến giới hạn
+thời gian xem trước trong Administration (ban đầu 90 s, tối đa 600 s), nên `web` chờ chúng 610 s. Reverse proxy chờ
+300 s (Yêu cầu đối với proxy của nền tảng, ở trên) và Cloudflare 100 s, nên hãy giữ giới hạn thời gian xem trước dưới
+thời gian chờ của proxy đang dùng. Lần import lớn nhất được phép, 2,000 Work Order, mất khoảng nửa phút. `web` không bao giờ thử lại một yêu
 cầu, nên một yêu cầu của người dùng là nhiều nhất một lần thực thi ở backend.
 
 **Giới hạn tần suất (rate limit), theo từng địa chỉ client.** `POST /api/session` (đăng nhập),
@@ -492,8 +524,9 @@ Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
 | `release.sh` | Cài một bản phát hành mới: sao lưu, build, migration, chuyển đổi và kiểm tra. | runbook §5 |
 | `smoke.sh` | Kiểm tra một bản phát hành đang chạy thông qua `web` trên port loopback. Trước đó nó chờ tối đa 120 giây chừng nào `web` chưa nhận kết nối, hoặc trả 502/504 vì backend còn đang khởi động, vì `up -d` trả về trước khi chúng sẵn sàng. | runbook §5 |
 | `backup.sh` | Tạo, xác minh và xoay vòng một bản sao lưu. | runbook §3 |
+| `archive.sh` | Job lưu trữ lịch sử: được trình lập lịch của máy chủ chạy mỗi 5 phút với `--scheduled`, nó làm phần việc hằng giờ của History archival & purge mỗi giờ một lần vào Start minute của Administration (xuất, kiểm tra và sao chép một lần lưu trữ đã được yêu cầu). Nó không bao giờ xóa gì. | runbook §11 |
 | `restore-test.sh` | Khôi phục một bản sao lưu vào một stack dùng một lần và kiểm tra nó. | runbook §4 |
-| `check.sh` | Được trình lập lịch của máy chủ chạy mỗi 15 phút, và thông báo lỗi của trình lập lịch chính là cảnh báo. Nó kiểm tra readiness qua HTTPS, chứng chỉ, các container, số lần restart, lỗi backend, các ổ đĩa và báo cáo `status` chỉ đọc, không bao giờ thay đổi gì, và thoát với mã khác 0 khi có điều cần báo cáo. | runbook §2 |
+| `check.sh` | Được trình lập lịch của máy chủ chạy mỗi 15 phút, và thông báo lỗi của trình lập lịch chính là cảnh báo. Nó kiểm tra readiness qua HTTPS, chứng chỉ, các container, số lần restart, lỗi backend, các ổ đĩa, báo cáo `status` chỉ đọc và trạng thái lưu trữ chỉ đọc, không bao giờ thay đổi gì, và thoát với mã khác 0 khi có điều cần báo cáo. | runbook §2 |
 | `scheduled-reconcile.sh` | Chạy đối soát đầy đủ mỗi ngày một lần, sau bản sao lưu hằng ngày. | runbook §7 |
 | `reconcile_regression.py`, `monitor_report.py` | Các helper mà script gọi; không bao giờ chạy bằng tay. | — |
 
@@ -604,8 +637,9 @@ cài đặt từ một branch hoặc bằng trình cập nhật tự động: m�
 ## 8. Chuyển sang máy chủ khác
 
 Một lần chuyển (ví dụ từ NAS sang VPS) cài đặt lại **cùng** bản phát hành trên máy chủ mới và khôi phục một bản sao lưu
-cuối cùng được tạo bên trong tạm dừng ghi trên máy chủ cũ. Hai bản cài đặt không bao giờ được nhận thao tác ghi cùng
-lúc. Quy trình nằm trong runbook §6 (Moving to another host).
+cuối cùng được tạo bên trong tạm dừng ghi trên máy chủ cũ, và mang theo thư mục lưu trữ (§3.1, Các thư mục lưu trữ).
+Hai bản cài đặt không bao giờ được nhận thao tác ghi cùng lúc. Quy trình nằm trong runbook §6 (Moving to another
+host).
 
 ## 9. Tham chiếu bên ngoài
 
@@ -744,6 +778,7 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
+| 2026-11-17 | uncommitted | §1.2, §3.1, §8: `pf archive`, dịch vụ `maintenance` và role nó dùng, `archive.sh`, các thư mục lưu trữ và sao chép cùng các thiết lập của chúng, và thời gian chờ 610 s của các route lưu trữ lịch sử; bước xây dựng hiện tại chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì. |
 | 2026-11-17 | uncommitted | §1.2, §3.1: `pf delete-permanently` trong danh sách các lệnh `pf` và là một lệnh của `db-roles`. |
 | 2026-11-17 | `1fc96e1` | §3.1: giới hạn tần suất của các yêu cầu passkey. |
 | 2026-11-17 | `aa6287d` | §3.1: giới hạn tần suất của bước thứ hai trong xác thực hai bước, của việc user tự đổi địa chỉ email và của các thay đổi xác thực hai bước có kiểm tra mật khẩu. |

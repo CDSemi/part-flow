@@ -91,6 +91,8 @@ from app.domain.enums import (
     AllocationSource,
     AuditEntityType,
     AuditEventType,
+    HistoryArchiveRunResult,
+    HistoryArchiveRunState,
     LineageRelation,
     MachineLifecycleEventType,
     MachineLifecycleState,
@@ -374,14 +376,129 @@ POLICY_DUE_SOON_PERCENT_SQL = "due_soon_lead_time_percent BETWEEN 1 AND 100"
 POLICY_DUE_SOON_ORDER_SQL = "due_soon_min_days <= due_soon_max_days"
 
 # Movement-history retention period (Phase 13 slice 11; PROJECT_PROFILE
-# §28): whole months, NULL = no retention period; stored for the Phase 16
-# archival maintenance only — no Phase 13 code path reads it. Repeated
-# verbatim by migration `0027_phase13_retention_period`.
-RETENTION_PERIOD_MONTHS_MIN = 12
+# §28): whole months, NULL = no retention period. Since the history
+# archival runs (Phase 16, design B step 1, migration
+# `0040_phase16_history_archive`) it lies between the shortest allowed
+# period — itself a setting, 1-1200 months, initially 12, changed only with
+# a reason — and 1200 months; only the archival module reads it. The other
+# settings of Administration → History archival & purge: the days a run may
+# wait for its copy confirmation before the host job's status reports it
+# (1-365, initially 7), the Start minute of the host job's hourly work (0-59,
+# initially 20) and the preview time limit (10-600 seconds, initially 90,
+# inside the 100 seconds after which Cloudflare ends a request). Repeated
+# verbatim by migration 0040.
 RETENTION_PERIOD_MONTHS_MAX = 1200
+SHORTEST_RETENTION_MONTHS_DEFAULT = 12
+HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
+    "shortest_retention_months": (1, 1200),
+    "archive_max_wait_days": (1, 365),
+    "archive_start_minute": (0, 59),
+    "archive_preview_seconds": (10, 600),
+}
 POLICY_RETENTION_PERIOD_SQL = (
-    "retention_period_months IS NULL OR retention_period_months BETWEEN 12 AND 1200"
+    "retention_period_months IS NULL"
+    " OR retention_period_months BETWEEN shortest_retention_months AND 1200"
 )
+
+# Movement-history archival runs and their carry-forward records (Phase 16,
+# history archival design §4.1, §6.1, §8.1; build step 1: runs without
+# deletion; migration `0040_phase16_history_archive`). Repeated verbatim by
+# that migration; the guard triggers live in the migration only.
+HISTORY_ARCHIVE_FINAL_STATES = ("COMPLETED", "NOTHING_ELIGIBLE", "CANCELLED", "FAILED")
+#: The states of an open run; at most one run is open (a partial UNIQUE index).
+HISTORY_ARCHIVE_OPEN_STATES = ("APPROVED", "RUNNING", "WAITING_FOR_COPY")
+HISTORY_ARCHIVE_REASON_MAX_LENGTH = 500
+HISTORY_ARCHIVE_RUN_STATE_SQL = (
+    "state IN (" + ", ".join(f"'{state}'" for state in HistoryArchiveRunState) + ")"
+)
+HISTORY_ARCHIVE_RUN_REASON_SQL = "char_length(reason) BETWEEN 1 AND 500"
+HISTORY_ARCHIVE_RUN_PREVIEW_SQL = (
+    "preview_components >= 0 AND preview_flows >= preview_components"
+    " AND preview_movements >= preview_flows AND preview_archive_bytes >= 0"
+    " AND (preview_first_occurred_at IS NULL) = (preview_last_occurred_at IS NULL)"
+    " AND (preview_first_occurred_at IS NULL OR"
+    " preview_first_occurred_at <= preview_last_occurred_at)"
+)
+HISTORY_ARCHIVE_RUN_EXPORT_SQL = (
+    "(exported_at IS NULL) = (archive_name IS NULL)"
+    " AND (exported_at IS NULL) = (manifest_sha256 IS NULL)"
+    " AND (exported_at IS NULL) = (archive_bytes IS NULL)"
+    " AND (exported_at IS NULL) = (exported_components IS NULL)"
+    " AND (exported_at IS NULL) = (exported_flows IS NULL)"
+    " AND (exported_at IS NULL) = (exported_movements IS NULL)"
+    " AND (exported_at IS NULL) = (exported_lineage_edges IS NULL)"
+    " AND (exported_at IS NULL) = (exported_assigned_routes IS NULL)"
+)
+HISTORY_ARCHIVE_RUN_NAME_SQL = (
+    "archive_name IS NULL OR archive_name ~ '^run-[0-9]+-[0-9]{8}T[0-9]{6}Z$'"
+)
+HISTORY_ARCHIVE_RUN_MANIFEST_SQL = "manifest_sha256 IS NULL OR manifest_sha256 ~ '^[0-9a-f]{64}$'"
+HISTORY_ARCHIVE_RUN_VERIFY_SQL = (
+    "(verified_at IS NULL OR exported_at IS NOT NULL)"
+    " AND (verified_at IS NULL) = (skipped_components IS NULL)"
+    " AND (verified_at IS NULL) = (skipped_flows IS NULL)"
+    " AND (copied_at IS NULL OR verified_at IS NOT NULL)"
+)
+HISTORY_ARCHIVE_RUN_PROGRESS_SQL = (
+    "(state <> 'APPROVED' OR started_at IS NULL)"
+    " AND (state NOT IN ('RUNNING', 'WAITING_FOR_COPY', 'COMPLETED', 'NOTHING_ELIGIBLE')"
+    " OR started_at IS NOT NULL)"
+    " AND (state NOT IN ('WAITING_FOR_COPY', 'COMPLETED') OR verified_at IS NOT NULL)"
+)
+HISTORY_ARCHIVE_RUN_COPY_CONFIRMATION_SQL = (
+    "(copy_confirmed_at IS NULL) = (copy_confirmed_by_user_id IS NULL)"
+)
+#: A run is COMPLETED only once its archive was copied off the host, or a
+#: person confirmed the copy.
+HISTORY_ARCHIVE_RUN_COMPLETED_COPY_SQL = (
+    "state <> 'COMPLETED' OR copied_at IS NOT NULL OR copy_confirmed_at IS NOT NULL"
+)
+HISTORY_ARCHIVE_RUN_RESULT_SQL = (
+    "(result IS NULL OR result IN ("
+    + ", ".join(f"'{result}'" for result in HistoryArchiveRunResult)
+    + ")) AND (state = 'COMPLETED') = (result IS NOT NULL)"
+)
+HISTORY_ARCHIVE_RUN_FAILURE_SQL = (
+    "(state = 'FAILED') = (failure_reason IS NOT NULL)"
+    " AND (failure_reason IS NULL OR char_length(failure_reason) BETWEEN 1 AND 2000)"
+)
+HISTORY_ARCHIVE_RUN_FINISH_SQL = (
+    "(state IN ("
+    + ", ".join(f"'{state}'" for state in HISTORY_ARCHIVE_FINAL_STATES)
+    + ")) = (finished_at IS NOT NULL)"
+    " AND (state = 'CANCELLED') = (cancelled_by_user_id IS NOT NULL)"
+)
+HISTORY_ARCHIVE_RUN_OPEN_WHERE_SQL = (
+    "state IN (" + ", ".join(f"'{state}'" for state in HISTORY_ARCHIVE_OPEN_STATES) + ")"
+)
+#: The closed statuses a flow of an archived component has.
+HISTORY_ARCHIVED_FLOW_STATUS_SQL = (
+    "flow_status IN ("
+    + ", ".join(
+        f"'{status}'" for status in QuantityFlowStatus if status != QuantityFlowStatus.ACTIVE
+    )
+    + ")"
+)
+HISTORY_ARCHIVED_FLOW_MOVEMENTS_SQL = (
+    "movement_count > 0 AND first_movement_id <= last_movement_id"
+    " AND first_occurred_at <= last_occurred_at AND component_id BETWEEN 1 AND flow_id"
+)
+HISTORY_ARCHIVED_FLOW_CONTENT_SQL = "content_sha256 ~ '^[0-9a-f]{64}$'"
+HISTORY_ARCHIVED_FLOW_RECEIVED_SQL = (
+    "(received_quantity IS NULL) = (received_at IS NULL)"
+    " AND (received_quantity IS NOT NULL OR received_demand_id IS NULL)"
+    " AND (received_quantity IS NULL OR received_quantity > 0)"
+)
+HISTORY_ARCHIVED_FLOW_ADJUSTED_SQL = "adjusted_quantity IS NULL OR adjusted_quantity > 0"
+HISTORY_ARCHIVED_FLOW_STOCKED_SQL = (
+    "(stocked_quantity IS NULL) = (stocked_area_id IS NULL)"
+    " AND (stocked_quantity IS NULL OR stocked_quantity > 0)"
+)
+HISTORY_ARCHIVED_FLOW_SCRAPPED_SQL = (
+    "(scrapped_quantity IS NULL) = (scrapped_area_id IS NULL)"
+    " AND (scrapped_quantity IS NULL OR scrapped_quantity > 0)"
+)
+HISTORY_ARCHIVED_FLOW_SKIP_OR_PURGE_SQL = "skipped_at IS NULL OR purged_at IS NULL"
 
 # Backups (Phase 16, owner decision of 2026-11-13; Administration →
 # Backups): how often the host's hourly task takes a scheduled backup — a
@@ -1310,8 +1427,12 @@ class ApplicationPolicy(Base):
     warning percentage. No production command reads it.
 
     Slice 11 adds the Movement-history retention period of
-    Administration → History archival & purge (stored only; executed in
-    Phase 16).
+    Administration → History archival & purge. Phase 16 (history archival,
+    design B step 1) adds the section's other settings — the shortest
+    allowed retention period, the Start minute of the host job's hourly work
+    and the preview time limit — and sets the retention period to 24 months
+    where it was never saved; only the archival module and the host job's
+    `app.cli history-archive` read them.
 
     Phase 14 slice 1 adds the user sign-in policy of Administration →
     Settings → User sign-in (owner decisions OD-P1–OD-P3): whether
@@ -1374,9 +1495,28 @@ class ApplicationPolicy(Base):
         Integer, nullable=False, server_default=text("7")
     )
     # The Movement-history retention period (PROJECT_PROFILE §28), whole
-    # months; NULL = no retention period. Configuration for the Phase 16
-    # archival maintenance — never read by production workflow logic.
+    # months; NULL = no retention period (nothing is eligible for archival).
+    # Read only by the archival module (`app.application.history_archive`) —
+    # never by production workflow logic. Between the shortest allowed
+    # period and 1200 months (CHECK).
     retention_period_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # History archival (Phase 16, design B step 1): the shortest allowed
+    # retention period (changed only with a reason; the run guard refuses a
+    # cutoff newer than it), the days a run may wait for its copy
+    # confirmation, the Start minute of the host job's hourly work and the
+    # preview time limit. Ranges: HISTORY_ARCHIVE_POLICY_RANGES.
+    shortest_retention_months: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("12")
+    )
+    archive_max_wait_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("7")
+    )
+    archive_start_minute: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("20")
+    )
+    archive_preview_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("90")
+    )
     # User sign-in (Phase 14 slice 1): an expiry absolute from sign-in,
     # whole days, unless sign-ins never expire (the day count is kept
     # while switched off); the lockout threshold and duration; and the
@@ -1581,6 +1721,12 @@ class ApplicationPolicy(Base):
         CheckConstraint(
             POLICY_PASSWORD_LENGTH_ORDER_SQL,
             name=conv("ck_application_policy_password_length_order"),
+        ),
+        *(
+            CheckConstraint(
+                policy_range_sql(column, bounds), name=conv(f"ck_application_policy_{column}_range")
+            )
+            for column, bounds in HISTORY_ARCHIVE_POLICY_RANGES.items()
         ),
     )
 
@@ -2891,7 +3037,10 @@ class AuditEvent(Base):
     application accounts and the named roles with their permission
     grants — and (Phase 14 slice 4) ScanStationDevice, the enrollment,
     activation, replacement and revocation of a station device (never a
-    code, token or digest). Rows are descriptive history for
+    code, token or digest) — and (Phase 16) HistoryArchiveRun, every change
+    of state of a Movement-history archival run, the one entity type the
+    maintenance database role may append (``entity_id`` the run id). Rows
+    are descriptive history for
     display and accountability: never replayed to build state, never
     describing quantity movement (the `RECEIVED` PartMovement is the
     production audit record), and deliberately not an event-sourcing
@@ -2951,7 +3100,7 @@ class AuditEvent(Base):
             f" '{AuditEntityType.MACHINE}', '{AuditEntityType.APPLICATION_POLICY}',"
             f" '{AuditEntityType.ROUTE_TEMPLATE}', '{AuditEntityType.USER}',"
             f" '{AuditEntityType.ROLE}', '{AuditEntityType.SCAN_STATION_DEVICE}',"
-            f" '{AuditEntityType.ASSIGNED_ROUTE}')",
+            f" '{AuditEntityType.ASSIGNED_ROUTE}', '{AuditEntityType.HISTORY_ARCHIVE_RUN}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.
@@ -2994,3 +3143,260 @@ Index(
     unique=True,
     postgresql_where=AuditEvent.entity_type == AuditEntityType.ASSIGNED_ROUTE,
 )
+
+
+class HistoryArchiveRun(Base):
+    """One Movement-history archival run (Phase 16, history archival design
+    §6.1; build step 1: runs without deletion; migration
+    `0040_phase16_history_archive`).
+
+    A holder of Run history archival and purge requests a run in
+    Administration with a reason, at a cutoff (the start of a site-calendar
+    day, never newer than the retention period allows); the request is the
+    approval, so the run starts APPROVED with the counts its preview found.
+    The host job (``python -m app.cli history-archive``, as the maintenance
+    database role) exports the eligible flow components into an archive
+    folder, verifies it, copies it off the host — or waits for a person to
+    confirm the copy — and finishes the run; in step 1 nothing is deleted, so
+    a COMPLETED run records the result EXPORT_ONLY. Every change of state
+    appends one ``HistoryArchiveRun`` audit row.
+
+    The request columns (cutoff, reason, requester, request time, preview)
+    never change. The guard trigger ``trg_history_archive_runs_guard_mutation``
+    lets the application role only insert an APPROVED run (and, like every
+    insert, refuses a cutoff newer than the shortest allowed retention period
+    allows), cancel an APPROVED or WAITING_FOR_COPY run and confirm the copy
+    of a WAITING_FOR_COPY run; every other transition is the maintenance
+    job's, made while ``partflow.archive_run_id`` names the run; a finished
+    run never changes; no run is ever deleted. At most one run is open
+    (``uq_history_archive_runs_open``).
+    """
+
+    __tablename__ = "history_archive_runs"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    # The start of a site-calendar day: history older than it may be archived.
+    cutoff: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_history_archive_runs_requested_by_user_id_users"),
+        nullable=False,
+    )
+    requested_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # What the preview of the request found; the export may never find more.
+    preview_components: Mapped[int] = mapped_column(Integer, nullable=False)
+    preview_flows: Mapped[int] = mapped_column(Integer, nullable=False)
+    preview_movements: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    preview_first_occurred_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    preview_last_occurred_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    preview_archive_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # The job's progress.
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    archive_name: Mapped[str | None] = mapped_column(Text)
+    exported_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    exported_components: Mapped[int | None] = mapped_column(Integer)
+    exported_flows: Mapped[int | None] = mapped_column(Integer)
+    exported_movements: Mapped[int | None] = mapped_column(BigInteger)
+    exported_lineage_edges: Mapped[int | None] = mapped_column(Integer)
+    exported_assigned_routes: Mapped[int | None] = mapped_column(Integer)
+    archive_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    manifest_sha256: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Components that changed between the export and the verification
+    # (their records are marked skipped; a later run archives them again).
+    skipped_components: Mapped[int | None] = mapped_column(Integer)
+    skipped_flows: Mapped[int | None] = mapped_column(Integer)
+    # The job copied the archive to the off-host copy folder and checked it.
+    copied_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # A person confirmed in Administration that the archive was copied off
+    # the host (only needed without a copy folder).
+    copy_confirmed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    copy_confirmed_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_history_archive_runs_copy_confirmed_by_user_id_users"),
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[str | None] = mapped_column(Text)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    cancelled_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_history_archive_runs_cancelled_by_user_id_users")
+    )
+
+    __table_args__ = (
+        CheckConstraint(HISTORY_ARCHIVE_RUN_STATE_SQL, name=conv("ck_history_archive_runs_state")),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_REASON_SQL, name=conv("ck_history_archive_runs_reason_length")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_PREVIEW_SQL, name=conv("ck_history_archive_runs_preview_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_EXPORT_SQL, name=conv("ck_history_archive_runs_export_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_NAME_SQL, name=conv("ck_history_archive_runs_archive_name_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_MANIFEST_SQL,
+            name=conv("ck_history_archive_runs_manifest_sha256_shape"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_VERIFY_SQL, name=conv("ck_history_archive_runs_verify_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_PROGRESS_SQL, name=conv("ck_history_archive_runs_progress_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_COPY_CONFIRMATION_SQL,
+            name=conv("ck_history_archive_runs_copy_confirmation_shape"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_COMPLETED_COPY_SQL,
+            name=conv("ck_history_archive_runs_completed_copy"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_RESULT_SQL, name=conv("ck_history_archive_runs_result_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_FAILURE_SQL, name=conv("ck_history_archive_runs_failure_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_FINISH_SQL, name=conv("ck_history_archive_runs_finish_shape")
+        ),
+        # At most one open run: a second request, or a request racing the
+        # first, is refused by the database itself.
+        Index(
+            "uq_history_archive_runs_open",
+            text("(true)"),
+            unique=True,
+            postgresql_where=text(HISTORY_ARCHIVE_RUN_OPEN_WHERE_SQL),
+        ),
+    )
+
+
+class HistoryArchivedFlow(Base):
+    """The carry-forward record of one flow of an archived component
+    (Phase 16, history archival design §4.1; build step 1).
+
+    Written by the maintenance job at export, in the export's snapshot, one
+    row per flow of every whole flow component (flows connected by lineage
+    edges) the run archives: the flow's status, what the archive holds for it
+    (Movement count, first and last Movement id, first and last occurrence,
+    the SHA-256 of its Movements in canonical form) and every quantity the
+    readers and checks derive from those Movements — the released quantity
+    with its demand line, the effective quantity addition, stock and scrap
+    with their Areas — and the command ids of its undone splits and merges.
+    ``component_id`` is the smallest flow id of the component. The composite
+    foreign key to ``quantity_flows (id, part_number)`` keeps the flow row
+    while its record exists. ``skipped_at`` marks a component that changed
+    between the export and the verification; ``purged_at`` stays empty in
+    step 1 (nothing is deleted) and is set only by the purge of a later
+    step, at most once per flow (``uq_history_archived_flows_flow_id_purged``).
+    Readers add only purged rows, so in step 1 no reader reads this table.
+    The guard trigger ``trg_history_archived_flows_guard_mutation`` admits an
+    insert only while the run is RUNNING and ``partflow.archive_run_id``
+    names it, and no change but marking a record skipped (RUNNING) or purged
+    (PURGING, a later step); no row is ever deleted.
+    """
+
+    __tablename__ = "history_archived_flows"
+
+    run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "history_archive_runs.id",
+            name="fk_history_archived_flows_run_id_history_archive_runs",
+        ),
+        primary_key=True,
+    )
+    flow_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    part_number: Mapped[str] = mapped_column(Text, nullable=False)
+    component_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    flow_status: Mapped[str] = mapped_column(Text, nullable=False)
+    movement_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    first_movement_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_movement_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    first_occurred_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_occurred_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    received_quantity: Mapped[int | None] = mapped_column(Integer)
+    received_demand_id: Mapped[int | None] = mapped_column(Integer)
+    received_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    adjusted_quantity: Mapped[int | None] = mapped_column(Integer)
+    stocked_quantity: Mapped[int | None] = mapped_column(Integer)
+    stocked_area_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("areas.id", name="fk_history_archived_flows_stocked_area_id_areas")
+    )
+    scrapped_quantity: Mapped[int | None] = mapped_column(Integer)
+    scrapped_area_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("areas.id", name="fk_history_archived_flows_scrapped_area_id_areas")
+    )
+    void_command_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    skipped_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    purged_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["flow_id", "part_number"],
+            ["quantity_flows.id", "quantity_flows.part_number"],
+            name="fk_history_archived_flows_flow_id_part_number_quantity_flows",
+        ),
+        CheckConstraint(
+            CANONICAL_PART_NUMBER_SQL,
+            name=conv("ck_history_archived_flows_part_number_canonical"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_STATUS_SQL, name=conv("ck_history_archived_flows_flow_status")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_MOVEMENTS_SQL,
+            name=conv("ck_history_archived_flows_movement_shape"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_CONTENT_SQL,
+            name=conv("ck_history_archived_flows_content_sha256_shape"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_RECEIVED_SQL,
+            name=conv("ck_history_archived_flows_received_shape"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_ADJUSTED_SQL,
+            name=conv("ck_history_archived_flows_adjusted_positive"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_STOCKED_SQL, name=conv("ck_history_archived_flows_stocked_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_SCRAPPED_SQL,
+            name=conv("ck_history_archived_flows_scrapped_shape"),
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVED_FLOW_SKIP_OR_PURGE_SQL,
+            name=conv("ck_history_archived_flows_skipped_or_purged"),
+        ),
+        # The flow's records (the foreign key's check when a flow row is
+        # deleted, and the readers of a later step).
+        Index("ix_history_archived_flows_flow_id", "flow_id"),
+        # At most one purged record per flow (a later step purges).
+        Index(
+            "uq_history_archived_flows_flow_id_purged",
+            "flow_id",
+            unique=True,
+            postgresql_where=text("purged_at IS NOT NULL"),
+        ),
+    )

@@ -24,7 +24,9 @@ import { AdministrationView } from './AdministrationView';
 // configuration — Workers, Users, Roles & permissions, Worker sessions,
 // Correction permissions, Department display settings, Settings,
 // History archival & purge and Backups read and write the real /api
-// surface (faked in-memory here with the same routes and semantics). Machine
+// surface (faked in-memory here with the same routes and semantics; the
+// actions of History archival & purge have their own suite,
+// HistoryArchivalSection.test.tsx). Machine
 // assignment is a read-only statement; Scan behavior, and the other
 // general settings of Settings, show their candidate settings as
 // disabled previews marked Not available yet.
@@ -154,9 +156,6 @@ interface FakeState {
   undoReasonRequired: boolean;
   /** `application_policy` Due Soon warning policy. */
   dueSoon: { min: number; percent: number; max: number };
-  /** `application_policy` Movement-history retention period (months;
-   * null = no retention period). */
-  retentionMonths: number | null;
   /** `application_policy` backup policy (Phase 16). */
   backup: { interval: number; hourly: number; daily: number; weekly: number };
   /** Scan Station devices (Phase 14 slice 4), every state. */
@@ -201,6 +200,7 @@ const ADMINISTRATOR_GRANTS = [
   'EDIT_WORK_ORDER_ALLOCATION',
   'PERFORM_HISTORICAL_CORRECTIONS',
   'CONFIGURE_SYSTEM_SETTINGS',
+  'RUN_HISTORY_ARCHIVAL_AND_PURGE',
 ];
 const MANAGER_GRANTS = [
   'VIEW_PRODUCTION_DATA',
@@ -319,7 +319,6 @@ function seedState(): FakeState {
     badgeConfirm: { done: true, queue: true, undo: true },
     undoReasonRequired: false,
     dueSoon: { min: 2, percent: 15, max: 7 },
-    retentionMonths: null,
     backup: { interval: 1, hourly: 48, daily: 30, weekly: 52 },
     devices: [],
     enrollmentPermissions: [
@@ -347,8 +346,6 @@ let policyHold: Promise<void> | null;
 let correctionFailure: { status: number; detail: string } | null;
 /** A refusal of every `/api/policies/due-soon` call, if set. */
 let dueSoonFailure: { status: number; detail: string } | null;
-/** A refusal of every `/api/policies/data-retention` call, if set. */
-let retentionFailure: { status: number; detail: string } | null;
 /** A refusal of every `/api/policies/backups` call, if set. */
 let backupFailure: { status: number; detail: string } | null;
 let roleFailures: Partial<Record<RoleRoute, FakeFailure>>;
@@ -460,9 +457,6 @@ const E_D3 =
   'The lead-time warning percentage must be a whole number from 1 to 100.';
 const E_D4 =
   'Minimum warning days cannot be greater than maximum warning days.';
-const E_T1 =
-  'The retention period must be a whole number of months from 12 to 1200, or no retention period.';
-const E_T2 = 'Enter a whole number of months from 12 to 1200.';
 // The server's backup policy refusals (app/application/policies.py).
 const E_BK_INTERVAL = 'Back up every 1, 2, 3, 4, 6, 8, 12 or 24 hours.';
 const E_BK_HOURLY = 'Hourly backups kept must be a whole number from 0 to 720.';
@@ -762,29 +756,18 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     });
   }
   if (url === '/api/policies/data-retention') {
-    if (retentionFailure) {
-      return json({ detail: retentionFailure.detail }, retentionFailure.status);
-    }
-    if (method === 'PUT') {
-      // Exactly one required field: whole months, or null (no period).
-      const months = body.retention_period_months;
-      if (
-        Object.keys(body).length !== 1 ||
-        !('retention_period_months' in body) ||
-        (months !== null &&
-          (typeof months !== 'number' || !Number.isInteger(months)))
-      ) {
-        return json({ detail: 'Invalid request.' }, 422);
-      }
-      if (months !== null && !wholeIn(months, 12, 1200)) {
-        return json({ detail: E_T1 }, 422);
-      }
-      state.retentionMonths = months as number | null;
-    }
+    // Read-only here: History archival & purge has its own suite.
     return json({
-      retention_period_months: state.retentionMonths,
+      retention_period_months: 24,
+      shortest_retention_months: 12,
+      archive_start_minute: 20,
+      archive_preview_seconds: 90,
+      archive_max_wait_days: 7,
       updated_at: T0,
     });
+  }
+  if (url === '/api/history-archive/runs') {
+    return json([]);
   }
   if (url === '/api/policies/backups') {
     if (backupFailure) {
@@ -1462,7 +1445,6 @@ beforeEach(() => {
   policyHold = null;
   correctionFailure = null;
   dueSoonFailure = null;
-  retentionFailure = null;
   backupFailure = null;
   roleFailures = {};
   userFailures = {};
@@ -4321,223 +4303,6 @@ test('Settings shows the other general settings as disabled previews of what Par
   );
 });
 
-/* ============ History archival & purge (retention period) ============ */
-
-const RETENTION_PATH = '/api/policies/data-retention';
-const NO_PERIOD = 'No retention period';
-const KEEP_PERIOD = 'Keep a set period of history';
-const RETENTION_UNKNOWN_OUTCOME =
-  'The server did not answer — this change may or may not have been saved. Check the retention period before trying again; saving the same value again is safe.';
-
-async function openHistoryArchival(
-  status: 'connected' | 'unavailable' = 'connected',
-) {
-  renderAdmin(status);
-  openSection('History archival & purge');
-  return (await screen.findByRole('radio', {
-    name: NO_PERIOD,
-  })) as HTMLInputElement;
-}
-
-function retentionField(): HTMLInputElement {
-  return screen.getByLabelText('Retention period (months)') as HTMLInputElement;
-}
-
-test('FA-R1: History archival & purge loads no retention period and states that runs are not available', async () => {
-  const none = await openHistoryArchival();
-
-  expect(none).toBeChecked();
-  expect(screen.getByRole('radio', { name: KEEP_PERIOD })).not.toBeChecked();
-  expect(screen.queryByLabelText('Retention period (months)')).toBeNull();
-  expect(
-    screen.getByRole('heading', { name: 'Retention period' }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole('heading', { name: 'Archival and purge runs' }),
-  ).toBeInTheDocument();
-  expect(document.body.textContent).toContain(
-    'How long Movement history stays in the PartFlow database before archival maintenance may move it to archive files. Saving the period archives or deletes nothing, and it never affects production scanning.',
-  );
-  expect(document.body.textContent).toContain(
-    'Archival and purge runs — by retention period, data-size threshold or manual request — are not available yet.',
-  );
-  expect(document.body.textContent).toContain(
-    'Nothing is archived or purged: all Movement history stays in the database.',
-  );
-  expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
-  expect(screen.queryByRole('switch')).toBeNull();
-  expect(screen.queryByRole('note')).toBeNull();
-  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
-  expect(document.body.textContent).not.toMatch(/Phase \d/);
-});
-
-test('FA-R2: a set period PUTs exactly its months, states it in years and re-reads', async () => {
-  await openHistoryArchival();
-  fireEvent.click(screen.getByRole('radio', { name: KEEP_PERIOD }));
-
-  const field = retentionField();
-  expect(field).toHaveValue(null);
-  expect(screen.getByRole('alert')).toHaveTextContent(E_T2);
-  const save = screen.getByRole('button', { name: 'Save' });
-  expect(save).toBeDisabled();
-
-  fireEvent.change(field, { target: { value: '120' } });
-  expect(screen.queryByRole('alert')).toBeNull();
-  expect(screen.getByText('Retention period: 10 years.')).toBeInTheDocument();
-  expect(document.body.textContent).not.toMatch(/Keeps the most recent/);
-  expect(save).toBeEnabled();
-  fireEvent.click(save);
-
-  expect(await screen.findByRole('status')).toHaveTextContent(
-    '✓ Retention period saved.',
-  );
-  expect(writes).toEqual([
-    {
-      method: 'PUT',
-      url: RETENTION_PATH,
-      body: { retention_period_months: 120 },
-    },
-  ]);
-  expect(state.retentionMonths).toBe(120);
-  await waitFor(() => expect(save).toBeDisabled());
-
-  // Editing again clears the saved note.
-  fireEvent.change(field, { target: { value: '121' } });
-  expect(screen.queryByRole('status')).toBeNull();
-  cleanup();
-
-  // A fresh read shows the stored period.
-  await openHistoryArchival();
-  expect(screen.getByRole('radio', { name: KEEP_PERIOD })).toBeChecked();
-  expect(retentionField()).toHaveValue(120);
-  expect(screen.getByText('Retention period: 10 years.')).toBeInTheDocument();
-});
-
-test('FA-R3: an entry outside whole months 12 to 1200 cannot be saved', async () => {
-  await openHistoryArchival();
-  fireEvent.click(screen.getByRole('radio', { name: KEEP_PERIOD }));
-  const field = retentionField();
-  const save = screen.getByRole('button', { name: 'Save' });
-
-  for (const value of ['11', '1201', '12.5', '']) {
-    fireEvent.change(field, { target: { value } });
-    expect(screen.getByRole('alert')).toHaveTextContent(E_T2);
-    expect(screen.queryByText(/^Retention period: /)).toBeNull();
-    expect(save).toBeDisabled();
-  }
-  fireEvent.change(field, { target: { value: '12' } });
-  expect(screen.getByText('Retention period: 1 year.')).toBeInTheDocument();
-  fireEvent.change(field, { target: { value: '18' } });
-  expect(
-    screen.getByText('Retention period: 1 year 6 months.'),
-  ).toBeInTheDocument();
-  expect(writes).toEqual([]);
-});
-
-test('FA-R4: choosing no retention period clears the stored period with null', async () => {
-  state.retentionMonths = 120;
-  await openHistoryArchival();
-  expect(screen.getByRole('radio', { name: KEEP_PERIOD })).toBeChecked();
-  expect(retentionField()).toHaveValue(120);
-  const save = screen.getByRole('button', { name: 'Save' });
-  expect(save).toBeDisabled();
-
-  fireEvent.click(screen.getByRole('radio', { name: NO_PERIOD }));
-  expect(screen.queryByLabelText('Retention period (months)')).toBeNull();
-  expect(save).toBeEnabled();
-  fireEvent.click(save);
-
-  expect(await screen.findByRole('status')).toHaveTextContent(
-    '✓ Retention period saved.',
-  );
-  expect(writes).toEqual([
-    {
-      method: 'PUT',
-      url: RETENTION_PATH,
-      body: { retention_period_months: null },
-    },
-  ]);
-  expect(state.retentionMonths).toBeNull();
-  await waitFor(() => expect(save).toBeDisabled());
-});
-
-test('FA-R5: a refused save keeps the entry with the reason; an unanswered save is an unknown outcome', async () => {
-  await openHistoryArchival();
-  fireEvent.click(screen.getByRole('radio', { name: KEEP_PERIOD }));
-  const field = retentionField();
-  fireEvent.change(field, { target: { value: '120' } });
-  const save = screen.getByRole('button', { name: 'Save' });
-
-  retentionFailure = { status: 422, detail: E_T1 };
-  fireEvent.click(save);
-  expect(await screen.findByRole('alert')).toHaveTextContent(E_T1);
-  expect(field).toHaveValue(120);
-  expect(screen.queryByRole('status')).toBeNull();
-  expect(state.retentionMonths).toBeNull();
-  await waitFor(() => expect(save).toBeEnabled());
-
-  // A 5xx may have committed: the section says so instead of claiming
-  // nothing changed, and keeps the entry.
-  retentionFailure = { status: 500, detail: 'Database unavailable.' };
-  fireEvent.click(save);
-  await waitFor(() =>
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      RETENTION_UNKNOWN_OUTCOME,
-    ),
-  );
-  expect(field).toHaveValue(120);
-  expect(screen.queryByRole('status')).toBeNull();
-  retentionFailure = null;
-  cleanup();
-
-  // The server commits the PUT; the answer never arrives. The stored
-  // period is re-read, so nothing is left to save and the notice stays.
-  await openHistoryArchival();
-  fireEvent.click(screen.getByRole('radio', { name: KEEP_PERIOD }));
-  fireEvent.change(retentionField(), { target: { value: '36' } });
-  vi.mocked(fetch).mockImplementationOnce(async (input, init) => {
-    await handle(String(input), init);
-    throw new TypeError('Failed to fetch');
-  });
-  const retry = screen.getByRole('button', { name: 'Save' });
-  fireEvent.click(retry);
-  expect(await screen.findByRole('alert')).toHaveTextContent(
-    RETENTION_UNKNOWN_OUTCOME,
-  );
-  expect(document.body.textContent).not.toMatch(/Nothing was changed/);
-  expect(state.retentionMonths).toBe(36);
-  await waitFor(() => expect(retry).toBeDisabled());
-  expect(screen.getByRole('alert')).toHaveTextContent(
-    'may or may not have been saved',
-  );
-  expect(retentionField()).toHaveValue(36);
-});
-
-test('FA-R6: offline the stored period stays visible and cannot be saved', async () => {
-  state.retentionMonths = 120;
-  await openHistoryArchival('unavailable');
-  const field = retentionField();
-  expect(field).toHaveValue(120);
-  fireEvent.change(field, { target: { value: '240' } });
-  expect(screen.getByText('Retention period: 20 years.')).toBeInTheDocument();
-  const save = screen.getByRole('button', { name: 'Save' });
-  expect(save).toBeDisabled();
-  fireEvent.click(save);
-  expect(writes).toEqual([]);
-});
-
-test('FA-R7: a failed load of the retention period offers Retry', async () => {
-  retentionFailure = { status: 500, detail: 'Database unavailable.' };
-  renderAdmin();
-  openSection('History archival & purge');
-  expect(
-    await screen.findByText('History retention settings could not be loaded.'),
-  ).toBeInTheDocument();
-  retentionFailure = null;
-  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-  expect(await screen.findByRole('radio', { name: NO_PERIOD })).toBeChecked();
-});
-
 /* ============ Backups (Phase 16 — scheduled backup policy) ============ */
 
 const BACKUP_PATH = '/api/policies/backups';
@@ -5146,12 +4911,12 @@ test('FA-RO1: Roles & permissions lists the seeded roles with permission and use
   seedJane();
   await openRoles();
 
-  expect(roleRow('Administrator')).toEqual(['Administrator', '17 of 35', '0']);
-  expect(roleRow('Manager')).toEqual(['Manager', '10 of 35', '1']);
+  expect(roleRow('Administrator')).toEqual(['Administrator', '18 of 36', '0']);
+  expect(roleRow('Manager')).toEqual(['Manager', '10 of 36', '1']);
   // The role applied at Scan Stations carries its badge (slice 4).
   expect(roleRow('Operator')).toEqual([
     'Operator Applied at Scan Stations',
-    '10 of 35',
+    '10 of 36',
     '0',
   ]);
   const managerRow = screen
@@ -5194,7 +4959,7 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
     'Work Orders, priority and reports',
     'Scan Station',
   ]);
-  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(31);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(32);
   for (const label of [
     'Undo recent eligible scans',
     'Perform quantity corrections',
@@ -5287,7 +5052,7 @@ test('FA-RO3: a new role posts its name and checked permissions; a duplicate kee
   ]);
   expect(await roleRowWhenShown('Process Engineer')).toEqual([
     'Process Engineer',
-    '1 of 35',
+    '1 of 36',
     '0',
   ]);
 
@@ -6370,7 +6135,7 @@ test('FA-3: without its permission every section is view-only — values as text
     ['Roles & permissions', 'Manage users and roles'],
     ['Worker sessions', 'Manage Worker session policies'],
     ['Correction permissions', 'Manage correction permissions'],
-    ['History archival & purge', 'Configure system settings'],
+    ['History archival & purge', 'Run history archival and purge'],
     ['Backups', 'Configure system settings'],
     ['Department display settings', 'Manage Departments'],
     ['Settings', 'Configure system settings'],
@@ -6394,7 +6159,8 @@ test('FA-3: without its permission every section is view-only — values as text
       'combobox',
     ] as const) {
       // Scan Stations keeps one read-only control per station: the
-      // `Devices…` list every signed-in user may open (slice 4). The
+      // `Devices…` list every signed-in user may open (slice 4), and
+      // History archival & purge its `Reload` of the runs. The
       // setting previews of Settings are disabled for every user
       // (GUI_DESIGN §9) and have their own tests.
       expect(
@@ -6403,6 +6169,7 @@ test('FA-3: without its permission every section is view-only — values as text
           .filter(
             (element) =>
               !element.getAttribute('aria-label')?.startsWith('Devices of ') &&
+              element.getAttribute('aria-label') !== 'Reload runs' &&
               element.closest('.admin-previews') === null,
           ),
       ).toEqual([]);
@@ -6445,7 +6212,14 @@ test('FA-3: without its permission every section is view-only — values as text
   ]);
 
   await openLoadedSection('History archival & purge');
-  expect(readOnlyRows()).toEqual({ 'Retention period': 'No retention period' });
+  expect(readOnlyRows()).toEqual({
+    'Retention period': '24 months (2 years)',
+    'Shortest allowed period': '12 months (1 year)',
+    'Start minute': '20 minutes past each hour',
+    'Preview time limit': '90 seconds',
+    'Report a waiting run after': '7 days',
+  });
+  expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull();
 
   await openLoadedSection('Department display settings');
   expect(screen.getByText('3 s')).toBeInTheDocument();
@@ -6602,7 +6376,7 @@ test('FA-4: the Roles editor hides Manage correction permissions from a user who
   await openRoles();
   fireEvent.click(screen.getByRole('button', { name: 'Edit Administrator' }));
   const dialog = screen.getByRole('dialog', { name: 'Edit role' });
-  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(30);
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(31);
   expect(
     within(dialog).queryByRole('checkbox', {
       name: 'Manage correction permissions',

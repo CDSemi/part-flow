@@ -3,8 +3,8 @@
 > **Language:** English is the source of truth. [Tiếng Việt](./OPERATIONS_RUNBOOK.vi.md).
 
 This runbook holds the procedures for running PartFlow production once it is installed: checking that it is healthy,
-taking and testing backups, installing a new release, rolling back, running the reconciliation, handling problems and
-the routine schedule. It is written for the operator, who today is also the owner. The installation itself is in
+taking and testing backups, installing a new release, rolling back, running the reconciliation, handling problems,
+the routine schedule and the archival of Movement history. It is written for the operator, who today is also the owner. The installation itself is in
 [`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) (or [`VPS.md`](./VPS.md)), and every setting and limit of the stack is
 described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 
@@ -25,6 +25,7 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | Find what a past release did | §1 |
 | Use the short `pf` command for an installation, an update, a backup, a restore or the status | Before you run any command |
 | Delete Work Orders and Part Numbers that were entered only for testing | §10 |
+| Understand the history archive job, check or confirm an archival run, recover from a failed run, or check an archive | §11 |
 
 ## Before you run any command
 
@@ -55,10 +56,12 @@ its options.
 | `pf restore <NAME> --approved-by <owner>` | The new-instance restore of §6 into an empty database, with the owner's approval recorded in `restore.json` before `backend` starts. |
 | `pf status [--url https://<partflow-host>]` | The containers, `/api/health` and the `status` summary (§2); with `--url`, `check.sh --no-state`. |
 | `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | The preview of deleting Work Orders and Part Numbers entered only for testing; with `--confirm`, a verified manual backup and then the deletion in one transaction (§10). |
+| `pf archive` | The hourly work of the history archive job now, `archive.sh` without `--scheduled` (§11). It exports and copies archives and never deletes anything. |
 
 Conventions: a one-shot job that reads or writes the backup folder runs with `--user "$(id -u):$(id -g)"`, because
 that folder has mode 0700. `<partflow-host>` is the host name people type in the browser, `<backup-dir>` is the value
-of `PARTFLOW_BACKUP_DIR`, `<secrets-dir>` the value of `PARTFLOW_SECRETS_DIR`, `<records-dir>` the records directory
+of `PARTFLOW_BACKUP_DIR`, `<archive-dir>` the value of `PARTFLOW_ARCHIVE_DIR`, `<secrets-dir>` the value of
+`PARTFLOW_SECRETS_DIR`, `<records-dir>` the records directory
 `~/partflow-deployments`, and `<NAME>` the name of a backup. Times in reports and records are Coordinated Universal Time (UTC), and reports and records are JSON
 documents.
 
@@ -73,6 +76,8 @@ they tell you which backup belongs to which release and what was checked.
 | `<UTC>-restore-test-<NAME>/` | `restore-test.sh` | `evidence.json`, the result of the drill (§4) |
 | the folder of the release being undone | you, during rollback path 3 (§6) | `rollback.json`, `rollback-reconcile.json` |
 | `<UTC>-restore-<NAME>/` | you, during a new-instance restore (§6) | `restore.json` |
+| `archive/<UTC>/` | `archive.sh`, only for an hourly work that did something or failed (§11) | one JSON report and one log per step (`recover`, `next`, `export`, `verify`, `copy`, `status`), and `messages.log` |
+| `archive/hourly-slot` | `archive.sh --scheduled` (§11) | the hourly stamp: the minute of the last hourly work that was attempted |
 
 `record.json` holds the release (tag, commit, previous tag, image IDs), the database revisions before and after, the
 operator and the approver, the times, the pre-release backup and its verification, the migration, smoke and
@@ -128,20 +133,23 @@ It prints one line per check, `PASS|FAIL|SKIP <id> <reason>`, in this order, the
 | `disk_data` | the database volume has less than 15 % free (`--min-free-percent`) |
 | `disk_backup` | the backup folder has less than 15 % free |
 | `disk_docker` | the Docker storage (images and container logs) has less than 15 % free |
-| `disk_archive` | the archive folder has less than 15 % free; `SKIP` while no archive folder is given (`--archive-dir`) |
+| `disk_archive` | the archive folder (`PARTFLOW_ARCHIVE_DIR`) has less than 15 % free; `SKIP` while archival is not set up (the value is empty) |
 | `database` | the `status` report could not run, did not answer within 120 s, or reported a database error |
 | `schema` | `status` reports the schema as not ready |
 | `backup_age` | no published backup is found, the backup folder cannot be read, or the newest backup of any kind completed longer ago than the scheduled backup interval of Administration → Backups plus 2 hours (3 hours initially; `--max-backup-age-hours` sets another limit) |
-| `archival_proposal` | always `SKIP`: the archival of Movement history is not implemented yet |
+| `archival_proposal` | the read-only `history-archive status` reports a finding, named in the line: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable` or `copy_dir_unusable` (§11); `SKIP` while archival is not set up |
 
-- The last four lines come from one read-only `status` run. While a release holds its lock, or `release.sh` holds the
-  backup lock, they are `SKIP`. When such a lock is older than 4 hours, the run reports `FAIL database` and names the
-  lock, because a killed `release.sh` leaves it behind (§3, Backup lock and release lock).
+- The lines `database`, `schema` and `backup_age` come from one read-only `status` run, and `archival_proposal` from
+  one read-only `history-archive status` run in the `maintenance` service (§11). While a release holds its lock, or
+  `release.sh` holds the backup lock, these four lines are `SKIP`. When such a lock is older than 4 hours, the run
+  reports `FAIL database` and names the lock, because a killed `release.sh` leaves it behind (§3, Backup lock and
+  release lock).
 - Exit codes: 0 nothing to report, 1 at least one `FAIL`, 2 the check could not run; both 1 and 2 reach the
   scheduler's failure notification. An unchanged set of failures is reported again only after 6 hours
   (`--renotify-hours`); the output then says `already reported`.
 - `check.sh` keeps its state in `~/partflow-monitoring` (mode 0700), including `last-check.txt` (the lines of the last
-  run) and `growth.tsv` (the database size once a day).
+  run), `growth.tsv` (the database size once a day) and `archive-status.json` (the last `history-archive status`
+  report).
 - The `errors` check reads the log of the current `backend` container only, and Docker deletes a container's log with
   the container. After `backend` was recreated (by a release or a password change), the run adds a `NOTE errors`
   line. **Before you recreate `backend` by hand**, run
@@ -844,6 +852,9 @@ host. The two installations must never accept writes at the same time.
    time to live (TTL) beforehand, change the record, and test from the clients.
 8. Keep the old host's `backend` stopped and its data untouched until you are sure you will not go back. Never start
    it again with writes while the new host runs.
+9. Move the archive folder too (§11, Moving to a new host): the archives belong to the installation, and nothing else
+   holds them. The off-host copy folder, when one is set, stays where it is; set `PARTFLOW_ARCHIVE_COPY_DIR` on the new
+   host only when that folder can be mounted there.
 
 ## 7. Reconciliation
 
@@ -969,6 +980,7 @@ emails. No tool deletes them; remove them by hand after review (§9).
 | `check.sh`: `FAIL https host name ... not resolved (curl 6)` | The host cannot resolve its own PartFlow name: add `--resolve-to 127.0.0.1` (option A), or fix the DNS. |
 | `check.sh`: `FAIL backup_age` | The scheduled backup did not run or failed: check its task and its emails, then run a manual backup (§3). |
 | `check.sh`: `FAIL disk_...` | Database or storage pressure, below. |
+| `check.sh`: `FAIL archival_proposal`, or a failure email of the archive task | §11: the line and the email name the finding or the step. |
 | `check.sh` or `release.sh`: a lock is older than 4 hours, another release holds the lock, or `backup_lock_stale` | A killed run left its lock: §3, Backup lock and release lock. |
 | `backup_running` | A backup, or a release holding the backup lock, is running: wait and run it again. |
 | A scheduled task email says `HOME is not set` | Add `HOME=/root` at the start of the script part of the task's command ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.5). |
@@ -1123,7 +1135,8 @@ refuses and PartFlow opens first-run setup again: create a new Administrator wit
 - Space rules: a backup needs twice the newest dump plus a reserve free in the backup folder; a path 3 restore needs
   the database size plus twice the dump plus 1 GiB on the database volume (§6); a stale backup lock blocks backups
   and releases until it is removed (§3).
-- Expand the storage. The archival and purge of Movement history are planned but not implemented
+- Expand the storage. The history archive job of today only exports Movement history into archives and deletes
+  nothing (§11), so it frees no database space; the purge is planned
   ([`../IMPLEMENTATION_ROADMAP.md`](../IMPLEMENTATION_ROADMAP.md), Phase 16).
 - Run the reconciliation before reopening writes.
 
@@ -1144,10 +1157,11 @@ working examples.
 
 | When | Tasks |
 | --- | --- |
-| Every 15 minutes (automatic) | `check.sh`: health, restarts, disks, certificate, backup age and backend errors (§2). An unchanged failure is repeated every 6 hours. |
+| Every 15 minutes (automatic) | `check.sh`: health, restarts, disks, certificate, backup age, backend errors and the archival status (§2). An unchanged failure is repeated every 6 hours. |
+| Every 5 minutes (automatic) | `archive.sh --scheduled`: once an hour, at the Start minute of Administration → History archival & purge, the history archive job works on a requested run (§11). |
 | Daily | The scheduled backups (every hour) and the scheduled reconciliation at 04:00 run by themselves. Read every failure email, including those of the off-host copy; exit 4 of a backup includes a scheduled backup that fails verification. |
 | Weekly | Review the database growth (`~/partflow-monitoring/growth.tsv`) and `docker stats --no-stream`. Review failed sign-ins and refused permissions: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` and `refusal.code` tell a refused or locked sign-in, a permission refusal, `station_device_required`, `station_device_mismatch` and `csrf_rejected` apart). Check pending security updates of the host. |
-| Monthly | Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and scheduled backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
+| Monthly | Confirm the off-host copy of every archival run that waits for it (§11). Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and scheduled backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
 | Quarterly, and after a large schema change | The restore drill (§4); compare its `restore_to_ready` and `total` times with how long the factory can work without PartFlow. |
 | Before a change of the PostgreSQL image or of the host's glibc | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Before every release | Review the migrations, the rollback decision and the checks (§5); `release.sh` takes the backup. |
@@ -1180,8 +1194,8 @@ log, §2).
 
   Then check health (§2). A plain `up -d backend` does not pick up the new password, because the container is not
   recreated, and running `db-roles` while `backend` serves makes its new connections fail. For
-  `partflow_maintenance_password`, replace that file and run only the `db-roles` command: no service uses that role
-  yet, so no freeze is needed.
+  `partflow_maintenance_password`, replace that file and run only the `db-roles` command, away from the Start minute
+  of the history archive job: only that one-shot job uses the role (§11), so no freeze is needed.
 - **The owner password** (`postgres_password`): change it in the database first, then replace the file. No restart
   is needed, because only the one-shot `migrate` and `db-roles` read it.
 
@@ -1280,10 +1294,174 @@ The command refuses, deletes nothing and names each link when the data to delete
 | 1 | Refused: nothing was deleted, and with `--confirm` no backup was taken. |
 | 2 | Could not run or failed: nothing was deleted (for example the backup failed, the database could not be reached, or a table lock was not granted in time). When the database connection failed while committing, the report says `outcome_unknown`: run the preview again to see which records still exist. |
 
+## 11. History archival
+
+PartFlow moves old Movement history out of the database into archive files: this is History archival & purge
+([`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md), Administrative Archival and Purge). **The current build step exports
+and copies archives only and never deletes anything:** every run ends as `COMPLETED` with the result `EXPORT_ONLY`
+(export only), or as `NOTHING_ELIGIBLE`, `CANCELLED` or `FAILED`, and the Movement history stays in the database. The
+purge, the backup before it, the deletion and viewing requests and the automatic runs are later build steps.
+
+A user who holds the permission **Run history archival and purge** sets the retention period and the other settings,
+looks at a preview and requests a run in **Administration → History archival & purge**; the request is the approval.
+The web application never touches the archive folder. The **history archive job** on the host does the work.
+
+### What the archive job does
+
+A host task starts `deploy/production/archive.sh --scheduled` every 5 minutes ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md)
+§11.8). Once an hour, at the first start at or after the **Start minute** set in Administration (20 initially), it
+does the **hourly work**; every other start ends within seconds and prints `NOT_DUE`. The first start after the task
+is created only records the current hour, so the first hourly work comes at the next Start minute.
+`deploy/production/pf archive` runs the hourly work at once, whatever the time.
+
+The hourly work runs these steps in the one-shot `maintenance` service, which connects as the maintenance database role
+(`partflow_maintenance`, which may read history and write archive records but never delete) and is the only service
+that mounts the archive folder:
+
+1. `recover`: a run left `RUNNING` by a job that stopped (a restart, a power loss) becomes `FAILED`, and unfinished
+   folders of finished runs are removed from `.partial/`.
+2. `next`: the run to work on, if any.
+3. For an approved run: `export` writes the archive into `<archive-dir>/.partial/`, `verify` re-reads every file,
+   compares it with the database and publishes the folder `<archive-dir>/run-<id>-<UTC time>/`, and `copy` copies it to
+   the off-host copy folder and checks the copy (The off-host copy, below). With nothing eligible, the run ends as
+   `NOTHING_ELIGIBLE` after the export.
+4. For a run that waits for its copy: `copy` again, which completes it once the copy is made or confirmed.
+5. `status`: the open run, the last finished run and the free space, for the monitoring.
+
+A first large run can take long; the next starts then wait. A changed Start minute applies from the next hourly
+work.
+
+**Exit codes of `archive.sh`.** The host task's failure email is the alert. On success it prints one line:
+`NOT_DUE`, `DEFERRED archive_running` (the previous start still works on its hourly work), or
+`ARCHIVE <outcome> <run> <state>`, for example `ARCHIVE completed 3 COMPLETED`.
+
+| Exit | Meaning | What to do |
+| --- | --- | --- |
+| 0 | Done, or nothing was due. | Nothing. |
+| 1 | Refused, nothing changed: a release runs, another `archive.sh` holds the archive lock, or another history-archive command runs. | Nothing: the next hour's start tries again. Repeated refusals: Locks, below. |
+| 2 | Could not run: the configuration, Docker or the database, or a step whose outcome is unknown. | Read the email; fix the cause. A run left `RUNNING` is failed by the next start's `recover`. |
+| 3 | A run failed: it is now `FAILED`. | A failed run, below. |
+
+A scheduled start reports a refusal or a failure once for its hour, never at every 5-minute start. The reports of an
+hourly work that did something or failed are in `<records-dir>/archive/<UTC>/` (§1).
+
+**Locks.** `archive.sh` holds `<records-dir>/.archive.lock` (its file `owner` names the host, the process id (pid),
+the start time, `archive.sh`, the kernel's boot id and the process's start time as the kernel counts it) only during the hourly work, never while a run merely waits for its copy
+confirmation and never for a start that only checks the time. It refuses while a release runs
+(`<records-dir>/.release.lock`), and `release.sh` refuses, changing nothing, while the archive lock is held: start the
+release again a few minutes later. Releases are best started a few minutes after the full hour and well before the
+Start minute. While the lock's owner still runs, a scheduled start ends with `DEFERRED archive_running` (exit 0) and
+a manual start (`pf archive`) is refused. A lock whose owner provably no longer exists is removed by the next `archive.sh` automatically: same host, no
+`maintenance` container running, and either its pid is gone, or the host restarted since (another boot id), or the pid
+now belongs to another process (another start time). `release.sh` ignores such a lock by the same rule. The lock is
+first renamed, so that of two starts only one goes on. An owner file without the boot id and start time (written by an
+earlier `archive.sh`), or a host without `/proc`, is judged by the pid alone. When a refusal says that the lock cannot
+be checked, or when scheduled starts keep printing `DEFERRED` although no archive job runs, check and remove it by
+hand:
+
+```sh
+cat ~/partflow-deployments/.archive.lock/owner
+ps -ef | grep '[a]rchive\.sh'                        # must print nothing
+docker ps --filter label=com.docker.compose.service=maintenance   # must list no container
+rm -r ~/partflow-deployments/.archive.lock
+```
+
+### Checking a run
+
+- **Administration → History archival & purge** lists every run with its state, its counts and, once exported, the
+  archive name and the manifest SHA-256.
+- `check.sh` prints the line `archival_proposal` (§2): `PASS` with the open run, the last finished run and the free
+  space, or `FAIL` naming each finding: `copy_confirmation_overdue` (a run has waited for its copy confirmation
+  longer than the setting **Report a waiting run after**), `last_run_failed` (the newest finished run is `FAILED`), `archive_dir_unusable` (the
+  archive folder is missing or not writable) or `copy_dir_unusable` (the copy folder is set but not mounted, missing,
+  not writable or on the archive folder's own file system).
+- The full report, read-only:
+
+  ```sh
+  $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status
+  ```
+
+| State | Meaning |
+| --- | --- |
+| `APPROVED` | Requested in Administration; the next hourly work exports it. It can still be cancelled. |
+| `RUNNING` | The job exports, verifies or copies it. It cannot be cancelled. |
+| `WAITING_FOR_COPY` | Verified and published; it waits for its off-host copy or a confirmation. It can be cancelled. |
+| `COMPLETED` | Copied off the host, or the copy was confirmed. The result is `EXPORT_ONLY`: nothing was deleted. |
+| `NOTHING_ELIGIBLE` | Nothing was eligible at its cutoff when the export started. |
+| `CANCELLED` | Cancelled in Administration. A published archive folder stays. |
+| `FAILED` | A check failed; the reason is shown. Nothing was deleted. |
+
+### The off-host copy and its confirmation
+
+An archive that stays on the host is lost with the host, so every run copies its archive off the host before it
+completes. Two ways exist:
+
+- **With a copy folder** (`PARTFLOW_ARCHIVE_COPY_DIR`, [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1): a folder on another
+  device, such as a network share or a USB disk mounted on the host. The job copies the archive there, re-reads the
+  copy, checks every SHA-256 and completes the run, unattended. `archive.sh` mounts the copy folder only while it
+  exists, is writable, and lies on a file system that is neither the archive folder's nor the host's root file system
+  `/`. It checks this again before every step, so a disk or share that drops out during a long export is noticed before
+  the copy, and the mount never creates a missing folder. When a disk or share is not mounted, its path is an empty
+  folder on whichever file system holds the mount folder, often `/`; the job then copies nothing, says why in its
+  output, and the run waits. Once the folder is available again, the next hourly work copies the archive.
+- **Without a copy folder**, the run waits in `WAITING_FOR_COPY`:
+  1. Copy the folder `<archive-dir>/<archive name>` off the host. On the NAS, the archive folder is part of the
+     Hyper Backup task ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.3): wait until its next successful run. Otherwise
+     copy it with `scp -r` or to a USB disk.
+  2. Check the copy where it is now (Checking an archive, below).
+  3. In Administration → History archival & purge, compare the manifest SHA-256 shown for the run with the copy's
+     (`sha256sum manifest.json`), then choose **Confirm copy…** on the run, tick **The archive folder is copied
+     off the server** and choose **Confirm copy**.
+  4. The next hourly work completes the run (`COMPLETED`).
+
+A run that waits for a confirmation longer than the setting **Report a waiting run after** of Administration
+(7 days initially) makes
+`check.sh` report `FAIL archival_proposal copy_confirmation_overdue`. A waiting run never blocks a release.
+
+### A failed run
+
+A run becomes `FAILED` when a check fails: for example the cutoff became newer than the shortest allowed period, the
+counts exceed the preview, the files differ from the database, the published folder changed or vanished, or the job
+stopped while the run was `RUNNING`. `archive.sh` then exits 3 once, and `check.sh` reports `last_run_failed` until a
+later run finishes.
+
+1. Read the reason: in Administration, in the failure email, or in `<records-dir>/archive/<UTC>/` (the step's
+   `.json` and `.log`).
+2. Fix the cause, for example free space in the archive folder, or mount the copy folder.
+3. Request a new run in Administration. A failed run is never resumed; the new run writes a new archive folder.
+
+Nothing was deleted. A folder that a failed run already published stays as it is; keep it or remove it after review.
+`recover` removes the unfinished folders under `.partial/` of finished runs and keeps any folder whose name belongs to
+no run; such a folder is named in the output: review and remove it by hand. Never change or remove a published folder
+of a `COMPLETED` run.
+
+### Checking an archive
+
+Each archive folder holds `movements.jsonl.gz`, `flows.jsonl.gz`, `lineage.jsonl.gz`, `assigned_routes.jsonl.gz`,
+`context.json`, `manifest.json`, `README.txt` and `SHA256SUMS`. Standard tools alone check it, wherever the folder is
+(the archive folder, the copy folder or a restored copy):
+
+```sh
+cd <archive-dir>/run-<id>-<UTC time>
+sha256sum -c SHA256SUMS
+```
+
+Every line must end with `OK`. The SHA-256 of `manifest.json` (`sha256sum manifest.json`) is the manifest SHA-256 that
+Administration shows. The files read with `zcat` and `jq`; `README.txt` describes them. Archived history is never
+imported back into its live tables.
+
+### Moving to a new host
+
+The archive folder belongs to the installation: no backup of the database holds the archives. When PartFlow moves to
+another host (§6, Moving to another host), copy the whole archive folder to the new host, keep its owner and mode
+0700, and set `PARTFLOW_ARCHIVE_DIR` there before the first archival run. Create the history archive task on the new
+host ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8), and remove it on the old host.
+
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
+| 2026-11-17 | uncommitted | §11 and the `pf` table: the history archive job (`archive.sh`, `pf archive`), which exports and copies archives and never deletes anything; §1, §2, §6, §8 and §9 for its records, check lines, move, problems and schedule. |
 | 2026-11-17 | uncommitted | The recovery command refuses a password that breaks the password rules, and the sign-in settings moved to Administration → Security. |
 | 2026-11-17 | `01ce427` | §10 and the `pf` table: `pf delete-permanently` deletes Work Orders and Part Numbers entered only for testing, after a preview and a verified backup. |
 | 2026-11-17 | `1fc96e1` | Common problems and Sign-in and user accounts: a lost passkey, and a reset that deletes the passkeys too. |

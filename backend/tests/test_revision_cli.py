@@ -33,7 +33,7 @@ from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0038_phase17_passkeys"
+_PREVIOUS = "0039_security_settings"
 _ALL = schema_revision.pending_revisions(None)
 
 

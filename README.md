@@ -72,8 +72,8 @@ backend. In user terms:
   users, roles and permissions, sign-in settings, Production Board display
   settings and the Due Soon policy.
 
-Not available yet: archival and purge of old Movement history (the retention
-period can be stored but nothing is archived or purged), and the Scan behavior
+Not available yet: the purge of old Movement history (archival runs export it
+to checked archive files but delete nothing yet), and the Scan behavior
 settings in Administration. The full implementation state is in
 [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md).
 
@@ -260,7 +260,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0038_phase17_passkeys`):
+current head, `0040_phase16_history_archive`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -450,7 +450,7 @@ Options: `--check ID` (repeatable, `a` to `j`), `--statement-timeout SECONDS`
 `0` clean, `1` mismatch, `2` could not run. The exit status counts only when the
 report is one complete JSON document whose `exit_code` equals it; an empty or
 unparseable report means it could not run. Check (g) reports `not_applicable`
-until Movement-history archival exists, and check (h) reports `not_applicable`
+until the purge of Movement-history archival exists, and check (h) reports `not_applicable`
 on a database without the PartFlow database roles, which includes the
 development stack. Do not run a migration while it runs. The checks, the
 production form and the operating rules are in
@@ -544,9 +544,13 @@ The pytest suite holds three kinds of tests:
   `0036_phase17_outgoing_mail`, the users' email addresses and the outgoing
   mail server; `tests/test_phase17_two_step_schema.py` covers
   `0037_phase17_two_step`, the schema of two-step sign-in;
-  `tests/test_phase17_passkeys_schema.py` covers the single head
-  `0038_phase17_passkeys`, the schema of passkeys, and the parity between the
-  models and the migrations.
+  `tests/test_phase17_passkeys_schema.py` covers `0038_phase17_passkeys`, the
+  schema of passkeys; `tests/test_security_settings_schema.py` covers
+  `0039_security_settings`, the password rules and Remember me;
+  `tests/test_history_archive_schema.py` covers the single head
+  `0040_phase16_history_archive`, the runs and carry-forward records of
+  history archival with their guards, and the parity between the models and
+  the migrations.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -773,7 +777,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | The migration head is `0038_phase17_passkeys`, covered by `tests/test_phase17_passkeys_schema.py`. |
+| 2026-11-17 | uncommitted | The migration head is `0040_phase16_history_archive`, covered by `tests/test_history_archive_schema.py`; archival runs export old Movement history without deleting it. |
+| 2026-11-17 | `1fc96e1` | The migration head is `0038_phase17_passkeys`, covered by `tests/test_phase17_passkeys_schema.py`. |
 | 2026-11-17 | `aa6287d` | The migration head is `0037_phase17_two_step`, covered by `tests/test_phase17_two_step_schema.py`. |
 | 2026-11-16 | `252f678` | The migration head is `0036_phase17_outgoing_mail`, covered by `tests/test_phase17_outgoing_mail_schema.py`. |
 | 2026-11-16 | `c1f042b` | The migration head is `0035_phase16_backup_policy`, covered by `tests/test_phase16_backup_policy_schema.py`. |

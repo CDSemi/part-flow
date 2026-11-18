@@ -1,0 +1,264 @@
+"""History archival endpoints (Phase 16, history archival design B; build step 1).
+
+HTTP surface of the runs of Administration → History archival & purge; its
+settings are ``/api/policies/data-retention`` (``app.api.policies``). Routes
+stay thin: request schemas validate shape only (``extra="forbid"``), the
+Application layer (``app.application.history_archive``) owns every rule,
+audit row and transaction, and the central handlers in ``app.api.errors``
+translate typed failures (404 unknown run, 409 conflict, 422 invalid).
+
+- ``GET /history-archive/preview?cutoff_date=YYYY-MM-DD`` — what a run would
+  archive at the cutoff (the start of that site-calendar day; by default the
+  newest the retention period allows): components, flows, Movements, their
+  date range and an estimated archive size. Read-only, within the preview
+  time limit (409 when it runs out, when no retention period is set);
+  422 for a cutoff newer than allowed.
+- ``GET /history-archive/runs?limit=N`` — the newest runs first (default
+  50, 1-500).
+- ``POST /history-archive/runs`` — ``{"reason": text, "cutoff_date":
+  date | null}``: request a run (the request is the approval); its preview
+  is recomputed and stored; 201 with the run. 409 while another run is
+  open or when nothing is eligible.
+- ``POST /history-archive/runs/{run_id}/cancel`` — cancel an ``APPROVED`` or
+  ``WAITING_FOR_COPY`` run (a cancelled run answers unchanged).
+- ``POST /history-archive/runs/{run_id}/copy-confirmation`` —
+  ``{"manifest_sha256": hex}``: confirm the off-host copy of a
+  ``WAITING_FOR_COPY`` run, against the manifest SHA-256 shown.
+
+Access: the run list needs a signed-in User (every Administration read);
+the preview and every change need ``RUN_HISTORY_ARCHIVAL_AND_PURGE``, and
+each audit row names the signed-in User.
+"""
+
+import datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
+
+from app.api.authorization import RequirePermission, SignedInDep
+from app.api.dependencies import SessionDep
+from app.application import history_archive
+from app.application.authentication import Principal
+from app.application.history_archive import RunUser, RunView
+from app.core.config import get_settings
+from app.domain.enums import Permission
+from app.infrastructure.models import HistoryArchiveRun
+
+router = APIRouter(prefix="/api")
+
+HistoryArchiveManagerDep = Annotated[
+    Principal, Depends(RequirePermission(Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE))
+]
+
+
+class PreviewResponse(BaseModel):
+    cutoff_date: datetime.date
+    cutoff: datetime.datetime
+    latest_cutoff_date: datetime.date
+    site_timezone: str
+    components: int
+    flows: int
+    movements: int
+    first_occurred_at: datetime.datetime | None
+    last_occurred_at: datetime.datetime | None
+    estimated_archive_bytes: int
+    duration_ms: int
+    time_limit_seconds: int
+
+
+class UserRef(BaseModel):
+    user_id: int
+    display_name: str
+
+
+class RunPreview(BaseModel):
+    components: int
+    flows: int
+    movements: int
+    first_occurred_at: datetime.datetime | None
+    last_occurred_at: datetime.datetime | None
+    estimated_archive_bytes: int
+
+
+class RunExport(BaseModel):
+    components: int
+    flows: int
+    movements: int
+    lineage_edges: int
+    assigned_routes: int
+
+
+class RunSkips(BaseModel):
+    components: int
+    flows: int
+
+
+class RunResponse(BaseModel):
+    id: int
+    state: str
+    cutoff: datetime.datetime
+    cutoff_date: datetime.date
+    groups: list[str]
+    reason: str
+    requested_by: UserRef
+    requested_at: datetime.datetime
+    preview: RunPreview
+    started_at: datetime.datetime | None
+    archive_name: str | None
+    exported_at: datetime.datetime | None
+    exported: RunExport | None
+    archive_bytes: int | None
+    manifest_sha256: str | None
+    verified_at: datetime.datetime | None
+    skipped: RunSkips | None
+    copied_at: datetime.datetime | None
+    copy_confirmed_at: datetime.datetime | None
+    copy_confirmed_by: UserRef | None
+    cancelled_by: UserRef | None
+    finished_at: datetime.datetime | None
+    result: str | None
+    failure_reason: str | None
+
+
+class RunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    # The site-calendar day whose start is the cutoff; null = the newest allowed.
+    cutoff_date: datetime.date | None = None
+
+
+class CopyConfirmationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    manifest_sha256: str
+
+
+def _user(value: RunUser | None) -> UserRef | None:
+    return (
+        None if value is None else UserRef(user_id=value.user_id, display_name=value.display_name)
+    )
+
+
+def _run_response(view: RunView) -> RunResponse:
+    run = view.run
+    exported = (
+        None
+        if run.exported_at is None
+        else RunExport(
+            components=run.exported_components or 0,
+            flows=run.exported_flows or 0,
+            movements=run.exported_movements or 0,
+            lineage_edges=run.exported_lineage_edges or 0,
+            assigned_routes=run.exported_assigned_routes or 0,
+        )
+    )
+    skipped = (
+        None
+        if run.verified_at is None
+        else RunSkips(components=run.skipped_components or 0, flows=run.skipped_flows or 0)
+    )
+    requested_by = _user(view.requested_by)
+    assert requested_by is not None
+    return RunResponse(
+        id=run.id,
+        state=run.state,
+        cutoff=run.cutoff,
+        cutoff_date=history_archive.site_date_of(run.cutoff, history_archive.site_zone()),
+        groups=[history_archive.GROUP_MOVEMENT_HISTORY],
+        reason=run.reason,
+        requested_by=requested_by,
+        requested_at=run.requested_at,
+        preview=RunPreview(
+            components=run.preview_components,
+            flows=run.preview_flows,
+            movements=run.preview_movements,
+            first_occurred_at=run.preview_first_occurred_at,
+            last_occurred_at=run.preview_last_occurred_at,
+            estimated_archive_bytes=run.preview_archive_bytes,
+        ),
+        started_at=run.started_at,
+        archive_name=run.archive_name,
+        exported_at=run.exported_at,
+        exported=exported,
+        archive_bytes=run.archive_bytes,
+        manifest_sha256=run.manifest_sha256,
+        verified_at=run.verified_at,
+        skipped=skipped,
+        copied_at=run.copied_at,
+        copy_confirmed_at=run.copy_confirmed_at,
+        copy_confirmed_by=_user(view.copy_confirmed_by),
+        cancelled_by=_user(view.cancelled_by),
+        finished_at=run.finished_at,
+        result=run.result,
+        failure_reason=run.failure_reason,
+    )
+
+
+def _answer(session: Session, run: HistoryArchiveRun) -> RunResponse:
+    return _run_response(history_archive.run_view(session, run))
+
+
+@router.get("/history-archive/preview")
+def get_preview(
+    principal: HistoryArchiveManagerDep,
+    session: SessionDep,
+    cutoff_date: Annotated[datetime.date | None, Query()] = None,
+) -> PreviewResponse:
+    result = history_archive.preview(session, cutoff_date)
+    return PreviewResponse(
+        cutoff_date=result.cutoff.day,
+        cutoff=result.cutoff.instant,
+        latest_cutoff_date=result.latest_cutoff_date,
+        site_timezone=get_settings().site_timezone,
+        components=result.counts.components,
+        flows=result.counts.flows,
+        movements=result.counts.movements,
+        first_occurred_at=result.counts.first_occurred_at,
+        last_occurred_at=result.counts.last_occurred_at,
+        estimated_archive_bytes=result.counts.estimated_archive_bytes,
+        duration_ms=result.duration_ms,
+        time_limit_seconds=result.time_limit_seconds,
+    )
+
+
+@router.get("/history-archive/runs")
+def get_runs(
+    principal: SignedInDep,
+    session: SessionDep,
+    limit: Annotated[int, Query()] = history_archive.DEFAULT_RUN_LIMIT,
+) -> list[RunResponse]:
+    return [_run_response(view) for view in history_archive.list_runs(session, limit=limit)]
+
+
+@router.post("/history-archive/runs", status_code=201)
+def post_run(
+    principal: HistoryArchiveManagerDep, body: RunRequest, session: SessionDep
+) -> RunResponse:
+    run = history_archive.request_run(
+        session, reason=body.reason, cutoff_date=body.cutoff_date, actor_user_id=principal.user_id
+    )
+    return _answer(session, run)
+
+
+@router.post("/history-archive/runs/{run_id}/cancel")
+def post_cancel(
+    principal: HistoryArchiveManagerDep, run_id: int, session: SessionDep
+) -> RunResponse:
+    run = history_archive.cancel_run(session, run_id, actor_user_id=principal.user_id)
+    return _answer(session, run)
+
+
+@router.post("/history-archive/runs/{run_id}/copy-confirmation")
+def post_copy_confirmation(
+    principal: HistoryArchiveManagerDep,
+    run_id: int,
+    body: CopyConfirmationRequest,
+    session: SessionDep,
+) -> RunResponse:
+    run = history_archive.confirm_copy(
+        session, run_id, manifest_sha256=body.manifest_sha256, actor_user_id=principal.user_id
+    )
+    return _answer(session, run)

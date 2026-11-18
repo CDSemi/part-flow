@@ -42,8 +42,9 @@ import type { AdminSection } from './sections';
 // settings are disabled previews marked Not available yet), Security
 // (every sign-in setting: User sign-in, Remember me, the password rules
 // and two-step sign-in; owner request of 2026-11-17) and History
-// archival & purge (the real retention period; archival and purge runs
-// say they are not available yet). Machine assignment is a read-only
+// archival & purge (its settings, the preview, the request of a run and
+// the runs, which export history without deleting it; Phase 16).
+// Machine assignment is a read-only
 // statement of the two Area modes. Backups (Phase 16) reads and writes
 // the real interval and retention of the scheduled backups. Scan
 // behavior shows its candidate settings as disabled previews marked Not
@@ -191,7 +192,7 @@ function SectionBody({ section }: { section: AdminSection }) {
  * functional). All Phase 3.5 minimum-environment sections, Workers,
  * Users, Roles & permissions, Worker sessions, Machine assignment
  * (statement), Correction permissions, Department display settings,
- * History archival & purge (retention period), Settings and Scan
+ * History archival & purge, Settings and Scan
  * behavior (disabled previews, Phase 17) are real above, so no section
  * reaches this today: it stays the honest fallback of a section that
  * has no defined settings, and it promises no phase.

@@ -383,7 +383,9 @@ def test_the_cli_reads_no_model() -> None:
     # `errors` is the shared refusal vocabulary the CLI renders; `policies`
     # serves `backup-policy`, the host task's read of Administration → Backups;
     # `two_step` serves `reset-two-step` (Phase 17); `permanent_deletion` serves
-    # `delete-permanently` (the interim test-data deletion, RUNBOOK §10).
+    # `delete-permanently` (the interim test-data deletion, RUNBOOK §10);
+    # `history_archive_job` serves `history-archive` (Phase 16, the host job of
+    # Movement-history archival).
     assert "authentication" in application
     assert application <= {
         "authentication",
@@ -396,6 +398,7 @@ def test_the_cli_reads_no_model() -> None:
         "system_status",
         "two_step",
         "permanent_deletion",
+        "history_archive_job",
     }
 
 
@@ -417,6 +420,7 @@ def test_help_lists_every_command(capsys: pytest.CaptureFixture[str]) -> None:
         "backup-rotate",
         "status",
         "delete-permanently",
+        "history-archive",
     ):
         assert command_name in out
 

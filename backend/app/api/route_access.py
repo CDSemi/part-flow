@@ -95,6 +95,7 @@ _MM: Final = Permission.MANAGE_MACHINES
 _MRT: Final = Permission.MANAGE_ROUTE_TEMPLATES
 _MPNM: Final = Permission.MANAGE_PART_NUMBER_MASTER
 _VPD: Final = Permission.VIEW_PRODUCTION_DATA
+_RHAP: Final = Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE
 
 # The Management views' read sets (OD-P7).
 _WO_VIEW: Final = _keys(_VPD, _MWO, _EWOD, _EWOA)
@@ -177,6 +178,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/policies/two-step"): _SIGNED_IN,
     ("GET", "/api/policies/password-rules"): _SIGNED_IN,
     ("GET", "/api/policies/remember-me"): _SIGNED_IN,
+    ("GET", "/api/history-archive/runs"): _SIGNED_IN,
     ("GET", "/api/scan-station-devices"): _SIGNED_IN,
     ("PUT", "/api/session/password"): RouteAccess(Access.SIGNED_IN, password_change_allowed=True),
     ("PUT", "/api/session/email"): _SIGNED_IN,
@@ -211,7 +213,13 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("PUT", "/api/policies/worker-sessions"): _permission(_MWSP),
     ("PUT", "/api/policies/correction-permissions"): _permission(_MCP),
     ("PUT", "/api/policies/due-soon"): _permission(_CSS),
-    ("PUT", "/api/policies/data-retention"): _permission(_CSS),
+    # History archival & purge (Phase 16, design B step 1; D7): its settings,
+    # its preview and every run action.
+    ("PUT", "/api/policies/data-retention"): _permission(_RHAP),
+    ("GET", "/api/history-archive/preview"): _permission(_RHAP),
+    ("POST", "/api/history-archive/runs"): _permission(_RHAP),
+    ("POST", "/api/history-archive/runs/{run_id}/cancel"): _permission(_RHAP),
+    ("POST", "/api/history-archive/runs/{run_id}/copy-confirmation"): _permission(_RHAP),
     ("PUT", "/api/policies/sign-in"): _permission(_CSS),
     ("PUT", "/api/policies/backups"): _permission(_CSS),
     ("PUT", "/api/policies/mail-server"): _permission(_CSS),

@@ -102,13 +102,23 @@ Commands:
   refused (nothing deleted) when the data is linked to data that stays.
   Runs as the database owner role (``app.application.permanent_deletion``).
   0 preview shown or deleted, 1 refused, 2 failed or its outcome is unknown.
+- ``history-archive (settings | recover | next | export --run N | verify
+  --run N | copy --run N | status)`` (Phase 16, history archival design B
+  step 1; ``deploy/production/archive.sh``): the host job
+  of Movement-history archival, run as the maintenance database role with
+  the archive folder in ``PARTFLOW_ARCHIVE_DIR`` and the optional off-host
+  copy folder in ``PARTFLOW_ARCHIVE_COPY_DIR``
+  (``app.application.history_archive_job``). Nothing is deleted. 0 the step
+  is done (``result`` says what happened), 1 refused (or, for ``status``, a
+  finding), 2 could not run or its outcome is unknown, 3 the run failed and
+  is now FAILED with its reason.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
 ``provision-roles``, ``apply-grants``, ``backup-manifest``, ``backup-verify``,
 ``backup-rotate``, ``backup-due``, ``backup-policy``, ``status``,
-``delete-permanently``: their JSON document); refusals and errors go to
-stderr.
+``delete-permanently``, ``history-archive``: their JSON document); refusals
+and errors go to stderr.
 """
 
 import argparse
@@ -133,6 +143,7 @@ from app.application import (
     authentication,
     backups,
     database_roles,
+    history_archive_job,
     migration,
     permanent_deletion,
     policies,
@@ -1277,6 +1288,79 @@ def _run_delete_permanently(args: argparse.Namespace) -> int:
     return report.exit_code
 
 
+_HISTORY_ARCHIVE_HELP = (
+    "The host job of Movement-history archival (deploy/production/archive.sh), run as the"
+    " maintenance database role with the archive folder in PARTFLOW_ARCHIVE_DIR and the"
+    " optional off-host copy folder in PARTFLOW_ARCHIVE_COPY_DIR. Nothing is deleted."
+)
+_HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
+    "settings": "Print what the host script needs (the Start minute of the hourly work).",
+    "recover": (
+        "Right after the host script took its lock: make a stale RUNNING run FAILED and remove"
+        " the unfinished folders of finished runs."
+    ),
+    "next": "Print the run the job must work on and what to run for it.",
+    "export": "Export an APPROVED run's archive into .partial and record what it holds.",
+    "verify": "Verify the exported archive and publish its folder.",
+    "copy": "Copy the archive off the host and finish the run, or wait for a confirmation.",
+    "status": "Report the open run, the last finished run and the archive folder's space.",
+}
+
+
+def _history_archive_engine() -> Engine | None:
+    """The CLI's engine, or None without a valid database configuration."""
+    try:
+        return _engine()
+    except (ValidationError, ArgumentError, ValueError):
+        return None
+
+
+def _run_number(value: str) -> int:
+    return _bounded_int(1, 2_147_483_647)(value)
+
+
+def _add_history_archive_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "history-archive", help=_HISTORY_ARCHIVE_HELP, description=_HISTORY_ARCHIVE_HELP
+    )
+    steps = parser.add_subparsers(dest="step", required=True)
+    for step, text in _HISTORY_ARCHIVE_COMMANDS.items():
+        step_parser = steps.add_parser(step, help=text, description=text)
+        if step in ("export", "verify", "copy"):
+            step_parser.add_argument(
+                "--run", type=_run_number, required=True, metavar="N", help="The run number."
+            )
+    parser.set_defaults(handler=_run_history_archive)
+
+
+def _run_history_archive(args: argparse.Namespace) -> int:
+    folders = history_archive_job.environment_folders()
+    engine = _history_archive_engine()
+    try:
+        if args.step == "settings":
+            report = history_archive_job.settings(engine, folders)
+        elif args.step == "recover":
+            report = history_archive_job.recover(engine, folders)
+        elif args.step == "next":
+            report = history_archive_job.next_run(engine, folders)
+        elif args.step == "export":
+            report = history_archive_job.export(engine, folders, args.run)
+        elif args.step == "verify":
+            report = history_archive_job.verify(engine, folders, args.run)
+        elif args.step == "copy":
+            report = history_archive_job.copy(engine, folders, args.run)
+        else:
+            report = history_archive_job.status(engine, folders)
+    finally:
+        if engine is not None:
+            engine.dispose()
+    _print_document(history_archive_job.job_document(report))
+    if report.error is not None and report.error.exception is not None:
+        traceback.print_exception(report.error.exception, file=sys.stderr)
+    print(history_archive_job.job_summary(report), file=sys.stderr)
+    return report.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1295,6 +1379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_backup_policy_parser(subparsers)
     _add_status_parser(subparsers)
     _add_delete_permanently_parser(subparsers)
+    _add_history_archive_parser(subparsers)
     args = parser.parse_args(argv)
     result: int = args.handler(args)
     return result

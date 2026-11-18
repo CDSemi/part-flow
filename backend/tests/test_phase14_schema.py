@@ -816,8 +816,11 @@ def test_device_migration_literals_repeat_the_model_constants() -> None:
     )
     assert isinstance(entity_check, sa.CheckConstraint)
     # The model carries the latest vocabulary since slice 6 widened it
-    # again (0032 re-creates it from exactly this literal plus its own).
-    assert str(entity_check.sqltext) == (migration._DEVICE_ENTITY_TYPES[:-1] + ", 'AssignedRoute')")
+    # again (0032 re-creates it from exactly this literal plus its own, and
+    # 0040, Phase 16 history archival, from that plus HistoryArchiveRun).
+    assert str(entity_check.sqltext) == (
+        migration._DEVICE_ENTITY_TYPES[:-1] + ", 'AssignedRoute', 'HistoryArchiveRun')"
+    )
     assert (
         migration._PREVIOUS_ENTITY_TYPES[:-1] + ", 'ScanStationDevice')"
     ) == migration._DEVICE_ENTITY_TYPES
@@ -1376,7 +1379,10 @@ def _model_check(name: str) -> str:
 def test_route_migration_literals_repeat_the_model_constants() -> None:
     migration = _load_route_migration()
     event_types = "event_type IN ({})".format(", ".join(f"'{v}'" for v in AuditEventType))
-    entity_types = "entity_type IN ({})".format(", ".join(f"'{v}'" for v in AuditEntityType))
+    # 0040 (Phase 16, history archival) appends HistoryArchiveRun.
+    entity_types = "entity_type IN ({})".format(
+        ", ".join(f"'{v}'" for v in AuditEntityType if v is not AuditEntityType.HISTORY_ARCHIVE_RUN)
+    )
     route_event_types, route_entity_types = (
         migration._ROUTE_EVENT_TYPES,
         migration._ROUTE_ENTITY_TYPES,
@@ -1384,7 +1390,9 @@ def test_route_migration_literals_repeat_the_model_constants() -> None:
     assert route_event_types == event_types
     assert route_entity_types == entity_types
     assert route_event_types == _model_check("ck_audit_events_event_type")
-    assert route_entity_types == _model_check("ck_audit_events_entity_type")
+    assert route_entity_types[:-1] + ", 'HistoryArchiveRun')" == _model_check(
+        "ck_audit_events_entity_type"
+    )
     # The downgrade restores exactly the previous vocabularies.
     assert migration._PREVIOUS_EVENT_TYPES == "event_type IN ('CREATED', 'UPDATED', 'DELETED')"
     assert migration._PREVIOUS_ENTITY_TYPES == _load_devices_migration()._DEVICE_ENTITY_TYPES

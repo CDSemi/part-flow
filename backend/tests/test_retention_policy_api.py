@@ -7,17 +7,21 @@ by the real Alembic chain (IMPLEMENTATION_ROADMAP Phase 13; PROJECT_PROFILE
 retention period is configuration"; PLAN CD3; owner default OD-18):
 
 - Administration → History archival & purge: ``GET`` / ``PUT
-  /api/policies/data-retention`` (initially ``null`` — no retention
-  period, whole months 12-1200 or ``null``, a required nullable strict
-  integer, audited as ``ApplicationPolicy`` / ``data-retention``, a
-  no-op writes nothing — no UPDATE at all — and every refusal writes
-  nothing);
+  /api/policies/data-retention`` (24 months since migration 0040 set it
+  where it was never saved — Phase 16, history archival design B §3.1 —,
+  whole months from the shortest allowed period, 12, to 1200 or ``null``,
+  a strict integer in a partial merge of the section, audited as
+  ``ApplicationPolicy`` / ``data-retention`` with the whole section as the
+  snapshot, a no-op writes nothing — no UPDATE at all — and every refusal
+  writes nothing); the section's other settings are
+  ``tests/test_history_archive_api.py``;
 - section isolation: the retention write never changes another policy
   section's values and vice versa, only the shared row ``updated_at``
   moves;
 - concurrency: the write locks the singleton first and audits the
   committed predecessor re-read under the lock;
-- no reader and no side effect: only the policy model, service and API
+- no production reader and no side effect: only the policy model, service
+  and API and the archival module (``app.application.history_archive``)
   mention the column, and saving it changes no production table.
 
 The API commits real transactions; every policy section is restored
@@ -41,6 +45,7 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import URL, make_url
 
 from alembic import command
+from app.application import policies
 from app.core.config import get_settings
 from app.main import create_app
 from tests.auth_harness import admin_of
@@ -56,6 +61,13 @@ _DUE_SOON_POLICY_PATH = "/api/policies/due-soon"
 _OTHER_SECTION_PATHS = (_SESSIONS_POLICY_PATH, _CORRECTION_POLICY_PATH, _DUE_SOON_POLICY_PATH)
 _SECTION = "data-retention"
 _KEY = "retention_period_months"
+#: The section's other settings at their defaults (migration 0040).
+_OTHER_SETTINGS = {
+    "shortest_retention_months": 12,
+    "archive_max_wait_days": 7,
+    "archive_start_minute": 20,
+    "archive_preview_seconds": 90,
+}
 
 _E_T1 = (
     "The retention period must be a whole number of months from 12 to 1200, or no retention period."
@@ -256,12 +268,19 @@ def _release(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_retention_period_is_initially_absent(client: TestClient, db_engine: Engine) -> None:
+def test_the_retention_period_starts_at_24_months(client: TestClient, db_engine: Engine) -> None:
+    """Migration 0040 set the period that was never saved, and recorded it (design §3.1)."""
     policy = _ok(admin_of(client).get(_POLICY_PATH))
-    assert set(policy) == {_KEY, "updated_at"}
-    assert policy[_KEY] is None
+    assert set(policy) == {_KEY, *_OTHER_SETTINGS, "updated_at"}
+    assert {key: policy[key] for key in _OTHER_SETTINGS} == _OTHER_SETTINGS
     assert policy["updated_at"]
-    assert _stored_row(db_engine)[_KEY] is None
+    [first, *_] = _policy_audits(db_engine, _SECTION)
+    assert (first.before_data[_KEY], first.after_data[_KEY]) == (None, 24)
+
+
+def _section(months: int | None) -> dict[str, Any]:
+    """The audited section with this retention period and the other defaults."""
+    return {_KEY: months, **_OTHER_SETTINGS}
 
 
 def test_an_effective_put_is_stored_and_audited_once(client: TestClient, db_engine: Engine) -> None:
@@ -271,7 +290,7 @@ def test_an_effective_put_is_stored_and_audited_once(client: TestClient, db_engi
 
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
-    assert tuple(rows[-1]) == ("UPDATED", _SECTION, {_KEY: None}, {_KEY: 120}, None)
+    assert tuple(rows[-1]) == ("UPDATED", _SECTION, _section(None), _section(120), None)
 
 
 def test_an_identical_put_writes_nothing(client: TestClient, db_engine: Engine) -> None:
@@ -293,7 +312,7 @@ def test_null_clears_the_period_as_an_audited_change(client: TestClient, db_engi
     assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: None}))[_KEY] is None
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
-    assert tuple(rows[-1]) == ("UPDATED", _SECTION, {_KEY: 120}, {_KEY: None}, None)
+    assert tuple(rows[-1]) == ("UPDATED", _SECTION, _section(120), _section(None), None)
 
     # Clearing again is a no-op.
     assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: None}))[_KEY] is None
@@ -308,7 +327,7 @@ def test_the_range_boundaries_are_admitted(
     assert _ok(admin_of(client).put(_POLICY_PATH, json={_KEY: months}))[_KEY] == months
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
-    assert rows[-1].after_data == {_KEY: months}
+    assert rows[-1].after_data == _section(months)
 
 
 @pytest.mark.parametrize("months", [11, 1201, 0, -12])
@@ -362,11 +381,13 @@ def test_policy_sections_never_touch_each_other(client: TestClient, db_engine: E
     retention_audits = len(_policy_audits(db_engine, _SECTION))
     _ok(admin_of(client).put(_SESSIONS_POLICY_PATH, json={"worker_session_timeout_minutes": 30}))
     after = _ok(admin_of(client).get(_POLICY_PATH))
-    assert _values(after) == {_KEY: 240}
+    assert _values(after) == _section(240)
     assert _stamp(after) > _stamp(stored)
     assert len(_policy_audits(db_engine, _SECTION)) == retention_audits
     # Each audit row carries only its own section's keys.
-    assert set(_policy_audits(db_engine, _SECTION)[-1].after_data) == {_KEY}
+    assert set(_policy_audits(db_engine, _SECTION)[-1].after_data) == set(
+        policies.HISTORY_ARCHIVE_COLUMNS
+    )
     assert set(_policy_audits(db_engine, "worker-sessions")[-1].after_data) == set(
         _SESSION_DEFAULTS
     )
@@ -398,23 +419,26 @@ def test_the_retention_write_locks_before_it_reads(client: TestClient, db_engine
     assert (row["worker_session_timeout_minutes"], row[_KEY]) == (30, 36)
     rows = _policy_audits(db_engine, _SECTION)
     assert len(rows) == before + 1
-    # The committed predecessor, re-read under the lock; only the retention key.
-    assert (rows[-1].before_data, rows[-1].after_data) == ({_KEY: 24}, {_KEY: 36})
+    # The committed predecessor, re-read under the lock; only its own section.
+    assert (rows[-1].before_data, rows[-1].after_data) == (_section(24), _section(36))
 
 
 # ---------------------------------------------------------------------------
 # T-9, T-10 — no reader, no side effect
 # ---------------------------------------------------------------------------
 
+#: The policy model, service and API that store the setting, and the one
+#: module that reads it: the archival module (history archival design §9.2).
 _RETENTION_READERS = {
     "app/infrastructure/models.py",
     "app/application/policies.py",
     "app/api/policies.py",
+    "app/application/history_archive.py",
 }
 
 
 def test_no_production_path_reads_the_retention_period() -> None:
-    """Only the policy model, service and API mention the column."""
+    """Only the policy model, service and API, and the archival module, mention the column."""
     mentions = {
         path.relative_to(_BACKEND_DIR).as_posix()
         for path in _APP_DIR.rglob("*.py")

@@ -488,11 +488,14 @@ def test_released_work_order_is_deleted_as_if_never_entered(
 
     report = _run(owner, (number,), confirm=True)
     _assert_after_deletion(builder, report, work_order_ids=[work_order_id], part_numbers=[])
+    # Every guard that refuses a delete on the touched tables; the INSERT-only
+    # scope of the maintenance role's audit rows (Phase 16) stays enabled.
     assert sorted(report.guard_triggers) == sorted(
         trigger
         for trigger in GUARD_TRIGGERS
         if GUARD_TRIGGERS[trigger].table
         in ("audit_events", "part_movements", "quantity_flow_lineage", "work_order_allocations")
+        and trigger != "trg_audit_events_maintenance_scope"
     )
     # No trace of the deleted records is left besides the one audit row.
     assert (
@@ -708,6 +711,57 @@ def test_refused_demand_line_on_the_hot_list(builder: Builder, owner: Engine) ->
     before = _fingerprint(owner)
     report = _run(owner, (number,), confirm=True)
     assert _assert_refused(owner, report, before) == ["on_hot_list"]
+
+
+def test_refused_archived_history(builder: Builder, owner: Engine) -> None:
+    """A flow whose history an archival run recorded is never deleted here (Phase 16)."""
+    s = _suffix()
+    number = f"TEST-ARCH-{s}"
+    work_order_id, (line,) = builder.work_order(number, [(f"DEL-ARCH-{s}", 3)])
+    flow = builder.release(work_order_id, line, f"DEL-ARCH-{s}", 3, planned=False)
+    with owner.begin() as connection:
+        user_id = connection.execute(sa.text("SELECT min(id) FROM users")).scalar_one()
+        run_id = connection.execute(
+            sa.text(
+                "INSERT INTO history_archive_runs (state, cutoff, reason, requested_by_user_id,"
+                " preview_components, preview_flows, preview_movements, preview_archive_bytes)"
+                " VALUES ('APPROVED', '2020-01-01T00:00:00Z', 'test', :user, 1, 1, 1, 0)"
+                " RETURNING id"
+            ),
+            {"user": user_id},
+        ).scalar_one()
+        connection.execute(
+            sa.text("SELECT set_config('partflow.archive_run_id', :id, true)"), {"id": str(run_id)}
+        )
+        connection.execute(
+            sa.text(
+                "UPDATE history_archive_runs SET state = 'RUNNING', started_at = now()"
+                " WHERE id = :id"
+            ),
+            {"id": run_id},
+        )
+        connection.execute(
+            sa.text(
+                "INSERT INTO history_archived_flows (run_id, flow_id, part_number, component_id,"
+                " flow_status, movement_count, first_movement_id, last_movement_id,"
+                " first_occurred_at, last_occurred_at, content_sha256)"
+                " SELECT :run, f.id, f.part_number, f.id, 'STOCKED', 1, 1, 1, now(), now(), :sha"
+                " FROM quantity_flows f WHERE f.id = :flow"
+            ),
+            {"run": run_id, "flow": flow, "sha": "ab" * 32},
+        )
+        connection.execute(
+            sa.text(
+                "UPDATE history_archive_runs SET state = 'FAILED', finished_at = now(),"
+                " failure_reason = 'test' WHERE id = :id"
+            ),
+            {"id": run_id},
+        )
+    before = _fingerprint(owner)
+    report = _run(owner, (number,), confirm=True)
+    assert _assert_refused(owner, report, before) == ["archived_history"]
+    assert report.plan is not None
+    assert f"archival run {run_id}" in report.plan.refusals[0].message
 
 
 def test_refused_unknown_inputs(builder: Builder, owner: Engine) -> None:

@@ -7,16 +7,17 @@ Phase 17 item 3; PROJECT_PROFILE §20) and `0034_phase17_unique_names`
 (item 4; PROJECT_PROFILE §8.4, §8.8) do:
 
 - the earlier cases run against their own revision; the head boundary
-  and the models parity moved to `tests/test_security_settings_schema.py`
-  with `0039_security_settings`;
+  and the models parity moved to `tests/test_history_archive_schema.py`
+  with `0040_phase16_history_archive`;
 - 0033: the migration's permission literal is exactly the 0028
   vocabulary;
 - a fresh install seeds `Super User` with every key of
-  `app.domain.enums.Permission` and no audit row, and still at head: a
-  later revision that adds a key must grant it to every role that holds
-  every other key, and this case fails until it does;
+  `app.domain.enums.Permission`, and still at head: a later revision that
+  adds a key must grant it to every role that holds every other key, and
+  this case fails until it does; the seed has no audit row, and a later
+  revision records its grant as one `Role` `UPDATED` row per role (0040);
 - a role already named Super User in any letter case is completed, not
-  duplicated: one role, same id and name, every key, one `Role`
+  duplicated: one role, same id and name, every key 0033 knew, one `Role`
   `UPDATED` audit row without an actor and with the migration's
   metadata; the exactly cased name is chosen over another case, and a
   role that already holds every key is left untouched;
@@ -67,6 +68,11 @@ _TEMPLATE_DATABASE = "partflow_test_phase17_template"
 _SUPER_USER_TEMPLATE_DATABASE = "partflow_test_phase17_super_user_template"
 _ROLE_NAME = "Super User"
 _EVERY_KEY = {permission.value for permission in Permission}
+# Migration 0040 (Phase 16, history archival) adds RUN_HISTORY_ARCHIVAL_AND_PURGE: the
+# 0033 cases expect the keys 0033 knew.
+_HISTORY_ARCHIVE_REVISION = "0040_phase16_history_archive"
+_LATER_KEYS = {Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE.value}
+_KEYS_0033 = _EVERY_KEY - _LATER_KEYS
 _METADATA = {"source": "migration", "revision": _SUPER_USER_REVISION}
 
 
@@ -230,16 +236,23 @@ def test_the_permission_literal_is_the_0028_vocabulary() -> None:
 
 
 def test_a_fresh_install_seeds_super_user_with_every_key(head_engine: Engine) -> None:
-    """The fourth seeded role holds every permission key, without an audit
-    row — and still does at head. A later revision that adds a key must
-    grant it, in the same transaction, to every role that holds every
-    other key (PROJECT_PROFILE §20); until it does, this case fails."""
+    """The fourth seeded role holds every permission key — and still does at
+    head. A later revision that adds a key must grant it, in the same
+    transaction, to every role that holds every other key (PROJECT_PROFILE
+    §20); until it does, this case fails."""
     with head_engine.connect() as connection:
         assert _version(connection) == _HEAD_REVISION
         grants = _grants(connection)
         assert set(grants) == {"Administrator", "Manager", "Operator", _ROLE_NAME}
         assert grants[_ROLE_NAME] == _EVERY_KEY
-        assert _role_audit(connection) == []
+        # The seed has no audit row; a later revision's new key is recorded as
+        # a role change (0040 adds one key to Super User and Administrator).
+        audits = _role_audit(connection)
+        assert [row["after_data"]["name"] for row in audits] == ["Administrator", _ROLE_NAME]
+        for row in audits:
+            assert row["metadata"] == {"source": "migration", "revision": _HISTORY_ARCHIVE_REVISION}
+            added = set(row["after_data"]["permissions"]) - set(row["before_data"]["permissions"])
+            assert added == _LATER_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +274,7 @@ def test_an_existing_super_user_role_is_completed_not_duplicated(
         with engine.connect() as connection:
             grants = _grants(connection)
             assert [role for role in grants if role.lower() == "super user"] == [name]
-            assert grants[name] == _EVERY_KEY
+            assert grants[name] == _KEYS_0033
             assert (
                 connection.execute(
                     sa.text("SELECT id FROM roles WHERE name = :name"), {"name": name}
@@ -275,7 +288,7 @@ def test_an_existing_super_user_role_is_completed_not_duplicated(
                     "entity_id": str(role_id),
                     "actor_user_id": None,
                     "before_data": {"name": name, "permissions": sorted(held)},
-                    "after_data": {"name": name, "permissions": sorted(_EVERY_KEY)},
+                    "after_data": {"name": name, "permissions": sorted(_KEYS_0033)},
                     "metadata": _METADATA,
                 }
             ]
@@ -293,7 +306,7 @@ def test_the_exactly_cased_name_is_chosen_over_another_case(previous_database: U
         command.upgrade(_alembic_config(previous_database), _SUPER_USER_REVISION)
         with engine.connect() as connection:
             grants = _grants(connection)
-            assert grants[_ROLE_NAME] == _EVERY_KEY
+            assert grants[_ROLE_NAME] == _KEYS_0033
             assert grants["SUPER USER"] == {"EXPORT_REPORTS"}
             assert [row["entity_id"] for row in _role_audit(connection)] == [str(role_id)]
     finally:
@@ -304,11 +317,11 @@ def test_a_role_that_holds_every_key_is_left_untouched(previous_database: URL) -
     engine = create_engine(previous_database)
     try:
         with engine.begin() as connection:
-            role_id = _insert_role(connection, _ROLE_NAME, sorted(_EVERY_KEY))
+            role_id = _insert_role(connection, _ROLE_NAME, sorted(_KEYS_0033))
             before = _updated_at(connection, role_id)
         command.upgrade(_alembic_config(previous_database), _SUPER_USER_REVISION)
         with engine.connect() as connection:
-            assert _grants(connection)[_ROLE_NAME] == _EVERY_KEY
+            assert _grants(connection)[_ROLE_NAME] == _KEYS_0033
             assert _updated_at(connection, role_id) == before
             assert _role_audit(connection) == []
     finally:
@@ -330,13 +343,13 @@ def test_the_downgrade_keeps_the_role_and_upgrading_again_adds_nothing(
         command.downgrade(config, _PREVIOUS_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _PREVIOUS_REVISION
-            assert _grants(connection)[_ROLE_NAME] == _EVERY_KEY
+            assert _grants(connection)[_ROLE_NAME] == _KEYS_0033
         command.upgrade(config, _SUPER_USER_REVISION)
         with engine.connect() as connection:
             assert _version(connection) == _SUPER_USER_REVISION
             grants = _grants(connection)
             assert [role for role in grants if role.lower() == "super user"] == [_ROLE_NAME]
-            assert grants[_ROLE_NAME] == _EVERY_KEY
+            assert grants[_ROLE_NAME] == _KEYS_0033
             assert _role_audit(connection) == []
     finally:
         engine.dispose()

@@ -5,8 +5,9 @@ PostgreSQL databases (created and dropped by the fixtures), then verifies
 the schema of the password rules and Remember me (owner request of
 2026-11-17):
 
-- exact head boundary: ``0039_security_settings`` is the single head, and
-  the models match the schema migrated to it;
+- the cases run against this revision inside the current chain; the head
+  boundary and the models parity moved to
+  ``tests/test_history_archive_schema.py`` with ``0040_phase16_history_archive``;
 - the migration's literals equal the model constants and the section ids;
 - a fresh install holds today's behavior — 6 to 256 characters, no
   composition rule, Remember me not offered (30 days when it is) — and every
@@ -28,14 +29,13 @@ from types import ModuleType
 import pytest
 import sqlalchemy as sa
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.application import policies
-from app.infrastructure import models
+from app.infrastructure import models, schema_revision
 
 # Schema assertions: owner connections in the application-role test mode
 # (Phase 16 slice 4).
@@ -44,6 +44,7 @@ pytestmark = pytest.mark.database_owner
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PREVIOUS_REVISION = "0038_phase17_passkeys"
 _HEAD_REVISION = "0039_security_settings"
+_CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _BACKEND_DIR / "alembic" / "versions" / "20261117_0039_security_settings.py"
 _HEAD_TEMPLATE_DATABASE = "partflow_test_security_settings_template"
 _POLICY_COLUMNS = (
@@ -161,21 +162,6 @@ def head_engine(head_database: URL) -> Iterator[Engine]:
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_has_a_single_head() -> None:
-    config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-
-
-def test_models_metadata_matches_the_migrated_schema(head_engine: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head_engine.connect() as conn:
-        context = MigrationContext.configure(conn)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
-
-
 def test_the_migration_literals_match_the_model() -> None:
     migration = _load_migration()
     assert migration.revision == _HEAD_REVISION
@@ -268,7 +254,7 @@ def test_the_downgrade_restores_the_previous_schema(
     assert "remembered" not in _columns(head_engine, "user_sessions")
     command.upgrade(_alembic_config(head_database), "head")
     with head_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
     assert set(_POLICY_COLUMNS) <= _columns(head_engine, "application_policy")
 
 
@@ -309,5 +295,5 @@ def test_the_downgrade_refuses_while_security_data_exists(
     with pytest.raises(DBAPIError, match="Security settings data exists"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head_engine.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
     assert set(_POLICY_COLUMNS) <= _columns(head_engine, "application_policy")
