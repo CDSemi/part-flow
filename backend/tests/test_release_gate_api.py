@@ -6,24 +6,31 @@ unknown paths — before routing, before CSRF and before any body read:
 ``X-PartFlow-Release`` differs from ``RELEASE_TAG``; 503 ``not_ready``
 when the schema does not match this release or its readiness cannot be
 confirmed. A refusal writes nothing: a row count of every table is
-compared before and after. Runs against the development database (at
-head); a schema mismatch is simulated by replacing the revision read.
+compared before and after. Runs against the module's own database at
+head (``partflow_test_release_gate``, dropped afterwards; the development
+database is never touched); a schema mismatch is simulated by replacing
+the revision read.
 """
 
 import asyncio
+import os
 import re
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.engine import URL, make_url
 from starlette.routing import BaseRoute
 from starlette.types import Message
 
+from alembic import command
 from app.api.release_gate import ReleaseGate, ReleaseGateMiddleware
 from app.application.readiness import ReadinessMonitor
 from app.core.config import get_settings
@@ -31,8 +38,12 @@ from app.infrastructure import schema_revision
 from app.infrastructure.database import DatabaseUnavailableError
 from app.infrastructure.models import Base
 from app.main import create_app
-from tests.auth_harness import CSRF_HEADERS, admin_of, anonymous_client, engine_of
+from tests.auth_harness import CSRF_HEADERS, admin_of, anonymous_client
+from tests.conftest import owner_connection
 
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_TEST_DATABASE = "partflow_test_release_gate"
+_DB_URL_ENV = "DATABASE_URL"
 _RELEASE = "v9.9.9-test"
 _RELEASE_MISMATCH = {
     "detail": (
@@ -58,6 +69,44 @@ _CANNOT_CONFIRM = {
 }
 _UNSAFE = ("POST", "PUT", "PATCH", "DELETE")
 _SIGN_IN = {"login_name": "release-gate-nobody", "password": "not-a-password"}
+
+
+def _alembic_config(database_url: URL) -> Config:
+    config = Config(str(_BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(_BACKEND_DIR / "alembic"))
+    # ConfigParser interpolation reserves "%": escape the percent-encoded URL.
+    url = database_url.render_as_string(hide_password=False).replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", url)
+    return config
+
+
+@pytest.fixture(scope="module")
+def gate_database_url() -> Iterator[URL]:
+    admin_engine = create_engine(make_url(os.environ[_DB_URL_ENV]), isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as connection:
+        connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{_TEST_DATABASE}" WITH (FORCE)'))
+        connection.execute(sa.text(f'CREATE DATABASE "{_TEST_DATABASE}"'))
+    url = make_url(os.environ[_DB_URL_ENV]).set(database=_TEST_DATABASE)
+    command.upgrade(_alembic_config(url), "head")
+    yield url
+    with admin_engine.connect() as connection:
+        connection.execute(sa.text(f'DROP DATABASE IF EXISTS "{_TEST_DATABASE}" WITH (FORCE)'))
+    admin_engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def gate_database(gate_database_url: URL, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every ``create_app`` of this module connects to the module's own database.
+
+    The harness identities (``admin_of``) are real rows: before this
+    fixture, every run left a ``test-role-…`` role and its User in the
+    development database.
+    """
+    monkeypatch.setenv(_DB_URL_ENV, gate_database_url.render_as_string(hide_password=False))
+    get_settings.cache_clear()
+    yield
+    # Before monkeypatch restores the environment: the next read sees it.
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -99,9 +148,10 @@ def _unsafe_routes(client: TestClient) -> list[tuple[str, str]]:
     return sorted(found)
 
 
-def _row_counts(engine: Engine) -> dict[str, int]:
+def _row_counts(database_url: URL) -> dict[str, int]:
+    """Every table's row count, read as the owner (in app mode too)."""
     tables = [table.name for table in Base.metadata.sorted_tables] + ["alembic_version"]
-    with engine.connect() as connection:
+    with owner_connection(database_url) as connection:
         return {
             table: int(connection.execute(sa.text(f'SELECT count(*) FROM "{table}"')).scalar_one())
             for table in tables
@@ -115,30 +165,30 @@ def _assert_refused(response: Any, status: int, body: dict[str, object], context
 
 
 @pytest.mark.usefixtures("mismatch")
-def test_every_unsafe_route_is_refused_on_a_schema_mismatch() -> None:
+def test_every_unsafe_route_is_refused_on_a_schema_mismatch(gate_database_url: URL) -> None:
     """G-1."""
     with TestClient(create_app()) as client:
         admin = admin_of(client)
-        before = _row_counts(engine_of(client))
+        before = _row_counts(gate_database_url)
         for method, path in _unsafe_routes(client):
             response = admin.request(method, path, json={})
             _assert_refused(response, 503, _NOT_READY, (method, path))
-        assert _row_counts(engine_of(client)) == before
+        assert _row_counts(gate_database_url) == before
         assert admin.get("/api/session").status_code == 200
         assert client.get("/api/health/live").status_code == 200
 
 
 @pytest.mark.usefixtures("enforcing")
-def test_every_unsafe_route_is_refused_from_another_release() -> None:
+def test_every_unsafe_route_is_refused_from_another_release(gate_database_url: URL) -> None:
     """G-2."""
     with TestClient(create_app()) as client:
         admin = admin_of(client)
-        before = _row_counts(engine_of(client))
+        before = _row_counts(gate_database_url)
         for method, path in _unsafe_routes(client):
             for headers in ({}, {"X-PartFlow-Release": "v9.9.8"}):
                 response = admin.request(method, path, json={}, headers=headers)
                 _assert_refused(response, 409, _RELEASE_MISMATCH, (method, path, headers))
-        assert _row_counts(engine_of(client)) == before
+        assert _row_counts(gate_database_url) == before
 
 
 @pytest.mark.usefixtures("enforcing")
