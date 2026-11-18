@@ -87,8 +87,8 @@ import datetime
 from enum import StrEnum
 from typing import Final, Literal, NamedTuple
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.application import (
     allocations,
@@ -115,6 +115,7 @@ from app.application.part_numbers import (
 from app.application.projections import (
     EffectivePosition,
     effective_positions,
+    effective_total_of,
     effective_totals_by_area,
     origin_flow_ids,
     processing_state_of,
@@ -489,18 +490,12 @@ def scrapped_quantity_of(session: Session, part_number: str) -> int:
 
     The sum of every effective ``SCRAPPED`` Movement of the PN — a
     scrap that was undone (its row referenced by a ``REVERSED``) never
-    counts. This is the `scrapped` term of the §11 reconciliation
-    `introduced = active + stocked + scrapped`.
+    counts — and of the scrapped quantity of its purged archive records
+    (`projections.effective_total_of`, one statement). This is the
+    `scrapped` term of the §11 reconciliation `introduced = active +
+    stocked + scrapped`.
     """
-    reversal = aliased(PartMovement)
-    total = session.scalar(
-        select(func.coalesce(func.sum(PartMovement.quantity), 0)).where(
-            PartMovement.part_number == part_number,
-            PartMovement.movement_type == MovementType.SCRAPPED,
-            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
-        )
-    )
-    return int(total or 0)
+    return effective_total_of(session, part_number, (MovementType.SCRAPPED,))
 
 
 def _recorded_operations(session: Session, latest: dict[int, PartMovement]) -> dict[int, Operation]:

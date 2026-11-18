@@ -16,7 +16,7 @@ triển khai. Tài liệu này không bao giờ ghi đè các tài liệu đó: 
 của một trong hai, không bao giờ là giấy phép để tự phát minh behavior. Các rule được nhắc lại ở đây chủ yếu đến từ
 PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work Orders), §24 đến §25 và §28, và từ GUI_DESIGN §11 (Work Orders).
 
-Schema mô tả ở đây là schema hiện tại tại migration head `0040_phase16_history_archive`. Các bảng của slice được tạo
+Schema mô tả ở đây là schema hiện tại tại migration head `0041_phase16_history_purge`. Các bảng của slice được tạo
 bởi các migration `0002_phase3_domain`, `0004_phase4_audit` và `0005_phase4_release_index`; các migration sau đó thêm
 cột, mở rộng check và thêm bảng, và mỗi mục nêu hình dạng hiện tại.
 
@@ -125,7 +125,10 @@ hai.
 6. Một flow chiếm đúng một Area hiện tại. Khi một PN trải trên nhiều Area, mỗi Area giữ flow riêng của nó.
 7. Release không bao giờ gộp với số lượng active hiện có và không bao giờ ngầm tạo thêm số lượng. Release một PN đang có
    số lượng active cần một xác nhận ý định tường minh trên UI (§8).
-8. Lịch sử Movement là bất biến và chỉ-append, và trạng thái hiện tại phải dựng lại được từ nó (§15).
+8. Lịch sử Movement là bất biến và chỉ-append: một Movement không bao giờ bị cập nhật, và chỉ việc purge của lưu trữ
+   lịch sử Movement mới xóa Movement, cụ thể là các Movement đã lưu trữ của những thành phần flow đã đóng trọn vẹn
+   (§11, §17). Trạng thái hiện tại phải dựng lại được từ các Movement còn giữ, với bản ghi chuyển tiếp của các flow đã
+   purge thay cho lịch sử của chúng (§15, §17 Các bảng lưu trữ lịch sử).
 9. Việc tạo QuantityFlow (mang projection `current_area_id` ban đầu), snapshot AssignedRoute và việc insert Movement
    commit nguyên tử, hoặc không gì cả (§13).
 10. Một lần gửi release trùng với cùng `device_event_id` và cùng request đã chuẩn hóa trả về kết quả gốc và không tạo gì.
@@ -320,8 +323,11 @@ Một WorkOrderDemand có thể được release thành **nhiều phần**, ví 
 lượng active, nên mỗi phần cũng cần xác nhận tường minh riêng theo §8 bước 2. Không bao giờ gộp gì.
 
 - **Released quantity là dẫn xuất.** `released_quantity(demand)` là tổng `RECEIVED.quantity` trên các Movement có
-  `metadata.context.work_order_demand_id` là demand đó (§11, §14). Không có bộ đếm lưu trữ và không có cột. Vì
-  `part_movements` là chỉ-append, giá trị không bao giờ lùi hay lệch và không cần đối soát.
+  `metadata.context.work_order_demand_id` là demand đó (§11, §14), cộng `received_quantity` của mọi bản ghi chuyển tiếp
+  đã purge có `received_demand_id` là demand đó (§17 Các bảng lưu trữ lịch sử), đọc trong cùng một câu lệnh SQL. Không
+  có bộ đếm lưu trữ và không có cột. Vì `part_movements` là chỉ-append và việc purge chỉ xóa một Movement `RECEIVED`
+  trong transaction đánh dấu đã purge cho bản ghi giữ số lượng và dòng demand của nó, giá trị không bao giờ lùi hay lệch
+  và không cần đối soát.
 - **Remaining quantity là giới hạn cứng.** `remaining_quantity = requested_quantity − released_quantity` được ép buộc
   trên server. Một release vượt quá nó, hoặc mọi release khi nó đã về 0, bị từ chối và không tạo gì. Dòng demand bị lock
   `FOR UPDATE` trong transaction release, nên hai release từng phần đồng thời của cùng một demand được tuần tự hóa và
@@ -428,11 +434,15 @@ Các cột theo PROJECT_PROFILE §8.11. Một release ghi Movement `RECEIVED` nh
   `context.actor_user_id` (do server suy ra, không bao giờ lấy từ request; các release ghi trước khi có đăng nhập không
   mang giá trị này) và WorkOrderDemand khởi động dưới dạng `context.work_order_demand_id` để hiển thị audit. Không điều
   nào trong đó tạo quyền sở hữu: WorkOrderDemand không bao giờ sở hữu Movement (§3).
-- Dòng là bất biến và chỉ-insert. UPDATE và DELETE bị thu hồi khỏi application role, và một trigger raise-on-write từ
-  chối chúng, theo rule ưu tiên ràng buộc PostgreSQL trước. Việc thu hồi được `apply-grants` áp dụng trên production
-  stack; database development và test giữ một owner role (§17). Cơ chế bảo vệ này ràng buộc ứng dụng mọi lúc. Bảo trì
-  retention lịch sử Movement (PROJECT_PROFILE §28) là một đường riêng, có đặc quyền, dành cho Administrator và nằm ngoài
-  slice này.
+- Dòng là bất biến và chỉ-insert. UPDATE và DELETE bị thu hồi khỏi application role, và các guard trigger từ chối mọi
+  UPDATE và TRUNCATE cùng việc DELETE bất kỳ dòng nào mà việc purge của một lần chạy lưu trữ đang `PURGING` không cho
+  phép (§17), theo rule ưu tiên ràng buộc PostgreSQL trước. Việc thu hồi được `apply-grants` áp dụng trên production
+  stack; database development và test giữ một owner role (§17). Cơ chế bảo vệ này ràng buộc ứng dụng mọi lúc. Đường duy
+  nhất xóa Movement là việc purge của lưu trữ lịch sử Movement (PROJECT_PROFILE §28), một đường bảo trì riêng, có đặc
+  quyền, nằm ngoài slice này: một User có quyền Run history archival and purge (`RUN_HISTORY_ARCHIVAL_AND_PURGE`) yêu
+  cầu một lần chạy trong Administration, và job trên host, với role bảo trì, xóa các Movement đã lưu trữ của những thành
+  phần flow đã đóng trọn vẹn sau khi archive được kiểm tra, được sao chép ra ngoài host và có một bản sao lưu pre-purge
+  (§17 Các bảng lưu trữ lịch sử).
 
 ---
 
@@ -489,7 +499,9 @@ COMMIT
   fingerprint** xác định: một hash canonical tối thiểu trên PartNumber, số lượng release, Route Mode (và RouteTemplate
   khi `PLANNED`), starting Area, Operation và ngữ cảnh WorkOrderDemand khởi động. Nó lưu fingerprint trong `metadata` của
   Movement `RECEIVED` (§11). Không có bảng idempotency riêng: dòng Movement, tìm theo `device_event_id` của nó, chính là
-  bản ghi idempotency.
+  bản ghi idempotency. Khi lưu trữ lịch sử Movement đã purge dòng đó, ít nhất bằng khoảng retention ngắn nhất được phép
+  sau lần release (§17 Các bảng lưu trữ lịch sử), `device_event_id` của nó không còn được nhận ra là một lần phát lại;
+  không lần thử lại tầng truyền tải nào đến muộn như vậy.
 - Kết quả khi phát lại:
   - cùng `device_event_id` và cùng fingerprint: trả về nguyên vẹn kết quả gốc đã commit và không tạo gì. Kết quả được dựng
     từ Movement `RECEIVED` bất biến, nên nó gồm cả starting Area tại thời điểm release kể cả khi flow đã di chuyển;
@@ -729,9 +741,9 @@ Các ràng buộc được liệt kê ở §17.
   | `PUT /api/policies/worker-sessions` | `{worker_session_timeout_minutes, badge_confirm_done, badge_confirm_queue, badge_confirm_undo}` |
   | `PUT /api/policies/correction-permissions` | `{undo_reason_required}` |
   | `PUT /api/policies/due-soon` | `{due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days}` |
-  | `PUT /api/policies/data-retention` (History archival & purge) | `{retention_period_months, shortest_retention_months, archive_max_wait_days, archive_start_minute, archive_preview_seconds}`, với metadata `{reason}` khi khoảng ngắn nhất được phép thay đổi (các dòng ghi trước `0040_phase16_history_archive` chỉ có `{retention_period_months}`) |
+  | `PUT /api/policies/data-retention` (History archival & purge) | `{retention_period_months, shortest_retention_months, archive_max_wait_days, archive_start_minute, archive_preview_seconds, archive_purge_batch_movements, archive_purge_batch_part_numbers}`, với metadata `{reason}` khi khoảng ngắn nhất được phép thay đổi (các dòng ghi trước `0040_phase16_history_archive` chỉ có `{retention_period_months}`, và các dòng ghi trước `0041_phase16_history_purge` không có các key `archive_purge_batch_*`) |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
-  | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly}` |
+  | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly, backup_keep_pre_purge}` (các dòng ghi trước `0041_phase16_history_purge` không có key `backup_keep_pre_purge`) |
   | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, với metadata `{mail_password_changed}`; không bao giờ có mật khẩu (các dòng ghi trước `0037_phase17_two_step` không có key `mail_timeout_seconds`) |
   | `PUT /api/policies/two-step` | `{two_step_window_minutes, two_step_max_codes, two_step_lockout_codes, two_step_email_codes, two_step_email_interval_seconds, two_step_email_code_digits, two_step_recovery_codes, two_step_recovery_code_length, two_step_setup_minutes, two_step_clock_drift_steps}` |
   | `PUT /api/policies/password-rules` | `{password_min_length, password_max_length, password_require_digit, password_require_special, password_require_uppercase, password_require_lowercase}` |
@@ -908,14 +920,16 @@ lần gỡ khỏi Hot list mà nó kích hoạt được audit như mô tả ở
 
 ### Các lần chạy lưu trữ lịch sử (history archival runs)
 
-- Mỗi lần đổi trạng thái của một lần chạy lưu trữ lịch sử Movement, và việc xác nhận bản sao ngoài host của nó, append
-  một dòng với `entity_type` `HistoryArchiveRun` và `entity_id` là id của lần chạy dạng text, trong cùng transaction với
-  thay đổi.
+- Mỗi lần đổi trạng thái của một lần chạy lưu trữ lịch sử Movement, bản sao ngoài host mà job trên host đã tạo và kiểm
+  tra, và việc xác nhận một bản sao ngoài host append một dòng với `entity_type` `HistoryArchiveRun` và `entity_id` là
+  id của lần chạy dạng text, trong cùng transaction với thay đổi. Các con số mà mỗi đợt purge tăng lên trong khi lần
+  chạy vẫn ở `PURGING` không append dòng nào.
 - Yêu cầu trong Administration là `CREATED` (`before_data` NULL); mọi thay đổi sau đó là `UPDATED`. Snapshot là mọi cột
   của `history_archive_runs` (thời điểm dạng text ISO-8601 UTC) cộng `"groups": ["MOVEMENT_HISTORY"]`.
 - Các dòng ghi từ Administration (yêu cầu, hủy, xác nhận bản sao) mang `actor_user_id` và metadata `{"source": "web",
   "command": "request" | "cancel" | "copy_confirmation"}`. Các dòng do job trên host ghi không có actor, với metadata
-  `{"source": "maintenance", "command": "export" | "verify" | "copy" | "recover"}`.
+  `{"source": "maintenance", "command": "export" | "verify" | "copy" | "next" | "purge" | "recover"}` (`next` làm thất
+  bại một lần chạy mà người yêu cầu không còn được phép chạy).
 - Database role bảo trì chèn các dòng này không dùng `RETURNING`, vì nó được append dòng audit nhưng không bao giờ được
   đọc chúng, và trigger `trg_audit_events_maintenance_scope` từ chối mọi entity type khác từ nó (§17).
 
@@ -951,9 +965,9 @@ lần gỡ khỏi Hot list mà nó kích hoạt được audit như mô tả ở
 - Mỗi dòng audit commit trong **cùng transaction** với thay đổi mà nó ghi. Một lần ghi có audit mà thiếu dòng audit, hoặc
   một dòng audit mà thiếu lần ghi, phải là không thể.
 - Dòng audit là chỉ-append. UPDATE và DELETE bị thu hồi khỏi application role, và một trigger raise-on-write từ chối
-  chúng, đúng như với `part_movements`. Trigger tồn tại từ khi bảng được tạo; việc thu hồi trên application role được
-  `apply-grants` áp dụng trên production stack, nơi backend kết nối dưới `partflow_app` (§17). Database development và
-  test giữ một owner role.
+  chúng, như với `part_movements`; khác với Movement, không dòng audit nào bị purge. Trigger tồn tại từ khi bảng được
+  tạo; việc thu hồi trên application role được `apply-grants` áp dụng trên production stack, nơi backend kết nối dưới
+  `partflow_app` (§17). Database development và test giữ một owner role.
 - Một lần sửa append một dòng `UPDATED` mới; các dòng trước không bao giờ bị ghi lại.
 
 ---
@@ -1140,13 +1154,25 @@ null; `preferred_machine_id` có thể null. Đây là bản sao snapshot của 
   được giữ nhiều năm (PROJECT_PROFILE §28), nên thiếu nó thì đường đọc nóng sẽ quét toàn bảng. Biểu thức được lưu phải
   giống hệt biểu thức mà Application layer phát ra (dạng **subscript** JSONB; dạng toán tử `->` là một nút biểu thức khác
   và sẽ không khớp). Index **không** thêm cột, foreign key hay bộ đếm lưu trữ nào; việc dẫn xuất vẫn là nguồn sự thật
-  duy nhất.
+  duy nhất. Phần của các bản ghi đã purge trong cùng tổng đó đọc `ix_history_archived_flows_received_demand_id_purged`
+  (§17 Các bảng lưu trữ lịch sử).
 - `ix_part_movements_part_number_occurred_at_id` trên `(part_number, occurred_at, id)`, phục vụ lịch sử Movement theo PN
   của Tracking theo thứ tự thời gian với phân trang keyset (`0012_phase11_tracking_index`).
 - `ix_part_movements_assigned_route_step_id` trên `(assigned_route_step_id)`, phục vụ kiểm tra của foreign key khi một
   lần điều chỉnh xóa một bước tương lai chưa được tham chiếu, và ranh giới "bước này có được tham chiếu không" của việc
   sửa.
-- Cơ chế bảo vệ bất biến: thu hồi UPDATE và DELETE, cộng trigger raise `trg_part_movements_forbid_mutation`.
+- Cơ chế bảo vệ bất biến: thu hồi UPDATE và DELETE khỏi application role, cộng hai trigger ràng buộc mọi role, kể cả
+  owner (`0041_phase16_history_purge`):
+  - trigger cấp câu lệnh `trg_part_movements_forbid_mutation` (`BEFORE UPDATE OR TRUNCATE`, function
+    `partflow_part_movements_forbid_mutation`) từ chối mọi UPDATE và TRUNCATE;
+  - trigger cấp dòng `trg_part_movements_guard_delete` (`BEFORE DELETE`, function
+    `partflow_part_movements_guard_delete`) raise với mọi dòng, nên một DELETE không bao giờ lặng lẽ bỏ qua dòng nào,
+    trừ khi tất cả các điều sau đều đúng: thiết lập cục bộ theo transaction `partflow.archive_run_id` chỉ một lần chạy
+    đang `PURGING`; flow của dòng có một bản ghi của lần chạy đó chưa purge và chưa skip; id của dòng không lớn hơn
+    `last_movement_id` của bản ghi; và `occurred_at` cùng `server_received_at` của dòng đều trước cutoff của lần chạy.
+    Nó đọc lần chạy và bản ghi theo primary key cho mỗi dòng, nên một đợt purge 50.000 Movement vẫn nhanh. Trong hai
+    role ứng dụng, chỉ role bảo trì có DELETE trên bảng (§17 Database role và grant), và chỉ việc purge lịch sử đã lưu
+    trữ mới đặt dấu đánh này (§17 Các bảng lưu trữ lịch sử).
 
 **`part_movements.scan_session_id`** (`0020_phase13_worker_sessions`): `bigint` có thể null (lịch sử giữ NULL và không
 bao giờ được backfill); `ck_part_movements_session_requires_worker` (`scan_session_id IS NULL OR worker_id IS NOT
@@ -1206,19 +1232,26 @@ station khác. Không có index, vì không bộ đọc nào lọc theo nó. Upg
   default, vì PROJECT_PROFILE §28 cấm một con số retention cố định trong code; `0040_phase16_history_archive` đặt nó thành
   24 tháng ở nơi không có dòng audit `data-retention` nào cho thấy nó từng được lưu (§16). Chỉ module lưu trữ
   (`app.application.history_archive`) đọc nó; không đường sản xuất nào đọc.
-- Các thiết lập khác của History archival & purge (`0040_phase16_history_archive`), mỗi cái `integer NOT NULL` với giá
-  trị mặc định và một CHECK khoảng tên `ck_application_policy_<column>_range`: `shortest_retention_months` (12; 1–1200),
-  khoảng retention ngắn nhất được phép, dưới mức đó guard của lần chạy từ chối một cutoff (§17 Các bảng lưu trữ lịch
-  sử); `archive_max_wait_days` (7; 1–365), số ngày một lần chạy được chờ xác nhận bản sao trước khi status của job
-  trên host báo nó; `archive_start_minute` (20; 0–59), phút trong giờ mà công việc hằng giờ của job trên host bắt đầu;
-  và `archive_preview_seconds` (90; 10–600), giới hạn thời gian của một preview, với giá trị mặc định trả lời trong vòng
-  100 giây mà sau đó Cloudflare kết thúc một request. Downgrade từ chối khi một trong số chúng khác giá trị mặc định.
+- Các thiết lập khác của History archival & purge, mỗi cái `integer NOT NULL` với giá trị mặc định và một CHECK khoảng
+  tên `ck_application_policy_<column>_range`. Từ `0040_phase16_history_archive`: `shortest_retention_months` (12;
+  1–1200), khoảng retention ngắn nhất được phép, dưới mức đó guard của lần chạy từ chối một cutoff (§17 Các bảng lưu
+  trữ lịch sử); `archive_max_wait_days` (7; 1–365), số ngày một lần chạy được chờ xác nhận bản sao trước khi status
+  của job trên host báo nó; `archive_start_minute` (20; 0–59), phút trong giờ mà công việc hằng giờ của job trên host
+  bắt đầu; và `archive_preview_seconds` (90; 10–600), giới hạn thời gian của một preview, với giá trị mặc định trả lời
+  trong vòng 100 giây mà sau đó Cloudflare kết thúc một request. Từ `0041_phase16_history_purge`:
+  `archive_purge_batch_movements` (50.000; 100–1.000.000) và `archive_purge_batch_part_numbers` (20; 1–1000), số
+  Movement và số Part Number tối đa mà một đợt purge (một transaction gồm các thành phần flow trọn vẹn) chứa; một thành
+  phần lớn hơn một giới hạn là một đợt riêng, và việc purge đọc cả hai ở mỗi lần bắt đầu. Downgrade của mỗi migration
+  từ chối khi một trong các thiết lập của nó khác giá trị mặc định.
 - `backup_interval_hours` (mặc định 1, `ck_application_policy_backup_interval_hours_allowed`: 1, 2, 3, 4, 6, 8, 12 hoặc
   24), `backup_keep_hourly` (mặc định 48, `ck_application_policy_backup_keep_hourly_range`, 0–720), `backup_keep_daily`
   (mặc định 30, `ck_application_policy_backup_keep_daily_range`, 1–3650) và `backup_keep_weekly` (mặc định 52,
-  `ck_application_policy_backup_keep_weekly_range`, 0–520) (`0035_phase16_backup_policy`): `integer NOT NULL`, chính
-  sách backup của Administration → Backups. Chỉ tác vụ backup của máy chủ (`app.cli backup-policy`) và `status` đọc nó;
-  không đường sản xuất nào đọc. Downgrade từ chối khi section này đã từng được ghi.
+  `ck_application_policy_backup_keep_weekly_range`, 0–520) (`0035_phase16_backup_policy`), và `backup_keep_pre_purge`
+  (mặc định 3, `ck_application_policy_backup_keep_pre_purge_range`, 1–100; `0041_phase16_history_purge`), số bản sao
+  lưu pre-purge đã kiểm tra mới nhất mà việc xoay vòng giữ lại: `integer NOT NULL`, chính sách backup của
+  Administration → Backups. Chỉ tác vụ backup của máy chủ (`app.cli backup-policy`) và `status` đọc nó; không đường sản
+  xuất nào đọc. Downgrade của `0035_phase16_backup_policy` từ chối khi section này đã từng được ghi, và của
+  `0041_phase16_history_purge` khi `backup_keep_pre_purge` khác giá trị mặc định.
 - `mail_host text NULL` (`ck_application_policy_mail_host_shape`: tên host viết thường hoặc địa chỉ IP dài tối đa 253
   ký tự; NULL nghĩa là không có mail server), `mail_port integer NOT NULL DEFAULT 587`
   (`ck_application_policy_mail_port_range`, 1–65535), `mail_security text NOT NULL DEFAULT 'STARTTLS'`
@@ -1385,12 +1418,15 @@ không bao giờ là một reversal, không bao giờ được quy cho một Sca
 ### Các bảng lưu trữ lịch sử
 
 Migration `0040_phase16_history_archive` thêm hai bảng của các lần chạy lưu trữ lịch sử Movement (Phase 16, bước 1 của
-thiết kế lưu trữ: các lần chạy xuất, kiểm tra và sao chép một archive mà không xóa gì).
+thiết kế lưu trữ: các lần chạy xuất, kiểm tra và sao chép một archive), và `0041_phase16_history_purge` thêm việc purge
+(bước 2: sau bản sao ngoài host và một bản sao lưu pre-purge, job trên host xóa các Movement đã lưu trữ, và các bản ghi
+chuyển tiếp thay thế chúng).
 
 **`history_archive_runs`**: một dòng cho mỗi lần chạy.
 
 - PK `pk_history_archive_runs` `id` (identity kiểu integer). `state text NOT NULL` với `ck_history_archive_runs_state`:
-  `APPROVED`, `RUNNING`, `WAITING_FOR_COPY`, `COMPLETED`, `NOTHING_ELIGIBLE`, `CANCELLED` hoặc `FAILED`.
+  các trạng thái mở `APPROVED`, `RUNNING`, `WAITING_FOR_COPY` và `PURGING`, và các trạng thái cuối `COMPLETED`,
+  `COMPLETED_WITH_SKIPS`, `NOTHING_ELIGIBLE`, `CANCELLED` và `FAILED`.
 - Yêu cầu, không bao giờ thay đổi: `cutoff timestamptz NOT NULL` (thời điểm bắt đầu một ngày theo lịch của nhà máy),
   `reason text NOT NULL` (`ck_history_archive_runs_reason_length`, 1–500 ký tự), `requested_by_user_id` FK tới `users
   (id)`, `requested_at timestamptz NOT NULL DEFAULT now()`, và các số đếm mà preview của nó tìm được:
@@ -1401,19 +1437,37 @@ thiết kế lưu trữ: các lần chạy xuất, kiểm tra và sao chép mộ
   `manifest_sha256`, được đặt cùng nhau (`ck_history_archive_runs_export_shape`;
   `ck_history_archive_runs_archive_name_shape`: `run-<id>-<UTC stamp>`; `ck_history_archive_runs_manifest_sha256_shape`:
   64 ký tự thập lục phân chữ thường); `verified_at` cùng `skipped_components` và `skipped_flows`
-  (`ck_history_archive_runs_verify_shape`); `copied_at`; `copy_confirmed_at` đúng cùng với `copy_confirmed_by_user_id`
-  FK tới `users (id)` (`ck_history_archive_runs_copy_confirmation_shape`); `finished_at`, được đặt đúng ở các trạng thái
-  cuối (`COMPLETED`, `NOTHING_ELIGIBLE`, `CANCELLED`, `FAILED`), và `cancelled_by_user_id` FK tới `users (id)`, được đặt
-  đúng khi `CANCELLED` (`ck_history_archive_runs_finish_shape`); `result` (`EXPORT_ONLY`), được đặt đúng khi
-  `COMPLETED` (`ck_history_archive_runs_result_shape`); `failure_reason`, được đặt đúng khi `FAILED`
-  (`ck_history_archive_runs_failure_shape`, tối đa 2.000 ký tự). `ck_history_archive_runs_progress_shape` gắn
-  `started_at` và `verified_at` với các trạng thái cần chúng, và `ck_history_archive_runs_completed_copy` chỉ cho một
-  lần chạy là `COMPLETED` khi `copied_at` hoặc `copy_confirmed_at` đã được đặt.
+  (`ck_history_archive_runs_verify_shape`; các component mà việc kiểm tra hoặc việc kiểm tra lại của purge thấy đã thay
+  đổi); `copied_at`, được đặt một lần, khi job đã sao chép archive ra ngoài host và kiểm tra bản sao;
+  `copy_confirmed_at` đúng cùng với `copy_confirmed_by_user_id` FK tới `users (id)`
+  (`ck_history_archive_runs_copy_confirmation_shape`); `finished_at`, được đặt đúng ở các trạng thái cuối, và
+  `cancelled_by_user_id` FK tới `users (id)`, được đặt đúng khi `CANCELLED` (`ck_history_archive_runs_finish_shape`);
+  `result`, được đặt đúng khi `COMPLETED` hoặc `COMPLETED_WITH_SKIPS` (`ck_history_archive_runs_result_shape`): `PURGED`
+  (purge đã xóa ít nhất một component), `NOTHING_PURGED` (mọi component đều bị skip, nên không gì bị xóa) hoặc
+  `EXPORT_ONLY`, chỉ các lần chạy `COMPLETED` mà bước 1 đã kết thúc mang giá trị này; `failure_reason`, được đặt đúng
+  khi `FAILED` (`ck_history_archive_runs_failure_shape`, tối đa 2.000 ký tự). `ck_history_archive_runs_progress_shape`
+  gắn `started_at` và `verified_at` với các trạng thái cần chúng; `ck_history_archive_runs_skips_shape` không cho một
+  lần chạy `COMPLETED` có component bị skip (trừ lần chạy `EXPORT_ONLY`) và buộc một lần chạy `COMPLETED_WITH_SKIPS` có
+  ít nhất một; và `ck_history_archive_runs_completed_copy` đòi `copied_at` hoặc `copy_confirmed_at` ở một lần chạy
+  `PURGING` và ở một lần chạy đã kết thúc có kết quả `PURGED` hoặc `EXPORT_ONLY`.
+- Bằng chứng purge (`0041_phase16_history_purge`), NULL cho tới khi purge bắt đầu:
+  - `pre_purge_backup_name` và `pre_purge_backup_started_at`, bản sao lưu pre-purge được tạo cho lần chạy này và thời
+    điểm bắt đầu dump database của nó (`ck_history_archive_runs_backup_shape`: được đặt cùng nhau; tên là
+    `<UTC stamp>-pre-purge-` theo sau là `archive_name` của lần chạy này; dump bắt đầu sau `verified_at`);
+  - `purge_started_at` cùng `purged_components`, `purged_flows` và `purged_movements`
+    (`ck_history_archive_runs_purge_shape`: được đặt đúng khi bản sao lưu được ghi nhận; các số đếm bắt đầu từ 0, tăng
+    theo mỗi đợt đã commit và luôn có thứ tự, component ≤ flow ≤ Movement; purge bắt đầu không sớm hơn dump; một lần
+    chạy `PURGING` có chúng; một lần chạy `PURGED` đã purge ít nhất một component và một lần chạy `NOTHING_PURGED` không
+    purge component nào);
+  - `receipt_sha256`, SHA-256 của tệp biên nhận purge `<archive_name>.purged.json` mà job ghi cạnh thư mục archive
+    (`ck_history_archive_runs_receipt_shape`: 64 ký tự thập lục phân chữ thường; được đặt ở mọi lần chạy `PURGED` hoặc
+    `NOTHING_PURGED`, được phép ở một lần chạy `FAILED` mà purge đã bắt đầu, và không được đặt ở đâu khác).
 - Partial UNIQUE expression index `uq_history_archive_runs_open` trên `((true)) WHERE state IN ('APPROVED', 'RUNNING',
-  'WAITING_FOR_COPY')`: tối đa một lần chạy đang mở, kể cả khi hai yêu cầu chạy đua.
+  'WAITING_FOR_COPY', 'PURGING')`: tối đa một lần chạy đang mở, kể cả khi hai yêu cầu chạy đua.
 - Trigger bảo vệ `trg_history_archive_runs_guard_mutation` (mức dòng, `BEFORE INSERT OR DELETE OR UPDATE`) và
   `trg_history_archive_runs_forbid_truncate` (hàm `partflow_history_archive_runs_guard_mutation`):
-  - một lần chèn phải là `APPROVED` chưa có tiến trình, và cutoff của nó không được mới hơn `now()` trừ
+  - một lần chèn phải là `APPROVED` chưa có tiến trình và chưa có bằng chứng purge, và cutoff của nó không được mới
+    hơn `now()` trừ
     `shortest_retention_months` (đọc từ dòng policy; so sánh theo UTC với độ cho phép bốn ngày, vì ứng dụng, nơi duy
     nhất biết lịch của nhà máy và áp dụng quy tắc chính xác, đếm lùi các tháng từ ngày của nhà máy, ngày này có thể đi
     trước UTC một ngày vào cuối tháng); lần từ chối đó báo SQLSTATE 23514 với tên trigger làm constraint, nên yêu cầu
@@ -1422,12 +1476,19 @@ thiết kế lưu trữ: các lần chạy xuất, kiểm tra và sao chép mộ
     xóa hay truncate;
   - role ứng dụng chỉ được hủy một lần chạy `APPROVED` hoặc `WAITING_FOR_COPY` và xác nhận bản sao của một lần chạy
     `WAITING_FOR_COPY` một lần;
-  - mọi chuyển trạng thái khác (`APPROVED` sang `RUNNING` hoặc `FAILED`; `RUNNING` sang `WAITING_FOR_COPY`, `COMPLETED`,
-    `NOTHING_ELIGIBLE` hoặc `FAILED`; `WAITING_FOR_COPY` sang `COMPLETED` hoặc `FAILED`) cần một role được ghi bản ghi
-    lưu trữ (role bảo trì, hoặc owner) trong khi thiết lập cục bộ của transaction `partflow.archive_run_id` chỉ đúng
-    lần chạy đó; một thay đổi như vậy không bao giờ đặt `copy_confirmed_at`, `copy_confirmed_by_user_id` hay
-    `cancelled_by_user_id`, và role bảo trì (một role được ghi bản ghi lưu trữ và không sở hữu bảng) không thay đổi một
-    lần chạy theo cách nào khác, nên chỉ riêng credential của nó không thể xác nhận một bản sao hay hủy một lần chạy.
+  - mọi thay đổi khác cần một role được ghi bản ghi lưu trữ (role bảo trì, hoặc owner) trong khi thiết lập cục bộ của
+    transaction `partflow.archive_run_id` chỉ đúng lần chạy đó. Job đó giữ một lần chạy ở trạng thái của nó trong khi
+    ghi tiến trình (khi đó một lần chạy `PURGING` chỉ thay đổi các số đếm đã purge và đã skip, và chúng chỉ tăng), và
+    các chuyển trạng thái của nó là: `APPROVED` sang `RUNNING` hoặc `FAILED`; `RUNNING` sang
+    `WAITING_FOR_COPY`, `NOTHING_ELIGIBLE`, `PURGING`, `COMPLETED_WITH_SKIPS` (mọi component đều bị skip lúc kiểm tra)
+    hoặc `FAILED`; `WAITING_FOR_COPY` sang `RUNNING` (chỉ khi bản sao đã được tạo hoặc xác nhận) hoặc `FAILED`; và
+    `PURGING` sang `COMPLETED`, `COMPLETED_WITH_SKIPS` hoặc `FAILED`;
+  - job đặt `copied_at` một lần; nó chỉ ghi bằng chứng bản sao lưu và `purge_started_at` trong lần chuyển từ `RUNNING`
+    sang `PURGING`, lần chuyển này cần archive đã kiểm tra, bản sao ngoài host của nó (đã tạo hoặc đã xác nhận) và bản
+    sao lưu pre-purge, và không bao giờ thay đổi chúng sau đó; nó không bao giờ đặt kết quả `EXPORT_ONLY`;
+  - job không bao giờ đặt `copy_confirmed_at`, `copy_confirmed_by_user_id` hay `cancelled_by_user_id`, và role bảo trì
+    (một role được ghi bản ghi lưu trữ và không sở hữu bảng) không thay đổi một lần chạy theo cách nào khác, nên chỉ
+    riêng credential của nó không thể xác nhận một bản sao hay hủy một lần chạy.
 
 **`history_archived_flows`**: bản ghi chuyển tiếp (carry-forward record) của từng flow của một component đã lưu trữ, do
 job trên host ghi lúc xuất.
@@ -1445,21 +1506,47 @@ job trên host ghi lúc xuất.
   hiệu lực), `stocked_quantity` cùng `stocked_area_id` và `scrapped_quantity` cùng `scrapped_area_id` (FK tới `areas
   (id)`; các dòng `STOCKED` và `SCRAPPED` có hiệu lực), và `void_command_ids text[] NOT NULL DEFAULT '{}'` (các command
   split và merge đã bị undo của nó), mỗi cái có CHECK hình dạng riêng.
-- `skipped_at` (component đã thay đổi giữa lúc xuất và lúc kiểm tra) và `purged_at` (luôn NULL ở bước 1: không gì bị
-  xóa), không bao giờ cả hai (`ck_history_archived_flows_skipped_or_purged`).
-- Index: `ix_history_archived_flows_flow_id`, và partial UNIQUE `uq_history_archived_flows_flow_id_purged` trên
-  `(flow_id) WHERE purged_at IS NOT NULL` (tối đa một bản ghi đã purge cho mỗi flow).
+- `skipped_at` (component đã thay đổi sau lúc xuất, do việc kiểm tra hoặc do việc kiểm tra lại của purge dưới các lock
+  Part Number phát hiện; các Movement của nó vẫn ở lại database) và `purged_at` (purge đã xóa các Movement của flow),
+  không bao giờ cả hai (`ck_history_archived_flows_skipped_or_purged`).
+- Index: `ix_history_archived_flows_flow_id`; partial UNIQUE `uq_history_archived_flows_flow_id_purged` trên
+  `(flow_id) WHERE purged_at IS NOT NULL` (tối đa một bản ghi đã purge cho mỗi flow); và, cho các bộ đọc bản ghi đã
+  purge (`0041_phase16_history_purge`), `ix_history_archived_flows_part_number_purged` trên `(part_number,
+  last_occurred_at, last_movement_id) WHERE purged_at IS NOT NULL` (lịch sử của một PN theo thứ tự thời gian trong
+  Tracking) và `ix_history_archived_flows_received_demand_id_purged` trên `(received_demand_id) WHERE purged_at IS NOT
+  NULL AND received_demand_id IS NOT NULL` (released quantity của một dòng demand, §8a).
 - Trigger bảo vệ `trg_history_archived_flows_guard_mutation` (mức dòng, `BEFORE INSERT OR DELETE OR UPDATE`) và
   `trg_history_archived_flows_forbid_truncate` (hàm `partflow_history_archived_flows_guard_mutation`): một bản ghi chỉ
-  được chèn khi lần chạy của nó đang `RUNNING` và `partflow.archive_run_id` chỉ đúng lần chạy đó; thay đổi duy nhất là
-  đặt một `skipped_at` còn trống (lần chạy `RUNNING`) hoặc một `purged_at` còn trống (lần chạy `PURGING`, một trạng thái
-  của bước sau); không bản ghi nào bị xóa.
-- Ở bước 1 không bộ đọc nào cộng các bản ghi này; khi có purge, các bộ đọc chỉ cộng những bản ghi đã purge.
+  được chèn khi lần chạy của nó đang `RUNNING` và `partflow.archive_run_id` chỉ đúng lần chạy đó; các thay đổi duy nhất
+  là đặt một `skipped_at` còn trống (lần chạy `RUNNING` hoặc `PURGING`) hoặc một `purged_at` còn trống (lần chạy
+  `PURGING`); không bản ghi nào bị xóa.
+- Mọi bộ đọc suy ra một con số từ Movement đều cộng các bản ghi đã purge trong cùng câu lệnh SQL, nên nó thấy các
+  Movement của một flow hoặc bản ghi của flow đó, không bao giờ cả hai và không bao giờ không có gì: released quantity
+  của một dòng demand (§8a), số lượng received, added, stocked và scrapped của một PN và của một Area, mức sử dụng Route
+  Template, các cạnh lineage vô hiệu của các split và merge đã undo, và lịch sử của Tracking, nơi mỗi flow đã purge là
+  một mục đã lưu trữ và các bước route của nó đọc là đã lưu trữ. Một bản ghi chưa purge không bao giờ được đọc như lịch
+  sử.
 
-Downgrade của `0040_phase16_history_archive` từ chối khi có một lần chạy, một bản ghi hoặc một dòng audit
-`HistoryArchiveRun`, hoặc khi một trong các thiết lập mới khác giá trị mặc định; nếu không, nó bỏ cả hai bảng, các guard
-và các thiết lập, khôi phục các CHECK trước đó và thu hồi `RUN_HISTORY_ARCHIVAL_AND_PURGE` (§16). Khoảng retention giữ
-nguyên.
+**Việc purge** (`python -m app.cli history-archive purge`, do job trên host chạy với role bảo trì): các component của
+lần chạy có bản ghi chưa purge và chưa skip được cắt thành các đợt gồm các component trọn vẹn, mỗi đợt tối đa
+`archive_purge_batch_movements` Movement và `archive_purge_batch_part_numbers` Part Number (một component lớn hơn là
+một đợt riêng). Mỗi đợt là một transaction `READ COMMITTED`: nó đặt `partflow.archive_run_id` cục bộ, lấy các advisory
+lock của các Part Number của nó theo thứ tự đã sắp xếp, như mọi command sản xuất, và đọc lại từng flow dưới các lock đó.
+Một component có trạng thái flow, số Movement hoặc id Movement cuối không còn bằng các bản ghi của nó được đánh dấu skip
+và giữ lại; các Movement của các component còn lại bị xóa, mỗi dòng được `trg_part_movements_guard_delete` xét, và số
+dòng đã xóa phải bằng số Movement của các bản ghi, nếu không đợt đó rollback và lần chạy thất bại. Các bản ghi được đánh
+dấu đã purge và các số đếm của lần chạy được tăng trong cùng transaction, nên một lần purge bị gián đoạn chỉ để lại các
+component trọn vẹn, và lần bắt đầu sau tiếp tục một lần chạy `PURGING`. Một lỗi database không kéo dài (mất kết nối,
+server đang tắt, deadlock, lỗi serialization, lock không có sẵn, hoặc hết thời gian câu lệnh) cũng để lần chạy ở
+`PURGING`; mọi lỗi khác làm nó thất bại.
+
+Downgrade của `0041_phase16_history_purge` từ chối khi một lần chạy đang `PURGING` hoặc `COMPLETED_WITH_SKIPS`, có kết
+quả `PURGED` hoặc `NOTHING_PURGED` hoặc có bất kỳ cột purge nào được đặt, khi một bản ghi đã purge, hoặc khi một trong
+các thiết lập của nó khác giá trị mặc định; nếu không, nó khôi phục các guard, CHECK, index và function của
+`0040_phase16_history_archive`. Downgrade của `0040_phase16_history_archive` từ chối khi có một lần chạy, một bản ghi
+hoặc một dòng audit `HistoryArchiveRun`, hoặc khi một trong các thiết lập của nó khác giá trị mặc định; nếu không, nó bỏ
+cả hai bảng, các guard và các thiết lập, khôi phục các CHECK trước đó và thu hồi `RUN_HISTORY_ARCHIVAL_AND_PURGE`
+(§16). Khoảng retention giữ nguyên.
 
 ### Ranh giới migration của slice
 
@@ -1495,7 +1582,7 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
   role nào và không sở hữu gì. Đặc quyền là tập chính xác; không bao giờ cấp TRUNCATE, REFERENCES, TRIGGER hay grant
   option.
 
-| Class | `partflow_app` privileges | Tables (37 at head `0040_phase16_history_archive`) |
+| Class | `partflow_app` privileges | Tables (37 at head `0041_phase16_history_purge`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations` |
 | `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (trigger dòng vẫn từ chối mọi thay đổi trừ hết hạn và kết thúc session đang mở), `history_archive_runs` (trigger dòng chỉ cho role ứng dụng yêu cầu, hủy và xác nhận một bản sao) |
@@ -1503,17 +1590,20 @@ tra replay và đối soát (§15) cùng test đồng thời kiểm chứng chú
 | `READ_ONLY` | SELECT | `alembic_version`, `history_archived_flows` |
 | `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
 
-- `partflow_maintenance` có đúng những gì việc xuất archive và job trên host cần (`MAINTENANCE_PRIVILEGES`): SELECT trên
-  `alembic_version`, `application_policy`, `areas`, `assigned_route_steps`, `assigned_routes`, `machines`, `operations`,
-  `part_movements`, `part_numbers`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
-  `scan_stations`, `users`, `work_order_demands`, `work_orders`, `worker_sessions` và `workers`; SELECT và UPDATE trên
-  `history_archive_runs` (không có INSERT: chỉ một người yêu cầu một lần chạy, trong Administration) và SELECT, INSERT
-  và UPDATE trên `history_archived_flows`, mà trigger bảo vệ của chúng quyết định nó được thay đổi gì;
-  và INSERT, không có SELECT, trên `audit_events`, mà `trg_audit_events_maintenance_scope` giới hạn ở các dòng
-  `HistoryArchiveRun`. Nó không có DELETE ở đâu cả và không bao giờ đọc các bảng credential, session đăng nhập, mail hay
-  thiết bị Scan Station.
+- `partflow_maintenance` có đúng những gì việc xuất archive, việc purge và job trên host cần (`MAINTENANCE_PRIVILEGES`):
+  SELECT trên `alembic_version`, `application_policy`, `areas`, `assigned_route_steps`, `assigned_routes`, `machines`,
+  `operations`, `part_numbers`, `quantity_flow_lineage`, `quantity_flows`, `role_permissions`, `roles`,
+  `scan_stations`, `users`, `work_order_demands`, `work_orders`, `worker_sessions` và `workers`; SELECT và DELETE trên
+  `part_movements`, nơi `trg_part_movements_guard_delete` chỉ cho phép các Movement đã lưu trữ của lần chạy mà nó đang
+  purge (§17 Bảng sản xuất); SELECT và UPDATE trên `history_archive_runs` (không có INSERT: chỉ một người yêu cầu một
+  lần chạy, trong Administration) và SELECT, INSERT và UPDATE trên `history_archived_flows`, mà trigger bảo vệ của chúng
+  quyết định nó được thay đổi gì; và INSERT, không có SELECT, trên `audit_events`, mà
+  `trg_audit_events_maintenance_scope` giới hạn ở các dòng `HistoryArchiveRun`. `part_movements` là bảng duy nhất mà
+  nó có DELETE, và nó không bao giờ đọc các bảng credential, session đăng nhập, mail hay thiết bị Scan Station.
 - Không role nào có đặc quyền sequence (cột identity), hay `CREATE` trên schema `public` hoặc trên database. PUBLIC
   không có gì trên bất kỳ bảng hay sequence nào của PartFlow, và default privilege cho PUBLIC và cả hai role đều bị gỡ.
+  PUBLIC vẫn giữ đặc quyền `TEMPORARY` trên database, mà việc xuất archive và việc kiểm tra nó dùng cho bảng tạm giữ
+  tập đã lưu trữ của một lần chạy; thu hồi đặc quyền này sẽ làm dừng cả hai.
 - Cơ chế bảo vệ cột trên `areas` và `machines` vẫn chỉ dùng trigger.
 - Grant không bao giờ được khôi phục từ bản dump: mỗi lần `migrate` dẫn xuất lại chúng từ code head, và `apply-grants` làm
   vậy sau một lần restore.
@@ -1548,7 +1638,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Stockroom, `STOCKED`, WorkOrderAllocation | các check movement-type và hình dạng mở rộng với `STOCKED` (cùng hình dạng như `TRANSFERRED`: hai Area khác nhau tại một Station, không Machine; đích terminal là một Application rule được đánh giá dưới lock Area); `quantity_flows.status` mở rộng với `STOCKED` (flow đóng ở trạng thái hoàn tất sản xuất); `work_orders.completed_at` là projection của các dòng allocation; bảng chỉ-append `work_order_allocations` gồm các dòng allocation và reversal (PN canonical theo giá trị, FK tới demand, `reverses_allocation_id` UNIQUE, `device_event_id` và `command_sequence`), không bao giờ tham chiếu Movement hay QuantityFlow, vì allocation tách biệt khỏi Movement theo thiết kế; `work_order_demands.allocated_quantity` là projection được duy trì của các dòng allocation active của demand (`0011_phase10_stock_allocation`). `exceeds_demand` được thêm bởi `0031_phase14_beyond_demand` | PROJECT_PROFILE §8.12 và §18; IMPLEMENTATION_ROADMAP Phase 10 |
 | Read model giám sát | các truy vấn dẫn xuất từ Movement; index Tracking `ix_part_movements_part_number_occurred_at_id` (`0012_phase11_tracking_index`) | PROJECT_PROFILE §21; IMPLEMENTATION_ROADMAP Phase 11 |
 | Quản lý priority và Hot list | không có cột mới: `priority_rank` hiện có nhận CHECK dương và UNIQUE (liên tục `1..N`, §5 và §17) sau một kiểm tra trước có từ chối, cộng expression index của audit (§17). Các nơi ghi nó là command Hot list và việc gỡ tự động hoặc gỡ khi xóa dòng (`hot_ranks`), và cả hai đều audit qua `audit_events` (§16) (`0013_phase12_priority`) | PROJECT_PROFILE §7 Priority và §21 Priority Management; IMPLEMENTATION_ROADMAP Phase 12 |
-| Administration | các bảng master data đã có sẵn; thiết lập hiển thị của Department và policy Due Soon (`0025_phase13_display_settings`); thiết lập khoảng retention lịch sử Movement (`0027_phase13_retention_period`). Việc thực thi retention vẫn còn hoãn (bên dưới) | PROJECT_PROFILE §21 Administration; IMPLEMENTATION_ROADMAP Phase 3.5 và 13 |
+| Administration | các bảng master data đã có sẵn; thiết lập hiển thị của Department và policy Due Soon (`0025_phase13_display_settings`); thiết lập khoảng retention lịch sử Movement (`0027_phase13_retention_period`), mà các lần chạy lưu trữ và việc purge của chúng thực thi (bên dưới) | PROJECT_PROFILE §21 Administration; IMPLEMENTATION_ROADMAP Phase 3.5 và 13 |
 | Quản lý metadata PartNumber, ảnh và xóa cứng | các cột có thể null trên `part_numbers`; không đụng bảng sản xuất nào (`0023_phase13_part_number_master`) | PROJECT_PROFILE §8.1; §6 và §16 ở đây |
 | Theme ưa thích của Scan Station (tầng station) | một cột có thể null `scan_stations.theme_preference` với một CHECK (`DARK` hoặc `LIGHT`); không audit (`0026_phase13_station_theme`) | GUI_DESIGN; §16 ở đây |
 | Theme ưa thích của User (tầng User) | một cột có thể null `users.theme_preference` với một CHECK (`DARK` hoặc `LIGHT`); không audit (không có migration riêng; cột đến từ `0028_phase13_users_roles`) | GUI_DESIGN; §16 và §17 ở đây |
@@ -1558,6 +1648,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Bộ đọc audit trail theo PN | không có: nó chỉ đọc `audit_events` và `work_order_allocations` | §14 ở đây; IMPLEMENTATION_ROADMAP Phase 14 |
 | Import Work Order từ file | không có: Work Order mới, và thay đổi Work Order Open và Released qua việc sửa demand thông thường, dùng lại validation của §5 một cách idempotent | PROJECT_PROFILE §13; §5, §14 và §16 ở đây; IMPLEMENTATION_ROADMAP Phase 15 |
 | Nhận diện Worker và lưu trữ ScanSession | bảng `workers` (badge UNIQUE trên dạng canonical, avatar trên dòng) và phần mở rộng từ vựng audit (`0014_phase13_workers`); `part_movements.worker_id`, `work_order_allocations.allocated_by_worker_id`, `areas.worker_identification_mode` và `areas.fixed_worker_id` (`0019_phase13_worker_identity`); `part_movements.scan_session_id`, `worker_sessions`, `application_policy` và `areas.worker_session_timeout_minutes` (`0020_phase13_worker_sessions`); ba cột xác nhận badge của `application_policy` (`0021_phase13_badge_confirmation`) | PROJECT_PROFILE §8.13 và §19; §11, §16 và §17 ở đây |
+| Lưu trữ và purge lịch sử Movement | bảng lần chạy `history_archive_runs` và bảng chuyển tiếp `history_archived_flows` cùng các guard của chúng, đặc quyền của role bảo trì và các thiết lập của History archival & purge (`0040_phase16_history_archive`); các trạng thái và bằng chứng purge của một lần chạy, guard dòng `trg_part_movements_guard_delete` cùng quyền DELETE của role bảo trì trên `part_movements`, các thiết lập đợt purge, số bản sao lưu pre-purge được giữ và các index của bộ đọc bản ghi đã purge (`0041_phase16_history_purge`) | PROJECT_PROFILE §28; §8a, §11 và §17 ở đây; IMPLEMENTATION_ROADMAP Phase 16 |
 
 ### Vẫn còn hoãn
 
@@ -1566,7 +1657,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 | Trường và đồng bộ ERP | hoãn và chưa được duyệt (IMPLEMENTATION_ROADMAP Deferred) | một ranh giới tích hợp tách biệt; `device_event_id` vẫn tương thích |
 | Đồng bộ quét offline | không lên kế hoạch (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §32); các lần ghi sản xuất vẫn bị chặn khi mất kết nối | `device_event_id` được chọn để một thiết kế offline được duyệt trong tương lai không cần đổi tên (§20) |
 | Đưa số lượng đã nhập kho trở lại sản xuất active | không thuộc PartFlow (quyết định của chủ sở hữu ngày 2026-11-13, PROJECT_PROFILE §18) | không có |
-| Xóa (purge) lịch sử Movement đã lưu trữ | IMPLEMENTATION_ROADMAP Phase 16: các lần chạy lưu trữ đã có và xuất, kiểm tra và sao chép một archive mà không xóa gì (`0040_phase16_history_archive`, §17 Các bảng lưu trữ lịch sử); purge, guard xóa của nó và các bộ đọc bản ghi chuyển tiếp là bước tiếp theo | một đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
+| Các bước tiếp theo của lưu trữ lịch sử Movement | IMPLEMENTATION_ROADMAP Phase 16, bước 3 đến 7: yêu cầu xóa vĩnh viễn, các lần chạy tự động, xem một archive, các nhóm tùy chọn và việc hết hạn cuối cùng của các bản ghi đã lưu trữ | cùng đường bảo trì riêng có đặc quyền dưới role `partflow_maintenance` (PROJECT_PROFILE §28; §11 và §17 ở đây) |
 | Các khả năng import file bổ sung | hoãn cho tới khi một quyết định của owner yêu cầu (IMPLEMENTATION_ROADMAP Deferred) | không có thay đổi schema nào được lên kế hoạch |
 
 ---
@@ -1600,7 +1691,7 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
    tường minh và không tạo gì.
 10. Sửa một RouteTemplate sau release không thay đổi snapshot AssignedRoute nào, và các lần sửa template không bao giờ
     làm thay đổi ngữ cảnh route mà bất kỳ Movement hiện có nào đã ghi.
-11. Thủ tục dựng lại projection tái tạo `current_area_id` cho mọi flow chỉ từ lịch sử Movement.
+11. Thủ tục dựng lại projection tái tạo `current_area_id` cho mọi flow active chỉ từ lịch sử Movement.
 12. Application role không thể cập nhật hay xóa dòng `part_movements` và `audit_events`. Trigger được kiểm chứng bởi các
     schema test; quyền được kiểm chứng bởi các test database role (`tests/test_database_roles.py`) và bằng việc chạy bộ
     test dưới application role.
@@ -1613,9 +1704,9 @@ hiện tại được liệt kê ở §17, và phase của roadmap chỉ đượ
 15. Bảo toàn được giữ: Σ(số lượng flow active theo PN) = Σ(số lượng `RECEIVED` theo PN).
 16. Release vào một Area **terminal** bị từ chối và không ghi gì, bất kể UI đã đề xuất gì.
 17. Một demand được release theo từng phần cho tới khi remaining quantity hết: mỗi phần tạo QuantityFlow và `RECEIVED`
-    riêng (không bao giờ gộp), released và remaining quantity được dẫn xuất chỉ từ lịch sử Movement, một release vượt
-    phần còn lại, hoặc mọi release khi nó đã là 0, bị từ chối và không ghi gì, và Work Order hiển thị `RELEASED` chỉ khi
-    phần còn lại của mọi dòng là 0.
+    riêng (không bao giờ gộp), released và remaining quantity được dẫn xuất chỉ từ lịch sử Movement (cùng các bản ghi
+    chuyển tiếp khi lịch sử đã lưu trữ được purge, §8a), một release vượt phần còn lại, hoặc mọi release khi nó đã là 0,
+    bị từ chối và không ghi gì, và Work Order hiển thị `RELEASED` chỉ khi phần còn lại của mọi dòng là 0.
 18. Một dòng demand đã có số lượng release nhận quyền sửa hạn chế: `requested_quantity` (không bao giờ thấp hơn số lượng
     đã release hoặc đã allocate), `due_date` và `job_numbers` lưu được với một dòng audit `UPDATED` bình thường; tăng số
     lượng khôi phục remaining quantity và trạng thái dẫn xuất `OPEN` của Work Order; và việc sửa `request_type`,
@@ -1646,7 +1737,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0040_phase16_history_archive`: các lần chạy lưu trữ lịch sử và bản ghi chuyển tiếp của chúng, các guard, các thiết lập của History archival & purge với mặc định retention 24 tháng, các dòng audit `HistoryArchiveRun`, key `RUN_HISTORY_ARCHIVAL_AND_PURGE` và đặc quyền của role bảo trì. |
+| 2026-11-18 | uncommitted | Migration head `0041_phase16_history_purge`: việc purge lịch sử Movement đã lưu trữ, với các trạng thái lần chạy `PURGING` và `COMPLETED_WITH_SKIPS`, các kết quả `PURGED` và `NOTHING_PURGED`, bằng chứng bản sao lưu pre-purge và các số đếm purge của một lần chạy, guard dòng Movement `trg_part_movements_guard_delete`, quyền DELETE của role bảo trì trên `part_movements`, các thiết lập đợt purge, số bản sao lưu pre-purge được giữ, và released quantity cũng đọc từ các bản ghi đã purge. |
+| 2026-11-17 | `2f12d33` | Migration head `0040_phase16_history_archive`: các lần chạy lưu trữ lịch sử và bản ghi chuyển tiếp của chúng, các guard, các thiết lập của History archival & purge với mặc định retention 24 tháng, các dòng audit `HistoryArchiveRun`, key `RUN_HISTORY_ARCHIVAL_AND_PURGE` và đặc quyền của role bảo trì. |
 | 2026-11-17 | `1490927` | `GET /api/part-numbers/resolve` trả về dạng canonical của server cho một PN đã nhập, dùng cho Add Part. |
 | 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: các cột quy tắc mật khẩu và Remember me của `application_policy`, các mục audit của chúng và `user_sessions.remembered`. |
 | 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, các cột passkey của `user_sign_in_challenges`, thứ tự lock và snapshot audit có passkey. |

@@ -70,11 +70,12 @@ backend. In user terms:
   the permissions of the user's role.
 - **Administration.** Factory configuration, Scan Station devices, Workers,
   users, roles and permissions, sign-in settings, Production Board display
-  settings and the Due Soon policy.
+  settings, the Due Soon policy, backups, and the archival of old Movement
+  history (exported to checked archive files, copied off the server, then
+  purged from the database with every quantity kept).
 
-Not available yet: the purge of old Movement history (archival runs export it
-to checked archive files but delete nothing yet), and the Scan behavior
-settings in Administration. The full implementation state is in
+Not available yet: the Scan behavior settings in Administration. The full
+implementation state is in
 [`docs/IMPLEMENTATION_ROADMAP.md`](./docs/IMPLEMENTATION_ROADMAP.md).
 
 ## Where to read next
@@ -260,7 +261,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0040_phase16_history_archive`):
+current head, `0041_phase16_history_purge`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -449,8 +450,7 @@ Options: `--check ID` (repeatable, `a` to `j`), `--statement-timeout SECONDS`
 (1-3600, default 300) and `--max-findings N` (1-10000, default 100). Exit codes:
 `0` clean, `1` mismatch, `2` could not run. The exit status counts only when the
 report is one complete JSON document whose `exit_code` equals it; an empty or
-unparseable report means it could not run. Check (g) reports `not_applicable`
-until the purge of Movement-history archival exists, and check (h) reports `not_applicable`
+unparseable report means it could not run. Check (h) reports `not_applicable`
 on a database without the PartFlow database roles, which includes the
 development stack. Do not run a migration while it runs. The checks, the
 production form and the operating rules are in
@@ -547,10 +547,12 @@ The pytest suite holds three kinds of tests:
   `tests/test_phase17_passkeys_schema.py` covers `0038_phase17_passkeys`, the
   schema of passkeys; `tests/test_security_settings_schema.py` covers
   `0039_security_settings`, the password rules and Remember me;
-  `tests/test_history_archive_schema.py` covers the single head
+  `tests/test_history_archive_schema.py` covers
   `0040_phase16_history_archive`, the runs and carry-forward records of
-  history archival with their guards, and the parity between the models and
-  the migrations.
+  history archival with their guards; `tests/test_history_purge_schema.py`
+  covers the single head `0041_phase16_history_purge`, the Movement deletion
+  guard and the purge states of the runs, and the parity between the models
+  and the migrations.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -777,7 +779,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | The migration head is `0040_phase16_history_archive`, covered by `tests/test_history_archive_schema.py`; archival runs export old Movement history without deleting it. |
+| 2026-11-18 | uncommitted | The migration head is `0041_phase16_history_purge`, covered by `tests/test_history_purge_schema.py`; archival runs purge the archived Movement history, and reconcile check (g) is implemented. |
+| 2026-11-17 | `2f12d33` | The migration head is `0040_phase16_history_archive`, covered by `tests/test_history_archive_schema.py`; archival runs export old Movement history without deleting it. |
 | 2026-11-17 | `1fc96e1` | The migration head is `0038_phase17_passkeys`, covered by `tests/test_phase17_passkeys_schema.py`. |
 | 2026-11-17 | `aa6287d` | The migration head is `0037_phase17_two_step`, covered by `tests/test_phase17_two_step_schema.py`. |
 | 2026-11-16 | `252f678` | The migration head is `0036_phase17_outgoing_mail`, covered by `tests/test_phase17_outgoing_mail_schema.py`. |

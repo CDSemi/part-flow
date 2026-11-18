@@ -74,19 +74,22 @@ Commands:
   16 slice 5, read-only): verify one backup directory. 0 verified, 1
   invalid, 2 could not read it.
 - ``backup-rotate [--keep-hourly N] --keep-daily N --keep-weekly N
-  [--backup-dir DIR] [--dry-run]`` (Phase 16 slice 5; hourly since the
-  backups of Administration → Backups): of the verified scheduled backups
-  (and the daily backups of earlier releases), keep the newest of each of
-  the newest N hours, days and ISO weeks and delete the others; never
+  [--keep-pre-purge N] [--backup-dir DIR] [--dry-run]`` (Phase 16 slice 5;
+  hourly since the backups of Administration → Backups): of the verified
+  scheduled backups (and the daily backups of earlier releases), keep the
+  newest of each of the newest N hours, days and ISO weeks and delete the
+  others; with ``--keep-pre-purge`` (history archival step 2), also keep
+  the newest N verified pre-purge backups and delete the older ones; never
   touches other kinds or invalid backups. 0 rotated, 1 rotated but some
-  scheduled backups failed verification, 2 failed.
+  backups failed verification, 2 failed.
 - ``backup-due --interval-hours N [--backup-dir DIR]`` (Phase 16,
   read-only): whether the host's hourly task takes a scheduled backup now.
   Reads no database. 0 due, 1 not due, 2 could not read the directory.
 - ``backup-policy`` (Phase 16, read-only): the backup policy of
-  Administration → Backups — the interval of the scheduled backups and the
-  hourly, daily and weekly backups kept — as one JSON document
-  (``deploy/production/backup.sh``). 0 read, 2 could not read it.
+  Administration → Backups — the interval of the scheduled backups, the
+  hourly, daily and weekly backups kept and the pre-purge backups kept — as
+  one JSON document (``deploy/production/backup.sh``). 0 read, 2 could not
+  read it.
 - ``status [--backup-dir DIR] [--max-backup-age-hours N] [--statement-timeout
   SECONDS]`` (Phase 16 slice 6, read-only): the database size, connections
   and lock waits, the Movement count, the schema readiness and the age of
@@ -103,15 +106,16 @@ Commands:
   Runs as the database owner role (``app.application.permanent_deletion``).
   0 preview shown or deleted, 1 refused, 2 failed or its outcome is unknown.
 - ``history-archive (settings | recover | next | export --run N | verify
-  --run N | copy --run N | status)`` (Phase 16, history archival design B
-  step 1; ``deploy/production/archive.sh``): the host job
-  of Movement-history archival, run as the maintenance database role with
-  the archive folder in ``PARTFLOW_ARCHIVE_DIR`` and the optional off-host
-  copy folder in ``PARTFLOW_ARCHIVE_COPY_DIR``
-  (``app.application.history_archive_job``). Nothing is deleted. 0 the step
-  is done (``result`` says what happened), 1 refused (or, for ``status``, a
-  finding), 2 could not run or its outcome is unknown, 3 the run failed and
-  is now FAILED with its reason.
+  --run N | copy --run N | purge --run N [--backup NAME --backup-started-at
+  UTC] | status)`` (Phase 16, history archival design B steps 1 and 2;
+  ``deploy/production/archive.sh``): the host job of Movement-history
+  archival, run as the maintenance database role with the archive folder in
+  ``PARTFLOW_ARCHIVE_DIR`` and the optional off-host copy folder in
+  ``PARTFLOW_ARCHIVE_COPY_DIR`` (``app.application.history_archive_job``).
+  Only ``purge`` deletes: the archived Movements of its run, after the
+  pre-purge backup. 0 the step is done (``result`` says what happened), 1
+  refused (or, for ``status``, a finding), 2 could not run or its outcome
+  is unknown, 3 the run failed and is now FAILED with its reason.
 
 The CLI configures no logging on stdout: stdout carries only the
 command's outcome lines (``reconcile``, ``migrate``, ``revision``,
@@ -791,8 +795,8 @@ def _backup_name(value: str) -> backups.BackupName:
     parsed = backups.parse_name(value)
     if parsed is None:
         raise argparse.ArgumentTypeError(
-            "must be <YYYYMMDDTHHMMSSZ>-scheduled, -daily, -manual or"
-            " -pre-release-<release tag>,"
+            "must be <YYYYMMDDTHHMMSSZ>-scheduled, -daily, -manual,"
+            " -pre-release-<release tag> or -pre-purge-<archive name>,"
             f" got {value!r}"
         )
     return parsed
@@ -937,8 +941,9 @@ def _run_backup_verify(args: argparse.Namespace) -> int:
 
 _BACKUP_ROTATE_HELP = (
     "Of the verified scheduled backups (and the daily backups of earlier releases), keep the"
-    " newest of each of the newest N hours, days and ISO weeks (UTC); delete the others. Never"
-    " touches pre-release, manual or invalid backups."
+    " newest of each of the newest N hours, days and ISO weeks (UTC); delete the others. With"
+    " --keep-pre-purge, also keep the newest N verified pre-purge backups and delete the older"
+    " ones. Never touches pre-release, manual or invalid backups."
 )
 
 
@@ -967,6 +972,17 @@ def _add_backup_rotate_parser(subparsers: Any) -> None:
         metavar="N",
         help="The newest backup of each of the newest N ISO weeks is kept (0-520).",
     )
+    low, high = policies.BACKUP_KEEP_PRE_PURGE_RANGE
+    parser.add_argument(
+        "--keep-pre-purge",
+        type=_bounded_int(low, high),
+        default=None,
+        metavar="N",
+        help=(
+            "The newest N verified pre-purge backups are kept and older ones deleted"
+            f" ({low}-{high}; default: none is touched)."
+        ),
+    )
     _backup_dir_argument(parser)
     parser.add_argument(
         "--dry-run", action="store_true", help="Report what would be removed; change nothing."
@@ -980,6 +996,7 @@ def _run_backup_rotate(args: argparse.Namespace) -> int:
         keep_hourly=args.keep_hourly,
         keep_daily=args.keep_daily,
         keep_weekly=args.keep_weekly,
+        keep_pre_purge=args.keep_pre_purge,
         dry_run=args.dry_run,
     )
     _print_document(backups.rotate_document(report))
@@ -1020,8 +1037,8 @@ def _run_backup_due(args: argparse.Namespace) -> int:
 
 _BACKUP_POLICY_HELP = (
     "Print the backup policy of Administration → Backups — the interval of the scheduled"
-    " backups and the hourly, daily and weekly backups kept — as a JSON report. Never changes"
-    " data."
+    " backups, the hourly, daily and weekly backups kept and the pre-purge backups kept — as a"
+    " JSON report. Never changes data."
 )
 _BACKUP_POLICY_UNREACHABLE = (
     "The backup policy could not be read: PartFlow could not reach its database."
@@ -1051,6 +1068,7 @@ def _backup_policy_document(
         "keep_hourly": None if policy is None else policy.keep_hourly,
         "keep_daily": None if policy is None else policy.keep_daily,
         "keep_weekly": None if policy is None else policy.keep_weekly,
+        "keep_pre_purge": None if policy is None else policy.keep_pre_purge,
         "error": None if error is None else {"code": error[0], "message": error[1]},
     }
 
@@ -1081,7 +1099,8 @@ def _run_backup_policy(args: argparse.Namespace) -> int:
     every = "hour" if policy.interval_hours == 1 else f"{policy.interval_hours} hours"
     print(
         f"backup-policy: a scheduled backup every {every}; keep {policy.keep_hourly} hourly,"
-        f" {policy.keep_daily} daily and {policy.keep_weekly} weekly",
+        f" {policy.keep_daily} daily and {policy.keep_weekly} weekly, and"
+        f" {policy.keep_pre_purge} pre-purge backups",
         file=sys.stderr,
     )
     return 0
@@ -1291,18 +1310,24 @@ def _run_delete_permanently(args: argparse.Namespace) -> int:
 _HISTORY_ARCHIVE_HELP = (
     "The host job of Movement-history archival (deploy/production/archive.sh), run as the"
     " maintenance database role with the archive folder in PARTFLOW_ARCHIVE_DIR and the"
-    " optional off-host copy folder in PARTFLOW_ARCHIVE_COPY_DIR. Nothing is deleted."
+    " optional off-host copy folder in PARTFLOW_ARCHIVE_COPY_DIR. Only purge deletes, and only"
+    " the archived Movements of its run."
 )
 _HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
     "settings": "Print what the host script needs (the Start minute of the hourly work).",
     "recover": (
-        "Right after the host script took its lock: make a stale RUNNING run FAILED and remove"
-        " the unfinished folders of finished runs."
+        "Right after the host script took its lock: make a stale RUNNING run FAILED, remove the"
+        " unfinished entries of finished runs and copy missing purge receipts. A PURGING run is"
+        " left for purge to resume."
     ),
     "next": "Print the run the job must work on and what to run for it.",
     "export": "Export an APPROVED run's archive into .partial and record what it holds.",
     "verify": "Verify the exported archive and publish its folder.",
-    "copy": "Copy the archive off the host and finish the run, or wait for a confirmation.",
+    "copy": "Copy the archive off the host, or accept a confirmation, or wait for one.",
+    "purge": (
+        "Purge the archived Movements of a copied run after its pre-purge backup (--backup and"
+        " --backup-started-at), or resume a PURGING run (no backup)."
+    ),
     "status": "Report the open run, the last finished run and the archive folder's space.",
 }
 
@@ -1326,15 +1351,37 @@ def _add_history_archive_parser(subparsers: Any) -> None:
     steps = parser.add_subparsers(dest="step", required=True)
     for step, text in _HISTORY_ARCHIVE_COMMANDS.items():
         step_parser = steps.add_parser(step, help=text, description=text)
-        if step in ("export", "verify", "copy"):
+        if step in ("export", "verify", "copy", "purge"):
             step_parser.add_argument(
                 "--run", type=_run_number, required=True, metavar="N", help="The run number."
             )
+        if step == "purge":
+            # Plain text: the job judges the backup and answers a refusal as JSON.
+            step_parser.add_argument(
+                "--backup",
+                metavar="NAME",
+                help="The pre-purge backup: <YYYYMMDDTHHMMSSZ>-pre-purge-<archive name>.",
+            )
+            step_parser.add_argument(
+                "--backup-started-at",
+                metavar="UTC",
+                help="Its dump start as backup-verify reports it: YYYY-MM-DDTHH:MM:SSZ.",
+            )
+            step_parser.set_defaults(purge_parser=step_parser)
     parser.set_defaults(handler=_run_history_archive)
+
+
+def _purge_backup(args: argparse.Namespace) -> history_archive_job.PurgeBackup | None:
+    if (args.backup is None) != (args.backup_started_at is None):
+        args.purge_parser.error("give --backup and --backup-started-at together, or neither")
+    if args.backup is None:
+        return None
+    return history_archive_job.PurgeBackup(args.backup, args.backup_started_at)
 
 
 def _run_history_archive(args: argparse.Namespace) -> int:
     folders = history_archive_job.environment_folders()
+    backup = _purge_backup(args) if args.step == "purge" else None
     engine = _history_archive_engine()
     try:
         if args.step == "settings":
@@ -1349,6 +1396,8 @@ def _run_history_archive(args: argparse.Namespace) -> int:
             report = history_archive_job.verify(engine, folders, args.run)
         elif args.step == "copy":
             report = history_archive_job.copy(engine, folders, args.run)
+        elif args.step == "purge":
+            report = history_archive_job.purge(engine, folders, args.run, backup)
         else:
             report = history_archive_job.status(engine, folders)
     finally:

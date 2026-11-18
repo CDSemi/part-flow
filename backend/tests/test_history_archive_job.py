@@ -18,10 +18,13 @@ carry-forward records, re-derived from the whole archived rows (the export
 keeps only a few fields per flow); the verification (a changed file fails the run, a
 component that changed after the export is skipped, the folder is published
 by renaming it); the off-host copy with a copy folder, and the wait for a
-confirmation without one; ``recover``, ``next``, ``status``, the job lock,
-the failures (more than the preview, a cutoff now newer than the shortest
-allowed period, an existing archive name) and the CLI's JSON and exit codes.
-Nothing is ever deleted: the Movement count stays the same throughout.
+confirmation without one — a copied or confirmed run stays RUNNING for the
+pre-purge backup and the purge (step 2, ``tests/test_history_purge.py``), so
+this module ends such runs through ``recover`` —; ``recover``, ``next``,
+``status``, the job lock, the failures (more than the preview, a cutoff now
+newer than the shortest allowed period, an existing archive name) and the
+CLI's JSON and exit codes. Nothing is deleted here: the Movement count stays
+the same throughout.
 """
 
 import datetime
@@ -49,7 +52,7 @@ from app import cli
 from app.application import history_archive, history_archive_job
 from app.application.history_archive_job import JobFolders
 from app.core.config import get_settings
-from app.infrastructure import archive_files
+from app.infrastructure import archive_files, schema_revision
 from app.main import create_app
 from tests.auth_harness import admin_of, station_device_client
 from tests.conftest import app_mode_roles, owner_engine
@@ -715,7 +718,7 @@ def test_the_export_writes_the_archive_and_the_records(
     assert manifest["archive_name"] == name
     assert manifest["run"]["id"] == run_id
     assert manifest["groups"] == ["MOVEMENT_HISTORY"]
-    assert manifest["alembic_revision"] == "0040_phase16_history_archive"
+    assert manifest["alembic_revision"] == schema_revision.code_head()
     assert manifest["counts"] == report.details["counts"]
     assert manifest["counts"]["components"] == len(_ELIGIBLE)
     assert manifest["counts"]["flows"] == len(flows)
@@ -904,6 +907,163 @@ def test_the_records_and_the_manifest_follow_from_the_whole_rows(
     assert manifest["counts"]["assigned_routes"] == len(routes) >= 1
 
 
+#: The context tables as the export reads them (key, columns), for the reference below.
+_CONTEXT_TABLES = {
+    name: (table, key, columns) for name, table, key, columns in history_archive_job._CONTEXT_TABLES
+}
+
+
+def _context_rows(connection: sa.Connection, name: str, ids: set[Any]) -> list[dict[str, Any]]:
+    """The rows of one context table as the export before the rehearsal fix selected them."""
+    if not ids:
+        return []
+    table, key, columns = _CONTEXT_TABLES[name]
+    array = "text[]" if key in ("station_id", "part_number") else "integer[]"
+    return [
+        dict(row.value)
+        for row in connection.execute(
+            sa.text(
+                f"SELECT to_jsonb(t) AS value FROM (SELECT {columns} FROM {table}"
+                f" WHERE {key} = ANY(CAST(:ids AS {array}))) t ORDER BY t.{key}"
+            ),
+            {"ids": sorted(ids)},
+        )
+    ]
+
+
+def test_the_streamed_context_is_the_document_the_export_held_before(
+    world: World, folders: JobFolders, first_run: dict[str, Any]
+) -> None:
+    """context.json is streamed row by row (B2 rehearsal D2); its bytes are those of the
+    whole document as the export built and serialized it before, from the same rows."""
+    run = _run(world, int(first_run["id"]))
+    folder = cast(Path, folders.archive_dir) / ".partial" / str(run["archive_name"])
+    ids: dict[str, set[Any]] = {name: set() for name in _CONTEXT_TABLES}
+
+    def add(name: str, value: Any) -> None:
+        if value is not None:
+            ids[name].add(value)
+
+    for row in _lines(folder / "movements.jsonl.gz"):
+        for key in ("from_area_id", "to_area_id"):
+            add("areas", row[key])
+        add("operations", row["operation_id"])
+        for key in ("source_machine_id", "destination_machine_id"):
+            add("machines", row[key])
+        add("workers", row["worker_id"])
+        add("scan_stations", row["station_id"])
+        add("users", ((row["metadata"] or {}).get("context") or {}).get("actor_user_id"))
+    for row in _lines(folder / "flows.jsonl.gz"):
+        add("areas", row["flow"]["current_area_id"])
+        add("machines", row["flow"]["current_machine_id"])
+        for key in ("stocked_area_id", "scrapped_area_id"):
+            add("areas", row["record"][key])
+        add("work_order_demands", row["record"]["received_demand_id"])
+        add("part_numbers", row["record"]["part_number"])
+    for row in _lines(folder / "assigned_routes.jsonl.gz"):
+        for step in row["steps"]:
+            add("areas", step["area_id"])
+            add("operations", step["operation_id"])
+            add("machines", step["preferred_machine_id"])
+    add("users", run["requested_by_user_id"])
+    with world.owner.connect() as connection:
+        document = {
+            name: _context_rows(connection, name, ids[name])
+            for name in _CONTEXT_TABLES
+            if name != "work_orders"
+        }
+        document["work_orders"] = _context_rows(
+            connection,
+            "work_orders",
+            {row["work_order_id"] for row in document["work_order_demands"]},
+        )
+    assert document["work_order_demands"] and document["part_numbers"] and document["areas"]
+    assert (folder / "context.json").read_bytes() == archive_files.readable_json(document)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {},
+        {"a": []},
+        {"a": [], "b": [{}], "c": [{"k": []}, {"k": {}}]},
+        {
+            "areas": [{"id": 1, "name": "Matériau “A”"}, {"id": 2, "name": "B\nC"}],
+            "work_order_demands": [
+                {"id": 7, "job_numbers": ["J-1", "J-2"], "due": None, "x": {"y": [1, {"z": 2.5}]}}
+            ],
+            "workers": [],
+        },
+    ],
+)
+def test_readable_sections_are_the_readable_json_bytes(
+    tmp_path: Path, document: dict[str, list[Any]]
+) -> None:
+    path = tmp_path / "context.json"
+    archive_files.write_readable_sections(
+        path, ((key, iter(rows)) for key, rows in sorted(document.items()))
+    )
+    assert path.read_bytes() == archive_files.readable_json(document)
+    assert path.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(FileExistsError):
+        archive_files.write_readable_sections(path, [])
+    with pytest.raises(ValueError, match="keys must be sorted"):
+        archive_files.write_readable_sections(tmp_path / "unsorted.json", [("b", []), ("a", [])])
+
+
+def _file_hashes(records: dict[int, tuple[list[tuple[int, bytes]], int]]) -> Any:
+    """A ``_FileHashes`` that expects each flow's record: (its lines, its last Movement id)."""
+    hashes = history_archive_job._FileHashes()
+    for flow_id, (lines, last) in records.items():
+        content = hashlib.sha256(b"".join(line for _, line in lines)).hexdigest()
+        hashes.expect(flow_id, content, last)
+    return hashes
+
+
+def test_the_file_check_holds_only_the_flows_whose_movements_are_coming() -> None:
+    """The Movements file in id order, flows interleaved: each flow checked at its last line."""
+    lines = {7: [(1, b"a\n"), (4, b"d\n")], 3: [(2, b"b\n"), (3, b"c\n"), (6, b"f\n")]}
+    in_order = sorted(
+        (
+            (movement_id, flow_id, line)
+            for flow_id, rows in lines.items()
+            for movement_id, line in rows
+        )
+    )
+    hashes = _file_hashes({7: (lines[7], 4), 3: (lines[3], 6)})
+    for movement_id, flow_id, line in in_order:
+        hashes.add(flow_id, movement_id, line)
+        if movement_id == 4:
+            assert set(hashes._open) == {3}  # flow 7 is checked and released
+    hashes.check()
+    assert hashes._open == {}
+
+
+@pytest.mark.parametrize(
+    ("feed", "message"),
+    [
+        # A line changed: the flow's hash differs at its last line.
+        ([(7, 1, b"a\n"), (7, 4, b"X\n"), (3, 6, b"f\n")], "Quantity Flow 7 in"),
+        # A line missing: the flow never reaches its last Movement.
+        ([(7, 1, b"a\n"), (3, 6, b"f\n")], "Quantity Flow 7 in"),
+        # A line after the flow's last Movement.
+        ([(7, 1, b"a\n"), (7, 4, b"d\n"), (3, 6, b"f\n"), (7, 8, b"h\n")], "Quantity Flow 7 in"),
+        # Two flows wrong: the smaller is named.
+        ([(7, 1, b"a\n"), (7, 4, b"d\n"), (3, 6, b"X\n")], "Quantity Flow 3 in"),
+        # A line of a flow without a record.
+        ([(7, 1, b"a\n"), (7, 4, b"d\n"), (3, 6, b"f\n"), (9, 9, b"i\n")], "without a record"),
+    ],
+)
+def test_the_file_check_names_the_first_problem(
+    feed: list[tuple[int, int, bytes]], message: str
+) -> None:
+    hashes = _file_hashes({7: ([(1, b"a\n"), (4, b"d\n")], 4), 3: ([(6, b"f\n")], 6)})
+    for flow_id, movement_id, line in feed:
+        hashes.add(flow_id, movement_id, line)
+    with pytest.raises(history_archive_job._RunFailed, match=message):
+        hashes.check()
+
+
 def test_the_id_set_hash_needs_ascending_ids() -> None:
     ids = archive_files.IdSet()
     for value in (3, 17, 120):
@@ -987,10 +1147,12 @@ def test_without_a_copy_folder_the_run_waits_for_a_confirmation(
     _done(nxt, "copy")
     assert nxt.run_id == run_id
     report = history_archive_job.copy(job, folders, run_id)
-    _done(report, "completed")
+    # Since step 2 a confirmed copy goes back to RUNNING: the backup and the
+    # purge come next (tests/test_history_purge.py).
+    _done(report, "confirmed")
     run = _run(world, run_id)
-    assert (run["state"], run["result"], run["copied_at"]) == ("COMPLETED", "EXPORT_ONLY", None)
-    assert run["finished_at"] is not None
+    assert (run["state"], run["result"], run["copied_at"]) == ("RUNNING", None, None)
+    _done(history_archive_job.next_run(job, folders), "backup")
     audits = _run_audits(world, run_id)
     assert [row["event_type"] for row in audits] == [
         "CREATED",
@@ -1004,7 +1166,7 @@ def test_without_a_copy_folder_the_run_waits_for_a_confirmation(
         "RUNNING",
         "WAITING_FOR_COPY",
         "WAITING_FOR_COPY",
-        "COMPLETED",
+        "RUNNING",
     ]
     assert [row["metadata"]["source"] for row in audits] == [
         "web",
@@ -1016,7 +1178,16 @@ def test_without_a_copy_folder_the_run_waits_for_a_confirmation(
     assert audits[0]["actor_user_id"] == world.builder.admin.user_id
     assert audits[1]["actor_user_id"] is None
     assert audits[-1]["after_data"]["groups"] == ["MOVEMENT_HISTORY"]
+    # This module never purges: the next start finds the run stale and fails it.
+    _end_without_purge(job, folders, run_id)
     _done(history_archive_job.next_run(job, folders), "none")
+
+
+def _end_without_purge(job: Engine, folders: JobFolders, run_id: int) -> None:
+    """A RUNNING run that is not purged here: the next start's recover fails it."""
+    report = history_archive_job.recover(job, folders)
+    _done(report, "recovered")
+    assert run_id in report.details["failed_run_ids"]
 
 
 # ---------------------------------------------------------------------------
@@ -1054,7 +1225,7 @@ def test_a_changed_file_fails_the_verification(
     assert not folder.exists()
 
 
-def test_a_copy_folder_finishes_the_run_unattended(
+def test_a_copy_folder_copies_the_archive_unattended(
     world: World, job: Engine, folders: JobFolders, copy_dir: Path
 ) -> None:
     with_copy = JobFolders(folders.archive_dir, copy_dir)
@@ -1062,14 +1233,20 @@ def test_a_copy_folder_finishes_the_run_unattended(
     _done(history_archive_job.export(job, with_copy, run_id), "exported")
     _done(history_archive_job.verify(job, with_copy, run_id), "verified")
     report = history_archive_job.copy(job, with_copy, run_id)
-    _done(report, "completed")
+    _done(report, "copied")
     name = str(_run(world, run_id)["archive_name"])
     assert report.details["copied_to"] == str(copy_dir / name)
     assert "manifest.json: OK" in _sha256sum_check(copy_dir / name)
     run = _run(world, run_id)
-    assert (run["state"], run["result"]) == ("COMPLETED", "EXPORT_ONLY")
+    assert (run["state"], run["result"]) == ("RUNNING", None)
     assert run["copied_at"] is not None and run["copy_confirmed_at"] is None
     assert not list((copy_dir / ".partial").iterdir())
+    # The copy is audited although the state stays RUNNING.
+    audits = _run_audits(world, run_id)
+    assert audits[-1]["metadata"]["command"] == "copy"
+    assert audits[-1]["after_data"]["copied_at"] is not None
+    _done(history_archive_job.next_run(job, with_copy), "backup")
+    _end_without_purge(job, folders, run_id)
 
 
 def test_an_unavailable_copy_folder_makes_the_run_wait(
@@ -1082,22 +1259,34 @@ def test_an_unavailable_copy_folder_makes_the_run_wait(
     report = history_archive_job.copy(job, missing, run_id)
     _done(report, "waiting_for_copy")
     assert "does not exist" in str(report.details["copy_problem"])
-    # With the folder back, the next start copies and finishes.
+    _done(history_archive_job.next_run(job, missing), "wait")
+    # With the folder back, the next start copies.
     (tmp_path / "unplugged").mkdir()
     _done(history_archive_job.next_run(job, missing), "copy")
-    _done(history_archive_job.copy(job, missing, run_id), "completed")
+    _done(history_archive_job.copy(job, missing, run_id), "copied")
+    _end_without_purge(job, folders, run_id)
 
 
+@pytest.mark.parametrize("confirmed", [False, True], ids=["copy-folder", "confirmation"])
 def test_a_published_archive_changed_after_its_verification_fails_the_copy(
-    world: World, job: Engine, folders: JobFolders
+    world: World, job: Engine, folders: JobFolders, copy_dir: Path, confirmed: bool
 ) -> None:
+    """Checked right before a copy, or before a confirmation is accepted (never while waiting)."""
+    with_copy = JobFolders(folders.archive_dir, None if confirmed else copy_dir)
     run_id = int(_request(world, "Fifth archive")["id"])
-    _done(history_archive_job.export(job, folders, run_id), "exported")
-    _done(history_archive_job.verify(job, folders, run_id), "verified")
+    _done(history_archive_job.export(job, with_copy, run_id), "exported")
+    _done(history_archive_job.verify(job, with_copy, run_id), "verified")
     published = cast(Path, folders.archive_dir) / str(_run(world, run_id)["archive_name"])
     with open(published / "context.json", "ab") as stream:
         stream.write(b" ")
-    report = history_archive_job.copy(job, folders, run_id)
+    if confirmed:
+        _done(history_archive_job.copy(job, with_copy, run_id), "waiting_for_copy")
+        response = world.builder.admin.post(
+            f"/api/history-archive/runs/{run_id}/copy-confirmation",
+            json={"manifest_sha256": _run(world, run_id)["manifest_sha256"]},
+        )
+        assert response.status_code == 200, response.text
+    report = history_archive_job.copy(job, with_copy, run_id)
     assert report.exit_code == history_archive_job.EXIT_RUN_FAILED
     run = _run(world, run_id)
     assert run["state"] == "FAILED"

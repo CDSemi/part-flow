@@ -489,14 +489,18 @@ def test_released_work_order_is_deleted_as_if_never_entered(
     report = _run(owner, (number,), confirm=True)
     _assert_after_deletion(builder, report, work_order_ids=[work_order_id], part_numbers=[])
     # Every guard that refuses a delete on the touched tables; the INSERT-only
-    # scope of the maintenance role's audit rows (Phase 16) stays enabled.
+    # scope of the maintenance role's audit rows (Phase 16) and the UPDATE /
+    # TRUNCATE statement guard of part_movements (history purge, step 2:
+    # its row guard refuses the deletes) stay enabled.
     assert sorted(report.guard_triggers) == sorted(
         trigger
         for trigger in GUARD_TRIGGERS
         if GUARD_TRIGGERS[trigger].table
         in ("audit_events", "part_movements", "quantity_flow_lineage", "work_order_allocations")
-        and trigger != "trg_audit_events_maintenance_scope"
+        and trigger
+        not in ("trg_audit_events_maintenance_scope", "trg_part_movements_forbid_mutation")
     )
+    assert "trg_part_movements_guard_delete" in report.guard_triggers
     # No trace of the deleted records is left besides the one audit row.
     assert (
         builder.scalar(

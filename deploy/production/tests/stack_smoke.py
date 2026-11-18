@@ -55,7 +55,9 @@ partflow_app_password (backend no longer mounts postgres_password); new cases:
 - SM-17c: an empty postgres_password stops migrate and db-roles with configuration_invalid (exit 2, one JSON document).
 - SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (37 tables).
 - SM-31: every partflow-api session in pg_stat_activity is partflow_app.
-- SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables.
+- SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables, the
+  two tables of Movement-history archival included, and (archival step 2) the row guard trg_part_movements_guard_delete
+  refusing partflow_maintenance's DELETE of a Movement outside a purge.
 - SM-33: reconcile through backend: check (h) pass, connected as partflow_app (not a superuser).
 - SM-34: restore convergence: a --no-privileges dump restored into partflow_restore_s4, apply-grants, then (h) pass.
 - SM-35: the write flows through web (SM-6, SM-7..SM-9, SM-21, SM-36) pass as partflow_app.
@@ -108,17 +110,42 @@ FILE_TOO_LARGE_MESSAGE = "The file is larger than 1 MB. Split it into smaller fi
 EMPTY_PASSWORD_FILE_MESSAGE = "DATABASE_PASSWORD_FILE /run/secrets/partflow_app_password is empty."
 APP_ROLE = "partflow_app"
 ROLE_SECRETS = ("partflow_app_password", "partflow_maintenance_password")
-# SM-32: the guarded tables (P16-S4 SPEC section 3.2) and the two cells the application database role may run.
+# SM-32: the guarded tables (P16-S4 SPEC section 3.2, and the two tables of Movement-history archival) and the cells the
+# application database role may run (its classes: worker_sessions and history_archive_runs guarded update,
+# assigned_route_steps no update, history_archived_flows read only).
 GUARDED_TABLES = (
     "part_movements", "audit_events", "machine_lifecycle_events", "quantity_flow_lineage", "work_order_allocations",
-    "worker_sessions", "assigned_route_steps",
+    "worker_sessions", "assigned_route_steps", "history_archive_runs", "history_archived_flows",
 )
 PROBE_STATEMENTS = {
-    "UPDATE": "UPDATE {table} SET id = id WHERE false",
+    "UPDATE": "UPDATE {table} SET {column} = {column} WHERE false",
     "DELETE": "DELETE FROM {table} WHERE false",
     "TRUNCATE": "TRUNCATE {table}",
 }
-PROBE_ALLOWED = {("worker_sessions", "UPDATE"): "UPDATE 0", ("assigned_route_steps", "DELETE"): "DELETE 0"}
+# The column the UPDATE probe assigns to itself. It must exist, because PostgreSQL resolves the columns before it checks
+# the privilege; history_archived_flows has no id (its key is run_id, flow_id).
+PROBE_UPDATE_COLUMNS = {"history_archived_flows": "run_id"}
+PROBE_ALLOWED = {
+    ("worker_sessions", "UPDATE"): "UPDATE 0",
+    ("assigned_route_steps", "DELETE"): "DELETE 0",
+    ("history_archive_runs", "UPDATE"): "UPDATE 0",
+}
+# SM-32, archival step 2 (contract §1.5, §1.7): partflow_maintenance holds DELETE on part_movements, and the row guard
+# trg_part_movements_guard_delete refuses every Movement outside the purge of a PURGING run, for every role. A row
+# trigger needs a row and the smoke records no Movement, so the probe inserts one throwaway RECEIVED row as the owner
+# with session_replication_role = replica (foreign keys and user triggers off, CHECK constraints on), switches back to
+# origin, deletes it as partflow_maintenance, and rolls everything back.
+ROW_GUARD_EVENT = "stack-smoke-row-guard-probe"
+ROW_GUARD_MESSAGE = "may be deleted only by the purge of the archival run that archived its flow"
+ROW_GUARD_STATEMENTS = (
+    "SET LOCAL session_replication_role = replica",
+    "INSERT INTO part_movements (quantity_flow_id, part_number, movement_type, quantity, to_area_id, operation_id,"
+    " occurred_at, server_received_at, device_event_id) VALUES (0, 'SMOKE-ROW-GUARD', 'RECEIVED', 1, 0, 0, now(), now(),"
+    f" '{ROW_GUARD_EVENT}')",
+    "SET LOCAL session_replication_role = origin",
+    "SET LOCAL ROLE partflow_maintenance",
+    f"DELETE FROM part_movements WHERE device_event_id = '{ROW_GUARD_EVENT}'",
+)
 RESTORE_DATABASE = "partflow_restore_s4"
 CLASSIFIED_TABLES = 37
 MULTI_WORKER_STOP = "failed to start, stopping the parent process"
@@ -916,7 +943,7 @@ class Smoke:
             cells = {}
             for table in GUARDED_TABLES:
                 for verb, statement in PROBE_STATEMENTS.items():
-                    sql = statement.format(table=table)
+                    sql = statement.format(table=table, column=PROBE_UPDATE_COLUMNS.get(table, "id"))
                     script = (
                         'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN'
                         f' -c "SET LOCAL ROLE {APP_ROLE}" -c "{sql}" -c ROLLBACK'
@@ -931,6 +958,16 @@ class Smoke:
                         "expected": "allowed" if allowed else "refused", "verdict": verdict, "psql_rc": result.returncode,
                         "stderr": result.stderr.strip()[-200:],
                     }
+            # The row guard outside a purge: the maintenance role passes the privilege check and the guard refuses.
+            script = ('psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN'
+                      + "".join(f' -c "{statement}"' for statement in ROW_GUARD_STATEMENTS) + " -c ROLLBACK")
+            result = self.compose("exec", "-T", "db", "sh", "-c", script, check_rc=False, timeout=120)
+            inserted = "INSERT 0 1" in result.stdout
+            verdict = "refused" if inserted and ROW_GUARD_MESSAGE in result.stderr else "wrong"
+            cells["part_movements DELETE as partflow_maintenance outside a purge"] = {
+                "expected": "refused by trg_part_movements_guard_delete", "verdict": verdict,
+                "probe_row_inserted": inserted, "psql_rc": result.returncode, "stderr": result.stderr.strip()[-300:],
+            }
             observed["cells"] = cells
             wrong = [cell for cell, value in cells.items() if value["verdict"] == "wrong"]
             check(not wrong, f"cells not as expected: {wrong}")

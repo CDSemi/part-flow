@@ -1,11 +1,12 @@
-"""Movement-history archival runs (Phase 16, history archival design B; build step 1).
+"""Movement-history archival runs (Phase 16, history archival design B; build steps 1-2).
 
 The application side of Administration → History archival & purge, and the
 one selection that both its preview and the host job's export run
 (``app.application.history_archive_job``). It is the only module that reads
 the retention period (PROJECT_PROFILE §28: retention settings live in
 Administration, never in production workflow logic). Nothing here deletes
-anything; build step 1 archives without deletion.
+anything: the host job purges (build step 2), as the maintenance database
+role, under the Movement deletion guard.
 
 Terms (design §2):
 
@@ -25,14 +26,16 @@ every flow has at least one Movement, and every Movement of every flow has
 both ``occurred_at`` and ``server_received_at`` before the cutoff (design
 §3.1). Only whole components are archived. For one cutoff the eligible set
 can only shrink over time: a flow closes only with a Movement, and an Undo
-that reopens a flow writes Movements.
+that reopens a flow writes Movements. A purged component has no Movement
+left, so it is never eligible again.
 
 The preview runs the selection read-only within the preview time limit of
 the settings and reports the components, flows and Movements, their date
 range and an estimated archive size. A request recomputes the preview and
 stores it on the run, which starts ``APPROVED`` (the request is the
-approval); at most one run is open. A run may be cancelled while
-``APPROVED`` or ``WAITING_FOR_COPY``; the off-host copy of a
+approval); at most one run is open (``PURGING`` included). A run may be
+cancelled while ``APPROVED`` or ``WAITING_FOR_COPY``, never while the job
+works on it (``RUNNING``, ``PURGING``); the off-host copy of a
 ``WAITING_FOR_COPY`` run is confirmed once, against the manifest SHA-256 the
 person was shown. Every state change and the copy confirmation append one
 ``HistoryArchiveRun`` audit row (``entity_id`` the run id) in the same
@@ -104,6 +107,11 @@ class ArchivalSettings(NamedTuple):
     max_wait_days: int
     start_minute: int
     preview_seconds: int
+    #: The purge batch limits (build step 2): whole components per batch,
+    #: at most this many Movements and Part Numbers (one oversized
+    #: component forms a batch of its own).
+    purge_batch_movements: int
+    purge_batch_part_numbers: int
 
 
 def read_settings(session: Session | Connection) -> ArchivalSettings:
@@ -115,6 +123,8 @@ def read_settings(session: Session | Connection) -> ArchivalSettings:
             ApplicationPolicy.archive_max_wait_days,
             ApplicationPolicy.archive_start_minute,
             ApplicationPolicy.archive_preview_seconds,
+            ApplicationPolicy.archive_purge_batch_movements,
+            ApplicationPolicy.archive_purge_batch_part_numbers,
         ).where(ApplicationPolicy.id == 1)
     ).one()
     return ArchivalSettings(*row)
@@ -537,11 +547,15 @@ def _locked_run(session: Session, run_id: int) -> HistoryArchiveRun:
 
 
 def cancel_run(session: Session, run_id: int, *, actor_user_id: int) -> HistoryArchiveRun:
-    """Cancel an APPROVED or WAITING_FOR_COPY run; cancelling a cancelled run changes nothing."""
+    """Cancel an APPROVED or WAITING_FOR_COPY run; cancelling a cancelled run changes nothing.
+
+    A RUNNING or PURGING run is the host job's: refused (a PURGING run is
+    finished by the job, never stopped half-way by a person).
+    """
     run = _locked_run(session, run_id)
     if run.state == HistoryArchiveRunState.CANCELLED:
         return run
-    if run.state == HistoryArchiveRunState.RUNNING:
+    if run.state in (HistoryArchiveRunState.RUNNING, HistoryArchiveRunState.PURGING):
         raise ConflictError(
             f"Run {run.id} is running on the server now and cannot be cancelled. Wait until it"
             " stops."
@@ -657,3 +671,14 @@ def run_view(session: Session, run: HistoryArchiveRun) -> RunView:
 
 def is_final(state: str) -> bool:
     return state in HISTORY_ARCHIVE_FINAL_STATES
+
+
+#: The purge receipt beside a published archive folder: ``<archive name>`` + this.
+RECEIPT_SUFFIX: Final = ".purged.json"
+
+
+def receipt_name(archive_name: str | None, receipt_sha256: str | None) -> str | None:
+    """The file name of a run's purge receipt, once it was written (None before)."""
+    if archive_name is None or receipt_sha256 is None:
+        return None
+    return f"{archive_name}{RECEIPT_SUFFIX}"

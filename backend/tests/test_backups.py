@@ -45,6 +45,7 @@ from tests.backup_harness import (
     publish,
     reseal,
     revision_script,
+    stamp,
     utc,
     write_partial,
 )
@@ -1062,7 +1063,7 @@ def test_invalid_dailies_are_kept_and_not_counted(
     assert corrupted not in document["deleted"] and edited not in document["deleted"]
     assert (tmp_path / corrupted).exists() and (tmp_path / edited).exists()
     assert document["error"]["message"] == (
-        f"Scheduled backups {corrupted}, {edited} failed verification; they were not counted"
+        f"Backups {corrupted}, {edited} failed verification; they were not counted"
         " or deleted. Review and remove them by hand (OPERATIONS_RUNBOOK §9)."
     )
     assert err.strip().endswith(", 2 failed verification and were kept for review")
@@ -1177,6 +1178,187 @@ def test_keep_hourly_is_bounded(
                 "1",
                 "--keep-weekly",
                 "0",
+                "--backup-dir",
+                str(tmp_path),
+            ]
+        )
+    assert usage.value.code == 2
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Pre-purge backups (history archival design B step 2)
+# ---------------------------------------------------------------------------
+
+_ARCHIVE = "run-3-20271110T042000Z"
+
+
+def _pre_purges(backup_dir: Path, first: datetime.datetime, count: int) -> list[str]:
+    """``count`` published pre-purge backups, one a day, each named after its own run."""
+    names = []
+    for offset in range(count):
+        moment = first + datetime.timedelta(days=offset)
+        name = name_of(moment, "pre-purge", f"run-{offset + 1}-{stamp(moment)}")
+        publish(backup_dir, name, operator="archive.sh", reason="pre-purge backup")
+        names.append(name)
+    return names
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "label"),
+    [
+        (f"20271110T050102Z-pre-purge-{_ARCHIVE}", "pre-purge", _ARCHIVE),
+        ("20271110T050102Z-pre-release-v2.5.0", "pre-release", "v2.5.0"),
+        ("20271110T050102Z-manual", "manual", None),
+    ],
+)
+def test_backup_names_parse_with_their_labels(name: str, kind: str, label: str | None) -> None:
+    parsed = backups.parse_name(name)
+    assert parsed is not None
+    assert (parsed.kind, parsed.label) == (kind, label)
+    assert parsed.stamp == datetime.datetime(2027, 11, 10, 5, 1, 2, tzinfo=datetime.UTC)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # A pre-purge backup is named after its run's archive, and only that.
+        "20271110T050102Z-pre-purge",
+        "20271110T050102Z-pre-purge-v2.5.0",
+        "20271110T050102Z-pre-purge-run-3-20271110T042000",
+        "20271110T050102Z-pre-purge-run--20271110T042000Z",
+        "20271110T050102Z-pre-purge-run-3-20271110T042000Z-x",
+        # The other kinds keep their rules.
+        "20271110T050102Z-pre-release",
+        f"20271110T050102Z-manual-{_ARCHIVE}",
+        f"20271110T050102Z-scheduled-{_ARCHIVE}",
+    ],
+)
+def test_names_that_break_the_label_rules_are_refused(name: str) -> None:
+    assert backups.parse_name(name) is None
+
+
+def test_a_pre_purge_backup_is_published_and_verifies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = f"20271110T050100Z-pre-purge-{_ARCHIVE}"
+    publish(tmp_path, name, operator="archive.sh", reason=f"pre-purge backup for {_ARCHIVE}")
+    manifest = json.loads((tmp_path / name / "manifest.json").read_text(encoding="utf-8"))
+    assert (manifest["kind"], manifest["label"]) == ("pre-purge", _ARCHIVE)
+    code, document, err = _verify(capsys, tmp_path, name)
+    assert code == 0, err
+    assert (document["result"], document["kind"], document["error"]) == (
+        "verified",
+        "pre-purge",
+        None,
+    )
+    # The purge reads the dump start from here (its backup evidence).
+    assert document["dump_started_at"] == manifest["dump_started_at"]
+
+
+def test_rotation_keeps_the_newest_pre_purge_backups(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pre_purge = _pre_purges(tmp_path, utc(2026, 9, 1), 4)
+    scheduled = _hourlies(tmp_path, utc(2026, 9, 10, 0), 2)
+    manual = name_of(utc(2026, 8, 2), "manual")
+    pre_release = name_of(utc(2026, 8, 1), "pre-release", "v1.0.0-rc.1")
+    publish(tmp_path, manual)
+    publish(tmp_path, pre_release)
+    code, document, err = _rotate(
+        capsys, tmp_path, 30, 52, "--keep-hourly", "48", "--keep-pre-purge", "2"
+    )
+    assert code == 0, err
+    assert document["keep_pre_purge"] == 2
+    assert document["kept_pre_purge"] == pre_purge[2:]
+    assert document["deleted_pre_purge"] == pre_purge[:2]
+    # The scheduled retention neither counts nor removes them, and the other
+    # kinds are never touched.
+    assert (document["kept"], document["deleted"]) == (scheduled, [])
+    assert _root(tmp_path) == sorted([*pre_purge[2:], *scheduled, manual, pre_release])
+    assert err.strip() == (
+        "backup-rotate: kept 2 scheduled backups, deleted 0; kept 2 pre-purge backups, deleted 2"
+    )
+    # Converges: a rerun deletes nothing.
+    code, document, _ = _rotate(capsys, tmp_path, 30, 52, "--keep-pre-purge", "2")
+    assert (code, document["kept_pre_purge"], document["deleted_pre_purge"]) == (
+        0,
+        pre_purge[2:],
+        [],
+    )
+
+
+def test_without_keep_pre_purge_no_pre_purge_backup_is_touched(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pre_purge = _pre_purges(tmp_path, utc(2026, 9, 1), 3)
+    code, document, err = _rotate(capsys, tmp_path, 1, 0)
+    assert code == 0, err
+    assert (
+        document["keep_pre_purge"],
+        document["kept_pre_purge"],
+        document["deleted_pre_purge"],
+    ) == (None, [], [])
+    assert (document["kept"], document["deleted"], document["invalid"]) == ([], [], [])
+    assert _root(tmp_path) == pre_purge
+    assert err.strip() == "backup-rotate: kept 0 scheduled backups, deleted 0"
+
+
+def test_an_invalid_pre_purge_backup_is_kept_and_not_counted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pre_purge = _pre_purges(tmp_path, utc(2026, 9, 1), 3)
+    flip_last_byte(tmp_path / pre_purge[2] / "partflow.dump")
+    code, document, err = _rotate(capsys, tmp_path, 1, 0, "--keep-pre-purge", "1")
+    assert code == 1
+    assert document["result"] == "rotated_with_invalid"
+    assert document["invalid"] == [
+        {
+            "name": pre_purge[2],
+            "check": "sha256sums",
+            "detail": "partflow.dump: sha256 differs from SHA256SUMS",
+        }
+    ]
+    # The newest verified one is kept in its place; the invalid one stays for review.
+    assert (document["kept_pre_purge"], document["deleted_pre_purge"]) == (
+        [pre_purge[1]],
+        [pre_purge[0]],
+    )
+    assert _root(tmp_path) == pre_purge[1:]
+    assert document["error"]["message"] == (
+        f"Backups {pre_purge[2]} failed verification; they were not counted or deleted."
+        " Review and remove them by hand (OPERATIONS_RUNBOOK §9)."
+    )
+    assert err.strip().endswith(", 1 failed verification and were kept for review")
+
+
+def test_a_dry_run_keeps_every_pre_purge_backup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pre_purge = _pre_purges(tmp_path, utc(2026, 9, 1), 2)
+    code, document, _ = _rotate(capsys, tmp_path, 1, 0, "--keep-pre-purge", "1", "--dry-run")
+    assert code == 0
+    assert (document["kept_pre_purge"], document["deleted_pre_purge"]) == (
+        [pre_purge[1]],
+        [pre_purge[0]],
+    )
+    assert _root(tmp_path) == pre_purge
+
+
+@pytest.mark.parametrize("keep", ["0", "101", "x"])
+def test_keep_pre_purge_is_bounded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], keep: str
+) -> None:
+    with pytest.raises(SystemExit) as usage:
+        cli.main(
+            [
+                "backup-rotate",
+                "--keep-daily",
+                "1",
+                "--keep-weekly",
+                "0",
+                "--keep-pre-purge",
+                keep,
                 "--backup-dir",
                 str(tmp_path),
             ]

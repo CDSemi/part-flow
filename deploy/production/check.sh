@@ -8,10 +8,13 @@
 # disk_archive (PARTFLOW_ARCHIVE_DIR), then database, schema and backup_age from one read-only `status` run (the `status`
 # ops service, as the application database role, the backup directory mounted read-only), and archival_proposal from
 # one read-only `history-archive status` run (the `maintenance` ops service, as the maintenance database role, with the
-# archive folder and, when archive.sh would mount it, the copy folder; OPERATIONS_RUNBOOK §11). It never starts, stops
-# or changes a service, never writes in the backup or archive directories and never repairs; after a `status` run that
-# hit its time bound it removes the one-off container that run left (one that was not there before it), and after a
-# `maintenance` run that hit its bound only the container of that run (its own --name), never a step of archive.sh.
+# archive folder and, when archive.sh would mount it, the copy folder; OPERATIONS_RUNBOOK §11), which also fails while
+# archive.sh's incident record <records-dir>/archive/reconcile-after-purge exists (a reconcile after a purge that did
+# not end clean; OPERATIONS_RUNBOOK §8). The newest backup of any kind counts for backup_age, a pre-purge backup of
+# history archival included. It never starts, stops or changes a service, never writes in the backup or archive
+# directories and never repairs; after a `status` run that hit its time bound it removes the one-off container that run
+# left (one that was not there before it), and after a `maintenance` run that hit its bound only the container of that
+# run (its own --name), never a step of archive.sh.
 #
 # Exit status: 0 nothing to notify (every line PASS/SKIP, or the failing set was already reported less than
 # --renotify-hours ago); 1 at least one FAIL to notify; 2 could not run (one line `ERROR check could not run: ...`).
@@ -56,7 +59,8 @@ Run from the repository root of the running release's checkout, as the account t
   --only ID                  evaluate only this check (repeatable); state files are not changed
   --quiet                    print nothing unless the exit status is non-zero
   --records-dir DIR          release records (default $HOME/partflow-deployments); the release lock is
-                             DIR/.release.lock: while it exists the status checks are skipped
+                             DIR/.release.lock: while it exists the status checks are skipped; archive.sh's incident
+                             record DIR/archive/reconcile-after-purge fails archival_proposal
   --no-state                 evaluate against the stored state without changing it (manual diagnosis)
   --rehearsal --project NAME a throwaway Compose project (never partflow, partflow-production or partflow-staging)
 Check ids: https certificate containers restarts errors disk_data disk_backup disk_docker disk_archive
@@ -683,6 +687,8 @@ check_disk_docker() {
 
 STATUS_IDS='database schema backup_age archival_proposal'
 ARCHIVE_NOT_SET_UP="archival is not set up: PARTFLOW_ARCHIVE_DIR is empty in $ENV_FILE (DEPLOYMENT §3.1)"
+# archive.sh's incident record: the reconcile after a purge did not end clean (read only).
+PURGE_INCIDENT=$RECORDS_DIR/archive/reconcile-after-purge
 # one_off SERVICE: the ids of this project's one-off containers of SERVICE (`docker compose run`).
 one_off() {
     dk ps -a -q --filter "label=com.docker.compose.project=$PROJECT_NAME" \
@@ -775,6 +781,9 @@ EOF
     fi
     set -- archive "$WORK/archive-status.json" "$arc"
     [ -z "$copy_reason" ] || set -- "$@" --copy-reason "$copy_reason"
+    # A reconcile after a purge that did not end clean is an incident until the operator removes archive.sh's record
+    # (OPERATIONS_RUNBOOK §8); meanwhile archive.sh works on no run. The line fails and names it first.
+    [ ! -f "$PURGE_INCIDENT" ] || set -- "$@" --purge-reconcile "$PURGE_INCIDENT"
     python3 "$SCRIPT_DIR/monitor_report.py" "$@" >"$WORK/archive.out" 2>"$WORK/archive-monitor.err" || true
     text=$(tr -d '\r' <"$WORK/archive.out" | grep -E '^(PASS|FAIL|SKIP) archival_proposal ' | head -n 1) || text=
     if [ -z "$text" ]; then

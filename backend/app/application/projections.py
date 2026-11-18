@@ -44,21 +44,48 @@ newest effective Movement is its `STOCKED` is absent from the replay
 exactly like a scrapped one; the stocked total of a PN
 (`stocked_quantity_of`) is the `stocked` term of the §11
 reconciliation and the quantity Work Order Allocation draws from.
+
+Archived history (Phase 16, history archival design B §4): the purge of
+an archival run deletes the Movements of whole closed flow components and
+keeps one carry-forward record per flow (``history_archived_flows``, its
+``purged_at`` set in the same transaction). Every derivation here that
+sums history — the stocked, scrapped and introduced totals, the per-Area
+totals — adds the PURGED records' terms in the same SQL statement as the
+Movements, so it sees a flow's Movements or its record, never both and
+never neither, and every figure stays what it was; an edge of an undone
+split or merge stays void through the record's ``void_command_ids``; the
+route position of an archived flow is ``archived``. Positions, branches,
+visited Areas and origins read ACTIVE flows only, whose whole components
+are never archived, so they need no record.
 """
 
 import datetime
-from collections.abc import Iterable
-from typing import Final, NamedTuple
+from collections.abc import Collection, Iterable
+from typing import Any, Final, NamedTuple
 
-from sqlalchemy import Integer, Select, any_, func, literal, select
+from sqlalchemy import (
+    ColumnElement,
+    Integer,
+    Select,
+    and_,
+    any_,
+    false,
+    func,
+    literal,
+    null,
+    select,
+    true,
+    union_all,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from app.application.errors import ConflictError
 from app.application.machines import areas_with_machines
 from app.domain.enums import MovementType, ProcessingState
 from app.infrastructure.models import (
     AssignedRouteStep,
+    HistoryArchivedFlow,
     Operation,
     PartMovement,
     QuantityFlowLineage,
@@ -99,6 +126,71 @@ ARRIVAL_MOVEMENT_TYPES: Final = (
     MovementType.QUANTITY_ADJUSTED,
     MovementType.STOCKED,
 )
+
+
+#: The carry-forward record terms of the Movement types a purged record
+#: keeps (design §4.1): the effective quantity of the type, and the Area it
+#: was recorded in where the record keeps one.
+_ARCHIVED_TERMS: Final[
+    dict[str, tuple[InstrumentedAttribute[int | None], InstrumentedAttribute[int | None] | None]]
+] = {
+    MovementType.RECEIVED: (HistoryArchivedFlow.received_quantity, None),
+    MovementType.QUANTITY_ADJUSTED: (HistoryArchivedFlow.adjusted_quantity, None),
+    MovementType.STOCKED: (
+        HistoryArchivedFlow.stocked_quantity,
+        HistoryArchivedFlow.stocked_area_id,
+    ),
+    MovementType.SCRAPPED: (
+        HistoryArchivedFlow.scrapped_quantity,
+        HistoryArchivedFlow.scrapped_area_id,
+    ),
+}
+
+
+def _archived_term(
+    movement_type: str,
+) -> tuple[InstrumentedAttribute[int | None], InstrumentedAttribute[int | None] | None]:
+    """The record term of one Movement type; a type no record keeps is a defect."""
+    term = _ARCHIVED_TERMS.get(movement_type)
+    if term is None:  # pragma: no cover - every caller sums a kept type
+        raise ValueError(f"A carry-forward record keeps no {movement_type} quantity.")
+    return term
+
+
+def _effective(movement: type[PartMovement] | Any) -> ColumnElement[bool]:
+    """The Movement is not undone: no ``REVERSED`` row references it."""
+    reversal = aliased(PartMovement)
+    return ~select(reversal.id).where(reversal.reverses_movement_id == movement.id).exists()
+
+
+def effective_total_of(session: Session, part_number: str, movement_types: Collection[str]) -> int:
+    """Σ quantity of one PN's effective Movements of the types, archived history included.
+
+    The effective Movements (reversed history excluded) plus, in the SAME
+    statement, the matching term of every PURGED record of the PN — the
+    stocked, scrapped, released (``RECEIVED``) or added
+    (``QUANTITY_ADJUSTED``) quantity its flow's Movements carried — so a
+    purge never changes the figure.
+    """
+    terms: list[Select[Any]] = [
+        select(PartMovement.quantity.label("quantity")).where(
+            PartMovement.part_number == part_number,
+            PartMovement.movement_type.in_(list(movement_types)),
+            _effective(PartMovement),
+        )
+    ]
+    for movement_type in movement_types:
+        quantity, _area = _archived_term(movement_type)
+        terms.append(
+            select(quantity.label("quantity")).where(
+                HistoryArchivedFlow.part_number == part_number,
+                HistoryArchivedFlow.purged_at.is_not(None),
+                quantity.is_not(None),
+            )
+        )
+    combined = union_all(*terms).subquery()
+    total = session.scalar(select(func.coalesce(func.sum(combined.c.quantity), 0)))
+    return int(total or 0)
 
 
 def reversed_movement_ids(flow_id: int) -> Select[tuple[int | None]]:
@@ -481,10 +573,15 @@ class RoutePosition(NamedTuple):
     set; an undone arrival never happened (`REVERSED`, Phase 9); a
     lineage-created flow that has not arrived anywhere itself inherits
     the arrivals of its parents, on route only when EVERY branch is.
+
+    ``archived`` (history archival, design B §4.3): the flow's Movements
+    were archived and purged, so its route progress is in the archive —
+    PN Tracking shows its steps as archived rather than future.
     """
 
     known_step_id: int | None
     on_route: bool
+    archived: bool = False
 
     @property
     def current_step_id(self) -> int | None:
@@ -492,8 +589,9 @@ class RoutePosition(NamedTuple):
         return self.known_step_id if self.on_route else None
 
 
-def _last_known_step_ids(session: Session, flow_ids: set[int]) -> dict[int, int]:
-    """`lineage.last_known_step_id` for several flows in one grouped query."""
+def _last_known_step_ids(session: Session, flow_ids: set[int]) -> tuple[dict[int, int], set[int]]:
+    """`lineage.last_known_step_id` for several flows in one grouped query,
+    and — in the same statement — the flows whose history was purged."""
     reversal = aliased(PartMovement)
     newest = (
         select(PartMovement.quantity_flow_id, func.max(PartMovement.id).label("movement_id"))
@@ -505,12 +603,24 @@ def _last_known_step_ids(session: Session, flow_ids: set[int]) -> dict[int, int]
         .group_by(PartMovement.quantity_flow_id)
         .subquery()
     )
-    rows = session.execute(
-        select(PartMovement.quantity_flow_id, PartMovement.assigned_route_step_id).join(
-            newest, newest.c.movement_id == PartMovement.id
-        )
-    )
-    return {flow_id: step_id for flow_id, step_id in rows if step_id is not None}
+    known = select(
+        PartMovement.quantity_flow_id.label("flow_id"),
+        PartMovement.assigned_route_step_id.label("step_id"),
+        false().label("archived"),
+    ).join(newest, newest.c.movement_id == PartMovement.id)
+    archived = select(
+        HistoryArchivedFlow.flow_id.label("flow_id"),
+        null().label("step_id"),
+        true().label("archived"),
+    ).where(HistoryArchivedFlow.flow_id.in_(flow_ids), HistoryArchivedFlow.purged_at.is_not(None))
+    steps: dict[int, int] = {}
+    purged: set[int] = set()
+    for flow_id, step_id, is_archived in session.execute(union_all(known, archived)):
+        if is_archived:
+            purged.add(int(flow_id))
+        elif step_id is not None:
+            steps[int(flow_id)] = int(step_id)
+    return steps, purged
 
 
 def _own_latest_arrivals(session: Session, flow_ids: set[int]) -> dict[int, PartMovement]:
@@ -548,11 +658,14 @@ def route_positions(session: Session, flow_ids: Iterable[int]) -> dict[int, Rout
     wanted = set(flow_ids)
     if not wanted:
         return {}
-    known = _last_known_step_ids(session, wanted)
+    known, purged = _last_known_step_ids(session, wanted)
     routed = set(known)
     arrivals = _own_latest_arrivals(session, routed) if routed else {}
     found: dict[int, RoutePosition] = {}
     for flow_id in wanted:
+        if flow_id in purged:
+            found[flow_id] = RoutePosition(None, False, archived=True)
+            continue
         step_id = known.get(flow_id)
         if step_id is None:
             found[flow_id] = RoutePosition(None, False)
@@ -665,20 +778,38 @@ def _reversed_command_ids() -> Select[tuple[str]]:
     )
 
 
+def _effective_edge() -> ColumnElement[bool]:
+    """The lineage edge's command was not undone.
+
+    Undone when one of its Movements is referenced by a ``REVERSED`` row
+    (retained history), or — for archived history, whose ``REVERSED`` rows
+    were purged — when the PURGED record of its parent names the command
+    among its ``void_command_ids``; both in the same statement as the edge.
+    """
+    record = aliased(HistoryArchivedFlow)
+    return and_(
+        QuantityFlowLineage.device_event_id.not_in(_reversed_command_ids()),
+        ~select(record.flow_id)
+        .where(
+            record.flow_id == QuantityFlowLineage.parent_flow_id,
+            record.purged_at.is_not(None),
+            QuantityFlowLineage.device_event_id == any_(record.void_command_ids),
+        )
+        .exists(),
+    )
+
+
 def consumed_flow_ids(session: Session, flow_ids: Iterable[int] | None = None) -> set[int]:
     """The flows history says were consumed — every parent of an EFFECTIVE edge.
 
     An edge of an undone SPLIT/MERGED command (Phase 9) is void: its
     parent was reopened by the reversal and counts as consumed no
-    longer. The stored lifecycle (`quantity_flows.status`) must
-    agree with this set: a flow is closed as SPLIT / MERGED exactly
-    when it is effectively consumed.
+    longer (also once the history was archived: `_effective_edge`). The
+    stored lifecycle (`quantity_flows.status`) must agree with this set: a
+    flow is closed as SPLIT / MERGED exactly when it is effectively
+    consumed.
     """
-    query = (
-        select(QuantityFlowLineage.parent_flow_id)
-        .where(QuantityFlowLineage.device_event_id.not_in(_reversed_command_ids()))
-        .distinct()
-    )
+    query = select(QuantityFlowLineage.parent_flow_id).where(_effective_edge()).distinct()
     if flow_ids is not None:
         wanted = list(flow_ids)
         if not wanted:
@@ -693,7 +824,8 @@ def effective_lineage_edges(session: Session, flow_ids: Iterable[int]) -> list[Q
     An edge of an undone SPLIT/MERGED command (Phase 9) is void and
     absent, exactly as in `consumed_flow_ids` — so a read model
     following descent (PN Tracking, Phase 11) sees the lineage history
-    currently says, never a reopened parent as consumed.
+    currently says, never a reopened parent as consumed; an archived
+    edge stays void through its record's ``void_command_ids``.
     """
     wanted = list(flow_ids)
     if not wanted:
@@ -702,7 +834,7 @@ def effective_lineage_edges(session: Session, flow_ids: Iterable[int]) -> list[Q
         session.scalars(
             select(QuantityFlowLineage)
             .where(
-                QuantityFlowLineage.device_event_id.not_in(_reversed_command_ids()),
+                _effective_edge(),
                 (QuantityFlowLineage.parent_flow_id.in_(wanted))
                 | (QuantityFlowLineage.child_flow_id.in_(wanted)),
             )
@@ -827,24 +959,39 @@ def effective_totals_by_area(
     The history-derived per-Area figures every monitoring read model
     shares (Phase 11): the scrapped quantity recorded in an Area (net of
     reversed scraps) and the stocked quantity of a terminal Area — never
-    a stored counter.
+    a stored counter. For ``STOCKED`` and ``SCRAPPED`` the PURGED records'
+    stocked / scrapped quantity in their Area is added in the same
+    statement (archived history, design §4.3).
     """
     wanted = list(area_ids)
     if not wanted:
         return {}
-    reversal = aliased(PartMovement)
-    rows = session.execute(
+    terms: list[Select[Any]] = [
         select(
-            PartMovement.part_number,
-            PartMovement.to_area_id,
-            func.sum(PartMovement.quantity),
-        )
-        .where(
+            PartMovement.part_number.label("part_number"),
+            PartMovement.to_area_id.label("area_id"),
+            PartMovement.quantity.label("quantity"),
+        ).where(
             PartMovement.movement_type == movement_type,
             PartMovement.to_area_id.in_(wanted),
-            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+            _effective(PartMovement),
         )
-        .group_by(PartMovement.part_number, PartMovement.to_area_id)
+    ]
+    if movement_type in (MovementType.STOCKED, MovementType.SCRAPPED):
+        quantity, area = _archived_term(movement_type)
+        assert area is not None
+        terms.append(
+            select(
+                HistoryArchivedFlow.part_number.label("part_number"),
+                area.label("area_id"),
+                quantity.label("quantity"),
+            ).where(HistoryArchivedFlow.purged_at.is_not(None), area.in_(wanted))
+        )
+    combined = union_all(*terms).subquery()
+    rows = session.execute(
+        select(combined.c.part_number, combined.c.area_id, func.sum(combined.c.quantity)).group_by(
+            combined.c.part_number, combined.c.area_id
+        )
     )
     return {(str(pn), int(area_id)): int(total) for pn, area_id, total in rows}
 
@@ -852,22 +999,15 @@ def effective_totals_by_area(
 def stocked_quantity_of(session: Session, part_number: str) -> int:
     """The PN's total stocked quantity (Phase 10, PROJECT_PROFILE §18).
 
-    The sum of every effective ``STOCKED`` Movement of the PN — the
+    The sum of every effective ``STOCKED`` Movement of the PN and of the
+    stocked quantity of its PURGED records (archived history) — the
     `stocked` term of the §11 reconciliation `introduced = active +
     stocked + scrapped` and the gross quantity Work Order Allocation
     draws from. Reversed history is excluded for uniformity with every
     other derivation, although a ``STOCKED`` command is never undone
     (PROJECT_PROFILE §32 open decision 1).
     """
-    reversal = aliased(PartMovement)
-    total = session.scalar(
-        select(func.coalesce(func.sum(PartMovement.quantity), 0)).where(
-            PartMovement.part_number == part_number,
-            PartMovement.movement_type == MovementType.STOCKED,
-            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
-        )
-    )
-    return int(total or 0)
+    return effective_total_of(session, part_number, (MovementType.STOCKED,))
 
 
 def rebuild_current_area_ids(session: Session) -> dict[int, int]:

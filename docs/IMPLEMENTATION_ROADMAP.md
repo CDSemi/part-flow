@@ -50,15 +50,17 @@ drill, database roles, monitoring and reconciliation) runs on the company Synolo
 | Phase 13 — Full Administration and Production Identity Configuration | Closed (2026-10-07) | Workers, Worker identification and sessions, master-data management, policies, Users and roles as configuration. |
 | Phase 14 — Authentication, Role Enforcement, and Authorized Management Corrections | Closed (2026-10-08) | Sign-in, permission enforcement, enrolled Scan Station devices and the authorized correction workflows. |
 | Phase 15 — File-Based Work Order Import | Closed (2026-10-08) | Creating and updating Work Orders from CSV or Excel files. |
-| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration and the minimal `pf` since 2026-11-16 and Movement-history archival step 1 (runs that export without deleting) since 2026-11-17; the host checks after go-live, the open follow-ups and archival steps 2 to 7 remain. |
+| Phase 16 — Deployment, Production Hardening, and Admin Maintenance | In progress | Production stack implemented and live on the company NAS since 2026-11-09, with backups set in Administration and the minimal `pf` since 2026-11-16 and Movement-history archival step 1 (runs that export without deleting) since 2026-11-17 and step 2 (the purge of archived Movement history) since 2026-11-18; the host checks after go-live, the open follow-ups and archival steps 3 to 7 remain. |
 | Phase 17 — Owner Decisions After Go-Live | Closed (2026-11-17) | Reserved permission keys, length limits on manual entry, a seeded Super User role, unique Area and Planned Route names, the allocating Worker on allocation rows, Add to Hot list at intake, settings previews and optional multi-factor sign-in. |
 | Phase 18 — Owner Requests of 2026-11-17 | Closed (2026-11-17) | Permanent deletion of test data, printing many barcode labels at once, viewing a Scan Station without an enrolled device, and an Administration → Security section. |
 
-**Database schema.** The current Alembic migration head is `0040_phase16_history_archive`
-(`backend/alembic/versions/20261117_0040_phase16_history_archive.py`: the runs and carry-forward records of
-Movement-history archival and the settings of Administration → History archival & purge). Phase 15 added no
-migration; Phase 16 added `0035_phase16_backup_policy` (the backup policy of Administration → Backups) and
-`0040_phase16_history_archive`; Phase 17 added `0033_phase17_super_user_role` (the Super User role),
+**Database schema.** The current Alembic migration head is `0041_phase16_history_purge`
+(`backend/alembic/versions/20261118_0041_phase16_history_purge.py`: the purge of Movement-history archival — the
+Movement deletion guard, the purge states and columns of the runs, the purge batch settings and the number of
+pre-purge backups kept). Phase 15 added no migration; Phase 16 added `0035_phase16_backup_policy` (the backup policy
+of Administration → Backups), `0040_phase16_history_archive` (the runs and carry-forward records of Movement-history
+archival and the settings of Administration → History archival & purge) and `0041_phase16_history_purge`; Phase 17
+added `0033_phase17_super_user_role` (the Super User role),
 `0034_phase17_unique_names` (unique Area and Planned Route names), `0036_phase17_outgoing_mail` (the users' email
 addresses and the outgoing mail server), `0037_phase17_two_step` (two-step sign-in) and `0038_phase17_passkeys`
 (passkeys); Phase 18 added `0039_security_settings` (the password rules and Remember me of Administration →
@@ -1140,7 +1142,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - backups set in Administration (owner decision of 2026-11-13) — delivered: Administration → Backups edits the backup interval and the numbers of hourly, daily and weekly backups kept, by default one backup every hour with 48 hourly, 30 daily and 52 weekly backups kept (a recovery point objective of one hour; migration `0035_phase16_backup_policy`); the host task runs `backup.sh --kind scheduled` every hour, which reads the policy from the database (`app.cli backup-policy`), takes a backup only when one is due (`backup-due`) and rotates the scheduled backups by those values (`backup-rotate --keep-hourly`); `--kind daily` and its retention options are refused with the command to use instead, and the backup-age threshold of `check.sh` is the interval plus 2 hours unless `--max-backup-age-hours` is given
 - a `web` access log without the successful automatic refreshes of the Production Board feed (owner decision of 2026-11-13) — delivered: the `web` access log skips a successful `GET /api/production-board` or `GET /api/policies/due-soon` (DEPLOYMENT §3.1), so a board refreshing every 5 seconds no longer shortens the log; a failed refresh is still logged
 - a minimal `pf` (owner decision of 2026-11-13) — delivered: `deploy/production/pf` runs each documented procedure of the production stack in one command: `install` (SYNOLOGY_NAS §7 and §8 on an empty database), `update TAG` (fetch, checkout and `release.sh`, so every update keeps the candidate's check (j)), `backup` (a manual backup), `restore NAME --approved-by OWNER` (the new-instance restore of OPERATIONS_RUNBOOK §6) and `status` (the containers, `/api/health` and the `status` summary, or `check.sh` with `--url`); the staging-only Deployment Admin it replaces (`deploy/synology/`, `compose.nas.yaml`, `pf.sh` and `deployment/SYNOLOGY_ADMIN.md`) is removed, and the separate deployment-kit project is paused
-- **administrative Movement-history archival/purge maintenance** (PROJECT_PROFILE §28): configurable retention period, select-by-cutoff → lossless archive export → verify → purge exactly the verified archived rows through a separate privileged maintenance path; keep reversal/reference chains and atomic-command groups whole so no retained row references purged history; include policy / size-threshold / manual triggers, scope preview, mandatory reason, and full audit; normal runtime remains append-only; no full retention/archival engine is built before this phase; the retention period is already stored by Phase 13 (`application_policy.retention_period_months`, whole months or none), and the data-size threshold's measure and unit are defined here together with its trigger
+- **administrative Movement-history archival/purge maintenance** (PROJECT_PROFILE §28): configurable retention period, select-by-cutoff → lossless archive export → verify → off-host copy → pre-purge backup → purge exactly the verified archived rows, in batches of whole flow components with a purge receipt, through a separate privileged maintenance path (steps 1 and 2 delivered, *Movement-history archival and purge* below); keep reversal/reference chains and atomic-command groups whole so no retained row references purged history; include policy / size-threshold / manual triggers, scope preview, mandatory reason, and full audit; normal runtime remains append-only; no full retention/archival engine is built before this phase; the retention period is already stored by Phase 13 (`application_policy.retention_period_months`, whole months or none), and the data-size threshold's measure and unit are defined here together with its trigger
 
 PartNumber master hard deletion is **not** a Phase 16 maintenance operation. It belongs to Phase 13 Management → Part
 Numbers and removes metadata only.
@@ -1154,9 +1156,11 @@ one read-only REPEATABLE READ snapshot after ACCESS SHARE table locks (no row or
 timeout and a 300-second default statement timeout) and runs these checks:
 
 - (a) to (f) of OPERATIONS_RUNBOOK §7 (check (f) does not report the excess of an authorized beyond-demand correction,
-  recorded `exceeds_demand`), plus the SLICE1_DATA_MODEL §17 cross-row invariants except the audit-row invariant,
-  which the transaction protocol enforces;
-- (g) no retained Movement references purged history — `not_applicable` until the purge exists (archival step 2);
+  recorded `exceeds_demand`; (a), (b), (c), (e) and (f) count the carry-forward records of purged flows), plus the
+  SLICE1_DATA_MODEL §17 cross-row invariants except the audit-row invariant, which the transaction protocol enforces;
+- (g) no row kept in the database references purged history: a purged flow has no Movement left, no lineage link
+  crosses into purged history, every purged record belongs to a run that purged, and each run's purged counts match
+  its records;
 - (h) append-only guards and database-role privileges intact — `not_applicable` only on a database without the
   PartFlow database roles (development, test, staging);
 - (i) the Hot-list query of DEPLOYMENT §5 (Hot list entries are active demand);
@@ -1221,11 +1225,13 @@ The full description is in DEPLOYMENT §3.1. In short:
 - `python -m app.cli apply-grants`, also run inside every `migrate`, derives every grant from one table classification
   (`backend/app/infrastructure/database_privileges.py`): SELECT and INSERT only on `part_movements`, `audit_events`,
   `machine_lifecycle_events`, `quantity_flow_lineage` and `work_order_allocations`; UPDATE kept on `worker_sessions`;
-  DELETE but no UPDATE on `assigned_route_steps`; no TRUNCATE anywhere; PUBLIC and default privileges removed. A table
-  without a class makes the command refuse. Grants are never restored from a dump; they are re-derived after every
-  migration and restore.
+  DELETE but no UPDATE on `assigned_route_steps`; no TRUNCATE anywhere; PUBLIC and default privileges removed. The
+  maintenance role `partflow_maintenance` reads the production tables, writes the archival tables and holds DELETE on
+  `part_movements` only. A table without a class makes the command refuse. Grants are never restored from a dump;
+  they are re-derived after every migration and restore.
 - The production `backend` connects as `partflow_app` and never holds the owner credential; the raise-on-write
-  triggers stay as the first layer, and reconcile check (h) verifies both layers from the catalogs.
+  triggers stay as the first layer — on `part_movements` a row trigger admits a DELETE only for the purge of an
+  archival run — and reconcile check (h) verifies both layers from the catalogs.
 - The backend tests also run under the application role (`PARTFLOW_TEST_DATABASE_ROLE=app`, the CI mode); this mode is
   the required local check before committing a change that touches database writes, grants or test setup.
 
@@ -1234,8 +1240,9 @@ The full description is in DEPLOYMENT §3.1. In short:
 - `deploy/production/backup.sh` publishes each backup as a directory under `PARTFLOW_BACKUP_DIR` (dump, table of
   contents, `manifest.json`, `SHA256SUMS`) by one atomic rename. `python -m app.cli backup-manifest`, `backup-verify`
   and `backup-rotate` run in the network-less `backup-tools` service. Rotation keeps the newest verified scheduled
-  backup of each of the hours, days and weeks set in Administration → Backups (initially 48, 30 and 52); pre-release,
-  manual and archive backups are never rotated.
+  backup of each of the hours, days and weeks set in Administration → Backups (initially 48, 30 and 52), and the
+  newest verified pre-purge backups, which archival takes before each purge (initially 3, set there too); pre-release
+  and manual backups are never rotated.
 - `migrate` refuses a pre-release backup that is stale, of another revision or database, tampered with, or not proven
   to hold every write.
 - `deploy/production/restore-test.sh` restores a backup into an isolated Compose project, provisions throwaway roles,
@@ -1299,15 +1306,15 @@ is recorded as done on the real host yet; the scripts were run on Docker Desktop
 ### Movement-history archival and purge
 
 The owner decided on 2026-11-13 to build archival and purge now and approved its design on 2026-11-17. It is built in
-seven steps, each its own commit with both full test suites; step 1 is delivered.
+seven steps, each its own commit with both full test suites; steps 1 and 2 are delivered.
 
 **Delivered: step 1, runs without deletion** (migration `0040_phase16_history_archive`):
 
 - the run table `history_archive_runs` (at most one open run; states `APPROVED`, `RUNNING`, `WAITING_FOR_COPY`,
   `COMPLETED`, `NOTHING_ELIGIBLE`, `CANCELLED` and `FAILED`) and the carry-forward table `history_archived_flows`,
   guarded by triggers (no delete and no truncate; the application role only requests, cancels and confirms a copy),
-  with their grant classes and the maintenance role's privileges (it reads the production tables and writes only these
-  two tables and `HistoryArchiveRun` audit rows);
+  with their grant classes and the maintenance role's privileges (it reads the production tables and writes these two
+  tables and `HistoryArchiveRun` audit rows);
 - the permission key `Run history archival and purge` (held initially by Administrator and by every role that held
   every other key), which also guards the retention period;
 - the settings of Administration → History archival & purge: the retention period (set to 24 months where it was
@@ -1324,18 +1331,38 @@ seven steps, each its own commit with both full test suites; step 1 is delivered
   to `PARTFLOW_ARCHIVE_COPY_DIR` on another device and checked there, or copied by a person who confirms the copy in
   Administration.
 
-A run ends after the off-host copy as export only (`EXPORT_ONLY`): nothing is deleted yet, and check (g) stays
-`not_applicable`.
+Runs that step 1 finished keep the result `EXPORT_ONLY` (exported to files, nothing deleted).
+
+**Delivered: step 2, purge of Movement history** (migration `0041_phase16_history_purge`):
+
+- the deletion guard: a statement trigger refuses every UPDATE and TRUNCATE of `part_movements`, and the row trigger
+  `trg_part_movements_guard_delete` refuses every DELETE except of an archived Movement of the run in state `PURGING`,
+  older than its cutoff; the maintenance role gains DELETE on `part_movements` only, and check (h) pins the new
+  trigger and functions;
+- the run goes on after its off-host copy: `archive.sh` takes a `pre-purge` backup (`backup.sh --kind pre-purge`,
+  checked by `backup-verify`, its dump started after the run's verification), the job records it and purges, all in
+  one start; the requesting User must still be active and hold the key; an interrupted purge resumes at the next start,
+  while a run found `RUNNING` fails, so a restore of the pre-purge backup never purges again;
+- the run states `PURGING` and `COMPLETED_WITH_SKIPS` and the results `PURGED` and `NOTHING_PURGED`;
+- the purge: batches of whole flow components (**Movements per purge batch**, 50,000, and **Part Numbers per purge
+  batch**, 20, settings of Administration → History archival & purge), each one transaction under the Part Number
+  locks that re-checks every flow's status, Movement count and last Movement and skips a component that changed;
+  the purge receipt `<archive name>.purged.json` beside the archive, copied with it when the job made the copy;
+- **Pre-purge backups kept** (the newest 3) in Administration → Backups, rotated by the hourly scheduled backup;
+- the readers of the carry-forward record: released, introduced, stocked and scrapped quantities, the Area totals and
+  the use of Route Templates are the same before and after a purge; Tracking shows one **History archived in run N**
+  entry per purged flow and its route steps as archived; archived commands can no longer be undone;
+- reconcile: (a), (b), (c), (e) and (f) count the carry-forward records, and (g) is implemented;
+- after a purge, `archive.sh` runs the full reconcile, and `check.sh` reports a purge receipt not yet copied off the
+  host;
+- a rehearsal of a whole run on a production-sized copy (about 3 million Movements, 2 million of them archived and
+  purged in one run): the preview took 2 seconds; the export took 79 seconds and its verification 54 seconds, each
+  within the 512 MB of the `maintenance` service (the archived set is an analyzed temporary table, and the export
+  streams its files); the purge took 31 seconds in 254 batches, each holding its Part Number locks for about 0.12
+  seconds; every figure was equal before and after the purge, and reconcile was clean.
 
 **Remaining steps:**
 
-2. Purge of Movement history: the deletion guard, DELETE on `part_movements` only for the maintenance role (its new
-   trigger and function added to the pinned guard set of check (h) in the same commit), the readers of the
-   carry-forward record (released, stocked and scrapped quantities stay exact), reconcile (g), a `pre-purge` backup
-   checked by `backup-verify` whose dump starts after the run's verification (the newest 3 kept, a setting of
-   Administration → Backups), the purge receipt, a rehearsal of a whole run on a copy of a production-sized database
-   (time and memory of the export included), and the PROJECT_PROFILE amendments; archived history can then no longer be
-   undone, reopened or adjusted.
 3. Permanent deletion requests: a key `Delete Work Orders and Part Numbers permanently`, held by Super User only;
    **Delete permanently…** in Work Order Details and in the Part Number dialog records a request that the host job
    carries out within 5 minutes under the purge's guards, after a `pre-purge` backup; the interim command
@@ -1373,7 +1400,7 @@ and a Movement purge deletes Movements only, never `worker_sessions` rows.
 
 - Platform-upgrade identity checks: the Python side is implemented by check (j); before any Python or glibc upgrade the
   owner reviews the check's list and decides on re-canonicalization.
-- Movement-history archival and purge, steps 2 to 7 — above.
+- Movement-history archival and purge, steps 3 to 7 — above.
 
 ## Phase 17 — Owner Decisions After Go-Live
 
@@ -1498,7 +1525,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 16: Movement-history archival step 1 delivered (runs that export the history of closed flows to verified archive files and copy them off the host, deleting nothing); migration `0040_phase16_history_archive` becomes the schema head. |
+| 2026-11-18 | uncommitted | Phase 16: Movement-history archival step 2 delivered (runs purge the archived history after the off-host copy and a pre-purge backup, and the carry-forward records keep every figure unchanged); migration `0041_phase16_history_purge` becomes the schema head. |
+| 2026-11-17 | `2f12d33` | Phase 16: Movement-history archival step 1 delivered (runs that export the history of closed flows to verified archive files and copy them off the host, deleting nothing); migration `0040_phase16_history_archive` becomes the schema head. |
 | 2026-11-17 | `1490927` | Phase 16: the PN entry canonical form is delivered; Add Part uses the canonical form the server derives from the entry as typed. |
 | 2026-11-17 | `4539a2b` | Phase 18 item 4 delivered (Administration → Security with the password rules and Remember me), which closes Phase 18; migration `0039_security_settings` becomes the schema head. |
 | 2026-11-17 | `4be2389` | Phase 18 item 3 delivered: a user who holds Manage Scan Stations views any Scan Station without an enrolled device. |

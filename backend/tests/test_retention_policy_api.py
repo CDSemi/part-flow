@@ -61,12 +61,14 @@ _DUE_SOON_POLICY_PATH = "/api/policies/due-soon"
 _OTHER_SECTION_PATHS = (_SESSIONS_POLICY_PATH, _CORRECTION_POLICY_PATH, _DUE_SOON_POLICY_PATH)
 _SECTION = "data-retention"
 _KEY = "retention_period_months"
-#: The section's other settings at their defaults (migration 0040).
+#: The section's other settings at their defaults (migrations 0040 and 0041).
 _OTHER_SETTINGS = {
     "shortest_retention_months": 12,
     "archive_max_wait_days": 7,
     "archive_start_minute": 20,
     "archive_preview_seconds": 90,
+    "archive_purge_batch_movements": 50000,
+    "archive_purge_batch_part_numbers": 20,
 }
 
 _E_T1 = (

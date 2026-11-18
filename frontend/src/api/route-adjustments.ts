@@ -36,6 +36,11 @@ import type {
 // Types
 // ---------------------------------------------------------------------------
 
+/** The step states the editor reads. Its flows are ACTIVE, and an active
+ * flow's history is never archived, so `ARCHIVED` is a malformed answer
+ * here. */
+export type EditorStepState = Exclude<RouteStepState, 'ARCHIVED'>;
+
 /** One step of an assigned route as the editor reads it. */
 export interface EditorStep {
   id: number;
@@ -46,7 +51,7 @@ export interface EditorStep {
   expectedDuration: string | null;
   preferredMachine: TrackingMachineRef | null;
   instructions: string | null;
-  state: RouteStepState;
+  state: EditorStepState;
   /** A past step (at or before the kept-through sequence): never edited. */
   locked: boolean;
 }
@@ -93,7 +98,7 @@ export interface RouteAdjustmentResult {
 
 type Wire = Record<string, unknown>;
 
-const STEP_STATES: readonly RouteStepState[] = ['DONE', 'CURRENT', 'FUTURE'];
+const STEP_STATES: readonly EditorStepState[] = ['DONE', 'CURRENT', 'FUTURE'];
 const LOCATION_STATES: readonly LocationState[] = [
   'MACHINE',
   'QUEUE',

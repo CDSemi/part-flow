@@ -8,8 +8,8 @@ Administration"):
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_history_archive_schema.py`` with
-  ``0040_phase16_history_archive``;
+  ``tests/test_history_purge_schema.py`` with
+  ``0041_phase16_history_purge``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install holds the owner's defaults (every hour; 48 hourly, 30
   daily and 52 weekly backups kept) and the CHECKs refuse every value
@@ -277,4 +277,5 @@ def test_the_downgrade_refuses_a_written_policy(
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head_engine.connect() as connection:
         assert _version(connection) == _CODE_HEAD
-        assert len(_backup_columns(connection)) == len(_DEFAULTS)
+        # The head also holds the pre-purge backups kept (0041, history purge).
+        assert _backup_columns(connection) == sorted([*_DEFAULTS, "backup_keep_pre_purge"])

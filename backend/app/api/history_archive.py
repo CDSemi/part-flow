@@ -1,4 +1,4 @@
-"""History archival endpoints (Phase 16, history archival design B; build step 1).
+"""History archival endpoints (Phase 16, history archival design B; build steps 1-2).
 
 HTTP surface of the runs of Administration → History archival & purge; its
 settings are ``/api/policies/data-retention`` (``app.api.policies``). Routes
@@ -20,7 +20,12 @@ translate typed failures (404 unknown run, 409 conflict, 422 invalid).
   is recomputed and stored; 201 with the run. 409 while another run is
   open or when nothing is eligible.
 - ``POST /history-archive/runs/{run_id}/cancel`` — cancel an ``APPROVED`` or
-  ``WAITING_FOR_COPY`` run (a cancelled run answers unchanged).
+  ``WAITING_FOR_COPY`` run (a cancelled run answers unchanged); a run the
+  host job works on (``RUNNING``, ``PURGING``) is refused.
+
+A run answers its purge too (build step 2): the pre-purge backup, when the
+purge started, what it deleted so far, and the purge receipt's name and
+SHA-256.
 - ``POST /history-archive/runs/{run_id}/copy-confirmation`` —
   ``{"manifest_sha256": hex}``: confirm the off-host copy of a
   ``WAITING_FOR_COPY`` run, against the manifest SHA-256 shown.
@@ -95,6 +100,21 @@ class RunSkips(BaseModel):
     flows: int
 
 
+class RunBackup(BaseModel):
+    """The pre-purge backup the host script took before the purge."""
+
+    name: str
+    dump_started_at: datetime.datetime
+
+
+class RunPurged(BaseModel):
+    """What the purge deleted so far: whole components."""
+
+    components: int
+    flows: int
+    movements: int
+
+
 class RunResponse(BaseModel):
     id: int
     state: str
@@ -117,6 +137,13 @@ class RunResponse(BaseModel):
     copy_confirmed_at: datetime.datetime | None
     copy_confirmed_by: UserRef | None
     cancelled_by: UserRef | None
+    # The purge (build step 2): null until the run became PURGING.
+    pre_purge_backup: RunBackup | None
+    purge_started_at: datetime.datetime | None
+    purged: RunPurged | None
+    # The purge receipt beside the archive folder, once written.
+    receipt_name: str | None
+    receipt_sha256: str | None
     finished_at: datetime.datetime | None
     result: str | None
     failure_reason: str | None
@@ -162,6 +189,22 @@ def _run_response(view: RunView) -> RunResponse:
     )
     requested_by = _user(view.requested_by)
     assert requested_by is not None
+    backup = (
+        None
+        if run.pre_purge_backup_name is None or run.pre_purge_backup_started_at is None
+        else RunBackup(
+            name=run.pre_purge_backup_name, dump_started_at=run.pre_purge_backup_started_at
+        )
+    )
+    purged = (
+        None
+        if run.purge_started_at is None
+        else RunPurged(
+            components=run.purged_components or 0,
+            flows=run.purged_flows or 0,
+            movements=run.purged_movements or 0,
+        )
+    )
     return RunResponse(
         id=run.id,
         state=run.state,
@@ -191,6 +234,11 @@ def _run_response(view: RunView) -> RunResponse:
         copy_confirmed_at=run.copy_confirmed_at,
         copy_confirmed_by=_user(view.copy_confirmed_by),
         cancelled_by=_user(view.cancelled_by),
+        pre_purge_backup=backup,
+        purge_started_at=run.purge_started_at,
+        purged=purged,
+        receipt_name=history_archive.receipt_name(run.archive_name, run.receipt_sha256),
+        receipt_sha256=run.receipt_sha256,
         finished_at=run.finished_at,
         result=run.result,
         failure_reason=run.failure_reason,

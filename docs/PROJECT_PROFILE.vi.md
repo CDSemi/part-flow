@@ -1,6 +1,6 @@
 # Hồ sơ dự án PartFlow v22
 
-> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `4539a2b` cộng các thay đổi chưa commit ngày 2026-11-17.
+> **Bản gốc tiếng Anh:** [`PROJECT_PROFILE.md`](./PROJECT_PROFILE.md). Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi chưa commit ngày 2026-11-18.
 > Bản tiếng Anh là bản có thẩm quyền: nếu hai bản khác nhau, bản tiếng Anh đúng và bản tiếng Việt phải được sửa lại.
 
 > **Trạng thái:** Tài liệu sống (Living Document)
@@ -64,7 +64,7 @@ Hệ thống phải ưu tiên:
 1. Độ chính xác của việc theo dõi.
 2. Sự đơn giản trong vận hành.
 3. Các quy trình nhanh, dựa trên barcode (mã vạch).
-4. Lịch sử di chuyển đầy đủ và bất biến.
+4. Lịch sử di chuyển đầy đủ và bất biến (lịch sử cũ hơn có thể chuyển sang các tệp lưu trữ đã kiểm tra, §28 Administrative Archival and Purge).
 5. Tối thiểu hóa thao tác của người vận hành.
 6. Tính toàn vẹn số lượng đáng tin cậy.
 7. Khả năng quan sát sản xuất rõ ràng.
@@ -269,8 +269,8 @@ Thay vào đó:
 Các quy tắc sau là bắt buộc:
 
 1. Một PN đã được ghi nhận không bao giờ được trở nên không thể truy vết.
-2. Lịch sử Movement là bất biến.
-3. Trạng thái sản xuất hiện tại phải được suy ra từ lịch sử Movement bất cứ khi nào khả thi.
+2. Lịch sử Movement là bất biến: không Movement nào bị thay đổi, và Movement chỉ rời khỏi cơ sở dữ liệu qua việc bảo trì tường minh của §28 Administrative Archival and Purge — việc xóa dọn (purge) của lưu trữ, sau khi đã có một bản lưu trữ đã kiểm tra của chúng nằm ngoài máy chủ, và việc xóa vĩnh viễn dữ liệu thử nghiệm tạm thời.
+3. Trạng thái sản xuất hiện tại phải được suy ra từ lịch sử Movement bất cứ khi nào khả thi; với một flow có các Movement đã bị xóa dọn khi lưu trữ, thì từ bản ghi chuyển tiếp (carry-forward record) của nó (§28 Administrative Archival and Purge).
 4. Một PN có thể đồng thời có số lượng ở nhiều Area.
 5. Một PN có thể đồng thời có số lượng được gán cho nhiều Machine.
 6. Số lượng không bao giờ được vô tình bị tạo ra, bị hủy, bị nhân đôi, bị thất lạc hoặc trở thành số âm.
@@ -936,7 +936,7 @@ Quy tắc:
 - Movement không gắn với một Work Order Allocation cụ thể.
 - Movement không bao giờ được ghi đè một cách âm thầm.
 - Các sửa sai (correction) bảo toàn sự kiện gốc.
-- Trạng thái hiện tại phải có thể được tái dựng từ lịch sử Movement.
+- Trạng thái hiện tại phải có thể được tái dựng từ lịch sử Movement, cùng với các bản ghi chuyển tiếp của những flow có các Movement đã bị xóa dọn khi lưu trữ (§28 Administrative Archival and Purge).
 
 ---
 
@@ -1117,7 +1117,7 @@ Tổng số lượng đang hoạt động phải luôn có thể đối chiếu 
 introduced quantity = active quantity + stocked quantity + scrapped quantity
 ```
 
-trong đó số lượng được đưa vào (introduced quantity) bao gồm các lần phát hành vào sản xuất (production release), các Modify intake và các lần bổ sung `QUANTITY_ADJUSTED` tường minh. Scrap không bao giờ làm giảm số lượng yêu cầu của Work Order Demand.
+trong đó số lượng được đưa vào (introduced quantity) bao gồm các lần phát hành vào sản xuất (production release), các Modify intake và các lần bổ sung `QUANTITY_ADJUSTED` tường minh. Scrap không bao giờ làm giảm số lượng yêu cầu của Work Order Demand. Với một flow có các Movement đã bị xóa dọn khi lưu trữ, số lượng được đưa vào, số lượng đã nhập kho và số lượng scrap của nó lấy từ bản ghi chuyển tiếp của nó (§28 Administrative Archival and Purge), nên các con số này giống hệt nhau trước và sau một lần xóa dọn.
 
 ---
 
@@ -1332,7 +1332,7 @@ Sản xuất mới từ ERP thường dùng Request Type `NEW`.
 
 Area bắt đầu có thể là Material hoặc một Area bắt đầu khác đã được cấu hình. Một Area **cuối (terminal)** không bao giờ là Area bắt đầu: đó là nơi số lượng đã xong kết thúc (§18), nên việc phát hành vào sản xuất vào Area đó bị từ chối.
 
-**Phát hành từng phần và nhiều lần (Partial and repeated release).** Một Work Order Demand có thể được phát hành thành **nhiều phần**: phát hành 20 trong một demand 50 chiếc, rồi 12, rồi 18 là bình thường. Mỗi phần là một lần phát hành tường minh riêng, tạo ra Quantity Flow riêng của nó. Các phần không bao giờ được gộp lại, và mọi phần sau phần đầu tiên đều phải tuân theo quy tắc xác nhận khi đã có số lượng đang hoạt động được nêu bên dưới. Số lượng đã phát hành của demand là tổng của các Movement phát hành ghi nhận nó, và số lượng còn lại (số lượng yêu cầu trừ số lượng đã phát hành) là một giới hạn cứng: phát hành nhiều hơn phần còn lại, hoặc phát hành bất kỳ lượng nào khi không còn gì, đều bị từ chối và không tạo ra gì.
+**Phát hành từng phần và nhiều lần (Partial and repeated release).** Một Work Order Demand có thể được phát hành thành **nhiều phần**: phát hành 20 trong một demand 50 chiếc, rồi 12, rồi 18 là bình thường. Mỗi phần là một lần phát hành tường minh riêng, tạo ra Quantity Flow riêng của nó. Các phần không bao giờ được gộp lại, và mọi phần sau phần đầu tiên đều phải tuân theo quy tắc xác nhận khi đã có số lượng đang hoạt động được nêu bên dưới. Số lượng đã phát hành của demand là tổng của các Movement phát hành ghi nhận nó, cộng với số lượng đã phát hành mà các bản ghi chuyển tiếp của những flow đã bị xóa dọn khi lưu trữ giữ cho nó (§28 Administrative Archival and Purge), và số lượng còn lại (số lượng yêu cầu trừ số lượng đã phát hành) là một giới hạn cứng: phát hành nhiều hơn phần còn lại, hoặc phát hành bất kỳ lượng nào khi không còn gì, đều bị từ chối và không tạo ra gì.
 
 **Sửa có giới hạn sau khi phát hành (Restricted edit after release).** Nhu cầu nghiệp vụ vẫn tiếp tục thay đổi sau khi sản xuất đã bắt đầu — số lượng tăng lên, ngày đến hạn bị dời, Job Number được bổ sung — nên một dòng Work Order Demand đã có số lượng phát hành vẫn **có thể sửa trong giới hạn**; nó không phải là chỉ đọc:
 
@@ -1504,7 +1504,7 @@ Worker được ghi trên lần đảo ngược tuân theo chế độ nhận d�
 
 Ở chế độ phiên quét mà không có phiên đang hoạt động hoặc phiên đã hết hạn, Scan Station vốn đã bị chặn cho đến khi có một lần quét thẻ hợp lệ (§19) — nên Undo chỉ có thể truy cập được khi có một phiên hợp lệ.
 
-Undo trong sản xuất phải hoạt động trên toàn bộ **lệnh ứng dụng (application command)**: khi một thao tác người dùng đã tạo ra nhiều bản ghi Movement liên quan — ví dụ một lần chuyển đã ngầm hoàn tất xử lý tại nguồn (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — việc đảo ngược bù trừ cả lệnh thay vì đảo ngược một cách mù quáng một dòng tùy ý.
+Undo trong sản xuất phải hoạt động trên toàn bộ **lệnh ứng dụng (application command)**: khi một thao tác người dùng đã tạo ra nhiều bản ghi Movement liên quan — ví dụ một lần chuyển đã ngầm hoàn tất xử lý tại nguồn (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — việc đảo ngược bù trừ cả lệnh thay vì đảo ngược một cách mù quáng một dòng tùy ý. Một lệnh có các Movement đã bị xóa dọn khi lưu trữ không thể Undo được nữa: các Movement của nó không còn trong cơ sở dữ liệu (§28 Administrative Archival and Purge).
 
 Undo được cấp bởi quyền **Undo recent eligible scans** (§20). "Recent eligible" (gần đây và đủ điều kiện) có nghĩa chính xác là quy tắc đủ điều kiện nêu trên — thao tác PN đã hoàn tất đủ điều kiện gần nhất — không có cửa sổ thời gian riêng nào. Role Operator ban đầu có quyền này.
 
@@ -1776,7 +1776,7 @@ Vai trò Administrator ban đầu cấp các quyền:
 - chỉnh sửa Work Order Demand,
 - chỉnh sửa Work Order Allocation,
 - thực hiện các sửa sai lịch sử được ủy quyền,
-- chạy lưu trữ và xóa dọn lịch sử — các thiết lập của nó, trong đó có thời hạn lưu giữ, và các lần chạy của nó (§28 Administrative Archival and Purge),
+- chạy lưu trữ và xóa dọn lịch sử — các thiết lập của nó, trong đó có thời hạn lưu giữ và kích thước các đợt xóa dọn, và các lần chạy của nó, vốn xóa dọn lịch sử đã lưu trữ khỏi cơ sở dữ liệu (§28 Administrative Archival and Purge),
 - cấu hình thiết lập hệ thống.
 
 ---
@@ -2025,7 +2025,7 @@ Màn hình PN được chọn phải hiển thị:
 - số lượng đã xong (`READY_TO_TRANSFER`) theo Area, khác biệt với việc gán Machine đang hoạt động, xử lý trực tiếp và `STOCKED` — với `AREA_COMPLETED` được hiển thị như một Movement bất biến trong lịch sử và cách diễn đạt dành cho Operator như `Completed processing at Lathe — ready to transfer` trong các bản tóm tắt; kệ chứa hàng đã xong không bao giờ xuất hiện như một Route Step,
 - các Quantity Flow cùng Route Mode của chúng,
 - Planned Routes và các vết route thực tế của Floating Route,
-- lịch sử Movement thực tế,
+- lịch sử Movement thực tế — với một flow có các Movement đã bị xóa dọn khi lưu trữ, một mục nêu lần chạy lưu trữ, khoảng thời gian và số Movement, với các bước route của flow hiển thị là đã lưu trữ (§28 Administrative Archival and Purge),
 - lịch sử scrap và số lượng scrap tích lũy,
 - thời gian ở mỗi Area,
 - số lượng đã nhập kho,
@@ -2142,7 +2142,7 @@ Administration tập trung vào quản trị hệ thống:
 - hành vi quét,
 - chính sách Worker session (thời gian chờ không hoạt động trượt của phiên quét thẻ — một giá trị mặc định cùng các giá trị ghi đè theo từng Area — và các tùy chọn xác nhận bằng thẻ của `DONE`, thao tác trả về `QUEUE` và Undo, §19),
 - thiết lập hiển thị Department (theo từng Department — bao gồm thời gian xoay vòng của Production Board, §21),
-- công việc bảo trì lưu trữ (archive) và xóa dọn (purge) lịch sử cùng các thiết lập lưu giữ (retention) (§28 Administrative Archival and Purge),
+- công việc bảo trì lưu trữ (archive) và xóa dọn (purge) lịch sử cùng các thiết lập lưu giữ (retention) và đợt xóa dọn của nó (§28 Administrative Archival and Purge),
 - thiết lập ứng dụng.
 
 Machine, Route Template và siêu dữ liệu PartNumber master không phải là màn hình của Administration: chúng là dữ liệu chủ sản xuất được quản lý dựa trên quyền trong Management → Machines, Management → Planned Routes và Management → Part Numbers (§20), không có màn hình Administration trùng lặp. Machine vẫn là một phần của điều kiện tiên quyết thiết lập môi trường tối thiểu — được cấu hình qua Management → Machines trước khi chạy sản xuất thực.
@@ -2302,6 +2302,8 @@ Hệ thống nên hỗ trợ:
 - lịch sử sai lệch Route,
 - lịch sử sửa sai (correction).
 
+Báo cáo về lịch sử đọc các Movement còn giữ trong cơ sở dữ liệu; lịch sử đã bị xóa dọn khi lưu trữ được đọc từ các tệp lưu trữ của nó. Một lần xóa dọn không bao giờ làm mất số lượng: số lượng đã phát hành, được đưa vào, đã nhập kho và scrap, theo từng PN và từng Area, đều tính cả các bản ghi chuyển tiếp của những flow đã bị xóa dọn (§28 Administrative Archival and Purge).
+
 Báo cáo phải phân biệt được:
 
 - demand nghiệp vụ,
@@ -2332,9 +2334,9 @@ Hệ thống phải lưu giữ nhật ký audit đầy đủ cho:
 - Undo,
 - Worker Session,
 - thay đổi cấu hình quản trị,
-- các thao tác lưu trữ (archive) và xóa dọn (purge) quản trị (ai, khi nào, phạm vi, lý do).
+- các thao tác lưu trữ (archive) và xóa dọn (purge) quản trị (ai, khi nào, phạm vi, lý do, kết quả, bản lưu trữ và biên nhận xóa dọn của nó).
 
-Bản ghi sản xuất lịch sử không bao giờ biến mất qua các quy trình thông thường của ứng dụng — trong lúc vận hành sản xuất bình thường, dữ liệu chỉ được ghi thêm (**bất biến trong lúc vận hành sản xuất**).
+Bản ghi sản xuất lịch sử không bao giờ biến mất qua các quy trình thông thường của ứng dụng — trong lúc vận hành sản xuất bình thường, dữ liệu chỉ được ghi thêm (**bất biến trong lúc vận hành sản xuất**). Chỉ việc bảo trì tường minh của *Administrative Archival and Purge* bên dưới mới xóa bản ghi sản xuất: việc xóa dọn của lưu trữ, sau khi đã có một bản lưu trữ đã kiểm tra của chúng nằm ngoài máy chủ, và việc xóa vĩnh viễn dữ liệu thử nghiệm tạm thời. Việc xóa dọn của lưu trữ không bao giờ xóa các sự kiện audit.
 
 Khi khả thi, ràng buộc cơ sở dữ liệu nên đảm bảo:
 
@@ -2380,20 +2382,21 @@ Vận hành sản xuất bình thường chỉ ghi thêm (append-only) và khôn
 
 Các tệp lưu trữ trở thành nơi lưu trữ lịch sử dài hạn cho phần lịch sử đã bị xóa dọn. Quy tắc bắt buộc:
 
-- **Vận hành sản xuất bình thường không bao giờ được UPDATE hoặc DELETE các dòng `PartMovement`** — cơ chế bảo vệ chỉ-ghi-thêm (thu hồi quyền UPDATE/DELETE khỏi role của ứng dụng cùng một trigger báo lỗi khi ghi) luôn có hiệu lực đối với ứng dụng. Lưu trữ/xóa dọn chỉ được thực hiện qua một **đường bảo trì Admin đặc quyền riêng** với cơ chế ủy quyền riêng — không bao giờ qua role của ứng dụng, các quy trình thông thường của ứng dụng hay bất kỳ đường ghi sản xuất nào.
-- **Không bao giờ xóa dọn trước khi có một lần xuất lưu trữ thành công và đã được kiểm tra, và trước khi bản lưu trữ đã kiểm tra cũng nằm ngoài máy chủ**: job bảo trì chép nó sang một thư mục thứ hai trên một thiết bị khác và kiểm tra bản sao, hoặc một người tự chép rồi xác nhận bản sao trong Administration.
+- **Vận hành sản xuất bình thường không bao giờ được UPDATE hoặc DELETE các dòng `PartMovement`.** Role của ứng dụng không có quyền nào trong hai quyền đó; một trigger cấp câu lệnh từ chối mọi UPDATE và TRUNCATE; và một trigger cấp dòng từ chối việc DELETE bất kỳ Movement nào, trừ một Movement đã lưu trữ của lần chạy đang xóa dọn lúc đó (trạng thái `PURGING`) và cũ hơn mốc cắt của lần chạy ấy — việc xóa vĩnh viễn dữ liệu thử nghiệm tạm thời, ở trên, là ngoại lệ duy nhất khác. Lưu trữ/xóa dọn chỉ được thực hiện qua một **đường bảo trì Admin đặc quyền riêng** với cơ chế ủy quyền riêng — job trên host, chạy bằng role cơ sở dữ liệu bảo trì, vốn chỉ có quyền DELETE trên Movement — không bao giờ qua role của ứng dụng, các quy trình thông thường của ứng dụng hay bất kỳ đường ghi sản xuất nào.
+- **Không bao giờ xóa dọn trước khi có một lần xuất lưu trữ thành công và đã được kiểm tra, trước khi bản lưu trữ đã kiểm tra cũng nằm ngoài máy chủ, và khi chưa có một bản sao lưu mới**: job bảo trì chép bản lưu trữ sang một thư mục thứ hai trên một thiết bị khác và kiểm tra bản sao, hoặc một người tự chép rồi xác nhận bản sao trong Administration; sau đó job tạo một bản sao lưu cơ sở dữ liệu đã kiểm tra (bản sao lưu trước xóa dọn, pre-purge), bắt đầu sau lần kiểm tra bản lưu trữ, và ghi tên bản sao lưu đó vào lần chạy trước khi xóa bất cứ thứ gì.
 - Bản lưu trữ phải giữ đủ dữ liệu để xác định PN, số lượng, loại Movement, Area, Operation, Machine, Worker, các mốc thời gian, quan hệ/ngữ cảnh sửa sai và các trường audit bắt buộc.
 - PN trong lịch sử lưu trữ được lưu trực tiếp dưới dạng chuỗi PN chuẩn — không bao giờ phụ thuộc vào master PN.
-- **Việc xóa dọn không bao giờ được làm đứt quan hệ giữa các bản ghi Movement.** Các Movement liên quan — ví dụ một bản sửa sai `REVERSED` và Movement gốc mà nó tham chiếu qua `reverses_movement_id`, hoặc các Movement của cùng một lệnh ứng dụng nguyên tử — được lưu trữ và xóa dọn cùng nhau: một Movement còn giữ lại không bao giờ được tham chiếu tới một dòng đã bị xóa dọn. Việc chọn theo mốc cắt lưu giữ phải giữ nguyên vẹn các chuỗi như vậy (giữ lại cả chuỗi cho tới khi mọi thành phần đều nằm sau mốc cắt), và bản lưu trữ bảo toàn ngữ cảnh quan hệ. Vì vậy việc chọn làm việc trên trọn từng cụm flow — các Quantity Flow nối với nhau qua tách (split) và gộp (merge) — và chỉ lấy một cụm khi mọi flow trong đó đã đóng (không còn `ACTIVE`) và mọi Movement của nó đều cũ hơn mốc cắt.
+- **Việc xóa dọn không bao giờ được làm đứt quan hệ giữa các bản ghi Movement.** Các Movement liên quan — ví dụ một bản sửa sai `REVERSED` và Movement gốc mà nó tham chiếu qua `reverses_movement_id`, hoặc các Movement của cùng một lệnh ứng dụng nguyên tử — được lưu trữ và xóa dọn cùng nhau: một Movement còn giữ lại không bao giờ được tham chiếu tới một dòng đã bị xóa dọn. Việc chọn theo mốc cắt lưu giữ phải giữ nguyên vẹn các chuỗi như vậy (giữ lại cả chuỗi cho tới khi mọi thành phần đều nằm sau mốc cắt), và bản lưu trữ bảo toàn ngữ cảnh quan hệ. Vì vậy việc chọn làm việc trên trọn từng cụm flow — các Quantity Flow nối với nhau qua tách (split) và gộp (merge) — và chỉ lấy một cụm khi mọi flow trong đó đã đóng (không còn `ACTIVE`) và mọi Movement của nó đều cũ hơn mốc cắt. Một flow đã bị xóa dọn vẫn giữ dòng của nó, trạng thái, các liên kết lineage và bản chụp route của nó, nên không có gì tham chiếu tới flow bị đứt.
+- **Bản ghi chuyển tiếp (carry-forward record).** Mỗi flow đã lưu trữ có một bản ghi trong cơ sở dữ liệu, còn lại sau khi các Movement của nó bị xóa dọn: lần chạy, trạng thái đóng của flow, Movement đầu và cuối cùng thời điểm của chúng, số Movement, và các số lượng mà các con số cần — số lượng đã phát hành cùng dòng demand của nó, số lượng điều chỉnh, số lượng đã nhập kho và scrap cùng Area của chúng — và các lệnh của những liên kết lineage của nó đã bị Undo. Ở bất cứ chỗ nào hồ sơ này suy ra trạng thái, số lượng hoặc vết route từ lịch sử Movement, lịch sử của một flow đã bị xóa dọn nghĩa là bản ghi chuyển tiếp của nó cùng với các tệp lưu trữ của nó: mọi con số đọc Movement đều cộng các bản ghi của những flow đã bị xóa dọn trong cùng một truy vấn, nên số lượng đã phát hành, được đưa vào, đã nhập kho, scrap và mức sử dụng Route Template giống hệt nhau trước và sau một lần xóa dọn. Bên cạnh các tệp lưu trữ, bản ghi này là bằng chứng của lịch sử đã bị xóa dọn trong cơ sở dữ liệu.
 - **Mốc cắt không bao giờ lấn vào thời hạn lưu giữ.** Mốc cắt của một lần chạy là đầu một ngày theo lịch của site, không bao giờ muộn hơn ngày nằm trước ngày chạy đúng bằng thời hạn lưu giữ; một yêu cầu thủ công có thể chọn mốc cắt sớm hơn, không bao giờ muộn hơn. Thời hạn lưu giữ là một số nguyên tháng, không bao giờ ngắn hơn thời hạn lưu giữ ngắn nhất được phép — bản thân nó là một thiết lập chỉ đổi được khi có lý do — hoặc không có thời hạn lưu giữ nào, khi đó không có gì đủ điều kiện.
 - Lưu giữ/xóa dọn là việc bảo trì quản trị tường minh, không bao giờ là một phần của quy trình sản xuất thông thường; nó có thể được kích hoạt bởi chính sách lưu giữ do Admin cấu hình, một ngưỡng kích thước dữ liệu do Admin cấu hình, hoặc một yêu cầu thủ công của Admin.
-- Các thao tác bảo trì đòi hỏi ủy quyền tường minh — quyền chạy lưu trữ và xóa dọn lịch sử (§20) —, hiển thị bản xem trước phạm vi/tác động trước khi thực hiện, bắt buộc có lý do và được audit đầy đủ: phạm vi, mốc cắt, ai/cái gì khởi tạo, khi nào và kết quả. Mỗi yêu cầu được ghi thành một lần chạy, giữ lý do và bản xem trước mà nó được duyệt cùng; tại mỗi thời điểm chỉ có nhiều nhất một lần chạy đang mở.
-- Các bản ghi còn cần để dựng lại trạng thái sản xuất đang hoạt động không bao giờ bị lưu trữ/xóa dọn; trạng thái sản xuất đang hoạt động và các projection hiện tại phải luôn đối chiếu khớp được sau khi lưu trữ.
-- Việc xóa dọn xóa đúng những dòng đã được lưu trữ (lưu trữ/xuất trước, rồi xóa dọn những gì đã được lưu trữ) — không bao giờ dùng việc truncate toàn bảng.
-- Thiết lập lưu giữ nằm trong Administration/cấu hình, không nằm trong logic quy trình sản xuất.
-- Bản lưu trữ là một tập tệp trên máy chủ, nằm ngoài cơ sở dữ liệu, mỗi tệp có một checksum, mà các công cụ chuẩn kiểm tra và đọc được; không giả định thêm hạ tầng lưu trữ nào (bản sao ngoài máy chủ có thể nằm trên bất kỳ thiết bị thứ hai nào, hoặc được chép bằng tay).
+- Các thao tác bảo trì đòi hỏi ủy quyền tường minh — quyền chạy lưu trữ và xóa dọn lịch sử (§20) —, hiển thị bản xem trước phạm vi/tác động trước khi thực hiện, bắt buộc có lý do và được audit đầy đủ: phạm vi, mốc cắt, ai/cái gì khởi tạo, khi nào và kết quả. Mỗi yêu cầu được ghi thành một lần chạy, giữ lý do và bản xem trước mà nó được duyệt cùng; tại mỗi thời điểm chỉ có nhiều nhất một lần chạy đang mở. Một lần chạy xuất, kiểm tra và chép bản lưu trữ của nó, tạo bản sao lưu trước xóa dọn rồi mới xóa dọn; nó kết thúc ở trạng thái hoàn tất, hoặc hoàn tất có bỏ qua khi những cụm đã thay đổi sau lần xuất được giữ lại trong cơ sở dữ liệu.
+- Các bản ghi còn cần để dựng lại trạng thái sản xuất đang hoạt động không bao giờ bị lưu trữ/xóa dọn; trạng thái sản xuất đang hoạt động và các projection hiện tại phải luôn đối chiếu khớp được sau khi lưu trữ: các kiểm tra đối chiếu (reconcile) tính cả các bản ghi chuyển tiếp của những flow đã bị xóa dọn và kiểm tra rằng không dòng nào còn giữ trong cơ sở dữ liệu tham chiếu tới lịch sử đã bị xóa dọn.
+- Việc xóa dọn xóa đúng những dòng đã được lưu trữ (lưu trữ/xuất trước, rồi xóa dọn những gì đã được lưu trữ) — không bao giờ dùng việc truncate toàn bảng. Nó làm việc theo từng đợt gồm trọn các cụm flow, mỗi đợt là một transaction giữ các khóa Part Number của các cụm trong đợt; một cụm đã thay đổi kể từ lần xuất thì được bỏ qua và ở lại trong cơ sở dữ liệu. Mỗi lần chạy để lại một biên nhận xóa dọn bên cạnh bản lưu trữ của nó (`<archive name>.purged.json`), liệt kê từng cụm là đã xóa dọn, đã bỏ qua hay được giữ lại.
+- Thiết lập lưu giữ nằm trong Administration/cấu hình, không nằm trong logic quy trình sản xuất — trong đó có kích thước các đợt xóa dọn (số Movement và số Part Number mỗi đợt).
+- Bản lưu trữ là một tập tệp trên máy chủ, nằm ngoài cơ sở dữ liệu, mỗi tệp có một checksum, mà các công cụ chuẩn kiểm tra và đọc được; không giả định thêm hạ tầng lưu trữ nào (bản sao ngoài máy chủ có thể nằm trên bất kỳ thiết bị thứ hai nào, hoặc được chép bằng tay). Khi một lần chạy đã xóa dọn, bản lưu trữ và bản sao ngoài máy chủ của nó là những bản duy nhất của phần lịch sử Movement đó, ngoài các bản sao lưu tạo trước lần xóa dọn.
 
-Lưu ý sự phân biệt: *định danh sản xuất phải luôn truy vết được* (luôn đúng — bản ghi sản xuất mang PN chuẩn của chúng, và lịch sử đã lưu trữ vẫn là một phần của hồ sơ vĩnh viễn) **không** giống với *mọi dòng Movement thô phải nằm mãi mãi trong cơ sở dữ liệu chính* (không bắt buộc — có áp dụng lưu trữ theo chính sách lưu giữ).
+Lưu ý sự phân biệt: *định danh sản xuất phải luôn truy vết được* (luôn đúng — bản ghi sản xuất mang PN chuẩn của chúng, và lịch sử đã lưu trữ vẫn là một phần của hồ sơ vĩnh viễn qua các tệp lưu trữ và bản ghi chuyển tiếp của nó) **không** giống với *mọi dòng Movement thô phải nằm mãi mãi trong cơ sở dữ liệu chính* (không bắt buộc — có áp dụng lưu trữ theo chính sách lưu giữ).
 
 ---
 
@@ -2506,7 +2509,8 @@ Mọi tính năng tương lai phải củng cố các nguyên tắc sau:
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §20 và §28: quyền chạy lưu trữ và xóa dọn lịch sử, quy tắc mốc cắt và cụm flow của một lần chạy, và bản sao ngoài máy chủ của bản lưu trữ. |
+| 2026-11-18 | uncommitted | §2, §6, §8.11, §11, §13, §16, §20, §21, §27 và §28: các lần chạy xóa dọn lịch sử Movement đã lưu trữ sau bản sao ngoài máy chủ và một bản sao lưu trước xóa dọn, và bản ghi chuyển tiếp giữ mọi con số không đổi. |
+| 2026-11-17 | 2f12d33 | §20 và §28: quyền chạy lưu trữ và xóa dọn lịch sử, quy tắc mốc cắt và cụm flow của một lần chạy, và bản sao ngoài máy chủ của bản lưu trữ. |
 | 2026-11-17 | 4539a2b | §20 và §21: Administration → Security gom các thiết lập đăng nhập, với quy tắc mật khẩu và Remember me có thể cấu hình. |
 | 2026-11-17 | 4be2389 | §15 và §20: một User có quyền quản lý Scan Station có thể xem bất kỳ Scan Station nào từ một trình duyệt chưa đăng ký, chỉ để đọc. |
 | 2026-11-17 | 4cfaf35 | Machines và Part Numbers: in nhiều nhãn barcode cùng lúc; thứ tự theo ngày thêm và lần dùng cuối của các bản ghi master Part Number. |

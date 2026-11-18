@@ -296,12 +296,14 @@ class Restore(PfHarness):
                 self.assertIn(message, self.result.stderr)
                 self.assertNotIn("up -d backend web", self.labels())
                 self.assertEqual(self.stub_calls("smoke.sh"), [])
-        with self.subTest(case="no backup folder"):
-            self.reset()
-            self.pf("restore", "20261008T030000Z-manual", "--approved-by", "Owner")
-            self.assertExit(1)
-            self.assertIn("there is no backup folder", self.result.stderr)
-            self.assertEqual(self.calls("docker"), [])
+        for name in ("20261008T030000Z-manual", "20261008T030000Z-pre-purge-run-3-20261008T012000Z"):
+            # A pre-purge backup of history archival is a backup name like any other (archival step 2).
+            with self.subTest(case="no backup folder", name=name):
+                self.reset()
+                self.pf("restore", name, "--approved-by", "Owner")
+                self.assertExit(1)
+                self.assertIn("there is no backup folder", self.result.stderr)
+                self.assertEqual(self.calls("docker"), [])
 
 
 # ---------------------------------------------------------------------------

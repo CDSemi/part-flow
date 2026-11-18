@@ -385,8 +385,11 @@ POLICY_DUE_SOON_ORDER_SQL = "due_soon_min_days <= due_soon_max_days"
 # wait for its copy confirmation before the host job's status reports it
 # (1-365, initially 7), the Start minute of the host job's hourly work (0-59,
 # initially 20) and the preview time limit (10-600 seconds, initially 90,
-# inside the 100 seconds after which Cloudflare ends a request). Repeated
-# verbatim by migration 0040.
+# inside the 100 seconds after which Cloudflare ends a request), repeated
+# verbatim by migration 0040; and (design B step 2, migration
+# `0041_phase16_history_purge`) the purge batch limits: Movements per batch
+# (100-1,000,000, initially 50,000) and Part Numbers per batch (1-1000,
+# initially 20).
 RETENTION_PERIOD_MONTHS_MAX = 1200
 SHORTEST_RETENTION_MONTHS_DEFAULT = 12
 HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
@@ -394,6 +397,8 @@ HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
     "archive_max_wait_days": (1, 365),
     "archive_start_minute": (0, 59),
     "archive_preview_seconds": (10, 600),
+    "archive_purge_batch_movements": (100, 1_000_000),
+    "archive_purge_batch_part_numbers": (1, 1000),
 }
 POLICY_RETENTION_PERIOD_SQL = (
     "retention_period_months IS NULL"
@@ -402,12 +407,22 @@ POLICY_RETENTION_PERIOD_SQL = (
 
 # Movement-history archival runs and their carry-forward records (Phase 16,
 # history archival design §4.1, §6.1, §8.1; build step 1: runs without
-# deletion; migration `0040_phase16_history_archive`). Repeated verbatim by
-# that migration; the guard triggers live in the migration only.
-HISTORY_ARCHIVE_FINAL_STATES = ("COMPLETED", "NOTHING_ELIGIBLE", "CANCELLED", "FAILED")
+# deletion, migration `0040_phase16_history_archive`; build step 2: the
+# purge, migration `0041_phase16_history_purge`). Repeated verbatim by those
+# migrations; the guard triggers live in the migrations only.
+HISTORY_ARCHIVE_FINAL_STATES = (
+    "COMPLETED",
+    "COMPLETED_WITH_SKIPS",
+    "NOTHING_ELIGIBLE",
+    "CANCELLED",
+    "FAILED",
+)
 #: The states of an open run; at most one run is open (a partial UNIQUE index).
-HISTORY_ARCHIVE_OPEN_STATES = ("APPROVED", "RUNNING", "WAITING_FOR_COPY")
+HISTORY_ARCHIVE_OPEN_STATES = ("APPROVED", "RUNNING", "WAITING_FOR_COPY", "PURGING")
 HISTORY_ARCHIVE_REASON_MAX_LENGTH = 500
+#: The pre-purge backup a purge names: ``<UTC stamp>-pre-purge-<archive name>``
+#: (``app.application.backups``); the label starts at character 28.
+HISTORY_ARCHIVE_BACKUP_NAME_PATTERN = "^[0-9]{8}T[0-9]{6}Z-pre-purge-run-[0-9]+-[0-9]{8}T[0-9]{6}Z$"
 HISTORY_ARCHIVE_RUN_STATE_SQL = (
     "state IN (" + ", ".join(f"'{state}'" for state in HistoryArchiveRunState) + ")"
 )
@@ -441,22 +456,64 @@ HISTORY_ARCHIVE_RUN_VERIFY_SQL = (
 )
 HISTORY_ARCHIVE_RUN_PROGRESS_SQL = (
     "(state <> 'APPROVED' OR started_at IS NULL)"
-    " AND (state NOT IN ('RUNNING', 'WAITING_FOR_COPY', 'COMPLETED', 'NOTHING_ELIGIBLE')"
-    " OR started_at IS NOT NULL)"
-    " AND (state NOT IN ('WAITING_FOR_COPY', 'COMPLETED') OR verified_at IS NOT NULL)"
+    " AND (state NOT IN ('RUNNING', 'WAITING_FOR_COPY', 'PURGING', 'COMPLETED',"
+    " 'COMPLETED_WITH_SKIPS', 'NOTHING_ELIGIBLE') OR started_at IS NOT NULL)"
+    " AND (state NOT IN ('WAITING_FOR_COPY', 'PURGING', 'COMPLETED', 'COMPLETED_WITH_SKIPS')"
+    " OR verified_at IS NOT NULL)"
 )
 HISTORY_ARCHIVE_RUN_COPY_CONFIRMATION_SQL = (
     "(copy_confirmed_at IS NULL) = (copy_confirmed_by_user_id IS NULL)"
 )
-#: A run is COMPLETED only once its archive was copied off the host, or a
-#: person confirmed the copy.
+#: A run purges, or finishes as EXPORT_ONLY or PURGED, only once its archive
+#: was copied off the host or a person confirmed the copy (a run whose every
+#: component was skipped finishes NOTHING_PURGED without one).
 HISTORY_ARCHIVE_RUN_COMPLETED_COPY_SQL = (
-    "state <> 'COMPLETED' OR copied_at IS NOT NULL OR copy_confirmed_at IS NOT NULL"
+    "copied_at IS NOT NULL OR copy_confirmed_at IS NOT NULL"
+    " OR (state <> 'PURGING' AND result IS NULL) OR result = 'NOTHING_PURGED'"
 )
 HISTORY_ARCHIVE_RUN_RESULT_SQL = (
     "(result IS NULL OR result IN ("
     + ", ".join(f"'{result}'" for result in HistoryArchiveRunResult)
-    + ")) AND (state = 'COMPLETED') = (result IS NOT NULL)"
+    + ")) AND (state IN ('COMPLETED', 'COMPLETED_WITH_SKIPS')) = (result IS NOT NULL)"
+    " AND (result IS DISTINCT FROM 'EXPORT_ONLY' OR state = 'COMPLETED')"
+)
+#: COMPLETED means nothing was skipped (step-1 EXPORT_ONLY runs aside);
+#: COMPLETED_WITH_SKIPS that something was.
+HISTORY_ARCHIVE_RUN_SKIPS_SQL = (
+    "(state <> 'COMPLETED' OR result = 'EXPORT_ONLY' OR skipped_components = 0)"
+    " AND (state <> 'COMPLETED_WITH_SKIPS' OR skipped_components > 0)"
+)
+#: The pre-purge backup: its name and dump start come together, the name is
+#: of the kind pre-purge with the run's archive name as its label, and the
+#: dump started after the verification.
+HISTORY_ARCHIVE_RUN_BACKUP_SQL = (
+    "(pre_purge_backup_name IS NULL) = (pre_purge_backup_started_at IS NULL)"
+    " AND (pre_purge_backup_name IS NULL OR (pre_purge_backup_name ~ '"
+    + HISTORY_ARCHIVE_BACKUP_NAME_PATTERN
+    + "' AND substr(pre_purge_backup_name, 28) = archive_name))"
+    " AND (pre_purge_backup_started_at IS NULL OR pre_purge_backup_started_at > verified_at)"
+)
+#: The purge: it starts with the backup evidence, counts what it deleted, and
+#: a PURGED run deleted something, a NOTHING_PURGED one nothing.
+HISTORY_ARCHIVE_RUN_PURGE_SQL = (
+    "(purge_started_at IS NULL) = (pre_purge_backup_name IS NULL)"
+    " AND (purge_started_at IS NULL) = (purged_components IS NULL)"
+    " AND (purge_started_at IS NULL) = (purged_flows IS NULL)"
+    " AND (purge_started_at IS NULL) = (purged_movements IS NULL)"
+    " AND (purged_components IS NULL OR (purged_components >= 0"
+    " AND purged_flows >= purged_components AND purged_movements >= purged_flows))"
+    " AND (purge_started_at IS NULL OR purge_started_at >= pre_purge_backup_started_at)"
+    " AND (state <> 'PURGING' OR purge_started_at IS NOT NULL)"
+    " AND (result IS DISTINCT FROM 'PURGED' OR purged_components > 0)"
+    " AND (result IS DISTINCT FROM 'NOTHING_PURGED' OR coalesce(purged_components, 0) = 0)"
+)
+#: The purge receipt's SHA-256: on every PURGED or NOTHING_PURGED run, and on
+#: a run that failed while purging when its receipt could be written.
+HISTORY_ARCHIVE_RUN_RECEIPT_SQL = (
+    "(receipt_sha256 IS NULL OR receipt_sha256 ~ '^[0-9a-f]{64}$')"
+    " AND (receipt_sha256 IS NULL OR coalesce(result, '') IN ('PURGED', 'NOTHING_PURGED')"
+    " OR (state = 'FAILED' AND purge_started_at IS NOT NULL))"
+    " AND (coalesce(result, '') NOT IN ('PURGED', 'NOTHING_PURGED') OR receipt_sha256 IS NOT NULL)"
 )
 HISTORY_ARCHIVE_RUN_FAILURE_SQL = (
     "(state = 'FAILED') = (failure_reason IS NOT NULL)"
@@ -507,7 +564,10 @@ HISTORY_ARCHIVED_FLOW_SKIP_OR_PURGE_SQL = "skipped_at IS NULL OR purged_at IS NU
 # hours, days and ISO weeks (UTC) that hold one. Defaults: every hour,
 # 48 hourly, 30 daily and 52 weekly. At least one daily backup is always
 # kept, so the newest scheduled backup is never removed. Repeated
-# verbatim by migration `0035_phase16_backup_policy`.
+# verbatim by migration `0035_phase16_backup_policy`. The history purge
+# (design B step 2, migration `0041_phase16_history_purge`) adds the
+# pre-purge backups kept: the newest N verified ones (1-100, initially 3),
+# so the backup of the newest purge is never removed.
 BACKUP_INTERVAL_HOURS = (1, 2, 3, 4, 6, 8, 12, 24)
 BACKUP_KEEP_HOURLY_MIN = 0
 BACKUP_KEEP_HOURLY_MAX = 720
@@ -515,10 +575,14 @@ BACKUP_KEEP_DAILY_MIN = 1
 BACKUP_KEEP_DAILY_MAX = 3650
 BACKUP_KEEP_WEEKLY_MIN = 0
 BACKUP_KEEP_WEEKLY_MAX = 520
+BACKUP_KEEP_PRE_PURGE_MIN = 1
+BACKUP_KEEP_PRE_PURGE_MAX = 100
+BACKUP_KEEP_PRE_PURGE_DEFAULT = 3
 POLICY_BACKUP_INTERVAL_SQL = "backup_interval_hours IN (1, 2, 3, 4, 6, 8, 12, 24)"
 POLICY_BACKUP_KEEP_HOURLY_SQL = "backup_keep_hourly BETWEEN 0 AND 720"
 POLICY_BACKUP_KEEP_DAILY_SQL = "backup_keep_daily BETWEEN 1 AND 3650"
 POLICY_BACKUP_KEEP_WEEKLY_SQL = "backup_keep_weekly BETWEEN 0 AND 520"
+POLICY_BACKUP_KEEP_PRE_PURGE_SQL = "backup_keep_pre_purge BETWEEN 1 AND 100"
 
 
 def _email_address_sql(column: str) -> str:
@@ -1517,6 +1581,15 @@ class ApplicationPolicy(Base):
     archive_preview_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("90")
     )
+    # The purge batch limits (design B step 2): whole components per batch,
+    # bounded by these Movements and Part Numbers, so no batch holds the PN
+    # locks of many PNs for long.
+    archive_purge_batch_movements: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("50000")
+    )
+    archive_purge_batch_part_numbers: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("20")
+    )
     # User sign-in (Phase 14 slice 1): an expiry absolute from sign-in,
     # whole days, unless sign-ins never expire (the day count is kept
     # while switched off); the lockout threshold and duration; and the
@@ -1547,6 +1620,11 @@ class ApplicationPolicy(Base):
     )
     backup_keep_weekly: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("52")
+    )
+    # The newest verified pre-purge backups kept (history purge, design B
+    # step 2); the rotation of the scheduled backups never touches them.
+    backup_keep_pre_purge: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("3")
     )
     # The outgoing mail server (Phase 17): NULL host = none set up.
     mail_host: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1687,6 +1765,10 @@ class ApplicationPolicy(Base):
         CheckConstraint(
             POLICY_BACKUP_KEEP_WEEKLY_SQL,
             name=conv("ck_application_policy_backup_keep_weekly_range"),
+        ),
+        CheckConstraint(
+            POLICY_BACKUP_KEEP_PRE_PURGE_SQL,
+            name=conv("ck_application_policy_backup_keep_pre_purge_range"),
         ),
         CheckConstraint(POLICY_MAIL_HOST_SQL, name=conv("ck_application_policy_mail_host_shape")),
         CheckConstraint(POLICY_MAIL_PORT_SQL, name=conv("ck_application_policy_mail_port_range")),
@@ -3147,8 +3229,8 @@ Index(
 
 class HistoryArchiveRun(Base):
     """One Movement-history archival run (Phase 16, history archival design
-    §6.1; build step 1: runs without deletion; migration
-    `0040_phase16_history_archive`).
+    §6.1; build step 1, migration `0040_phase16_history_archive`; build step
+    2, the purge, migration `0041_phase16_history_purge`).
 
     A holder of Run history archival and purge requests a run in
     Administration with a reason, at a cutoff (the start of a site-calendar
@@ -3156,10 +3238,15 @@ class HistoryArchiveRun(Base):
     approval, so the run starts APPROVED with the counts its preview found.
     The host job (``python -m app.cli history-archive``, as the maintenance
     database role) exports the eligible flow components into an archive
-    folder, verifies it, copies it off the host — or waits for a person to
-    confirm the copy — and finishes the run; in step 1 nothing is deleted, so
-    a COMPLETED run records the result EXPORT_ONLY. Every change of state
-    appends one ``HistoryArchiveRun`` audit row.
+    folder, verifies it and copies it off the host — or waits for a person
+    to confirm the copy; the host script then takes the pre-purge backup,
+    whose name and dump start the job records when the run becomes PURGING;
+    the job deletes the archived Movements in batches of whole components,
+    writes the purge receipt and finishes the run COMPLETED (nothing
+    skipped) or COMPLETED_WITH_SKIPS with the result PURGED, or NOTHING_PURGED
+    when every component changed after the export. Runs finished by step 1
+    keep the result EXPORT_ONLY. Every change of state appends one
+    ``HistoryArchiveRun`` audit row.
 
     The request columns (cutoff, reason, requester, request time, preview)
     never change. The guard trigger ``trg_history_archive_runs_guard_mutation``
@@ -3167,9 +3254,10 @@ class HistoryArchiveRun(Base):
     insert, refuses a cutoff newer than the shortest allowed retention period
     allows), cancel an APPROVED or WAITING_FOR_COPY run and confirm the copy
     of a WAITING_FOR_COPY run; every other transition is the maintenance
-    job's, made while ``partflow.archive_run_id`` names the run; a finished
-    run never changes; no run is ever deleted. At most one run is open
-    (``uq_history_archive_runs_open``).
+    job's, made while ``partflow.archive_run_id`` names the run, and the run
+    becomes PURGING only with its verified, copied archive and its pre-purge
+    backup; a finished run never changes; no run is ever deleted. At most
+    one run is open (``uq_history_archive_runs_open``; PURGING is open).
     """
 
     __tablename__ = "history_archive_runs"
@@ -3210,8 +3298,9 @@ class HistoryArchiveRun(Base):
     archive_bytes: Mapped[int | None] = mapped_column(BigInteger)
     manifest_sha256: Mapped[str | None] = mapped_column(Text)
     verified_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
-    # Components that changed between the export and the verification
-    # (their records are marked skipped; a later run archives them again).
+    # Components that changed after the export — found by the verification
+    # or by the purge's re-check under the locks (their records are marked
+    # skipped; their Movements stay and a later run archives them again).
     skipped_components: Mapped[int | None] = mapped_column(Integer)
     skipped_flows: Mapped[int | None] = mapped_column(Integer)
     # The job copied the archive to the off-host copy folder and checked it.
@@ -3229,6 +3318,20 @@ class HistoryArchiveRun(Base):
     cancelled_by_user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", name="fk_history_archive_runs_cancelled_by_user_id_users")
     )
+    # The purge (build step 2): the pre-purge backup the host script took
+    # (its name, ``<stamp>-pre-purge-<archive name>``, and its dump start),
+    # recorded when the run became PURGING; when the purge started; what
+    # it deleted so far (whole components); the SHA-256 of the purge
+    # receipt ``<archive name>.purged.json`` beside the archive folder.
+    pre_purge_backup_name: Mapped[str | None] = mapped_column(Text)
+    pre_purge_backup_started_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    purge_started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    purged_components: Mapped[int | None] = mapped_column(Integer)
+    purged_flows: Mapped[int | None] = mapped_column(Integer)
+    purged_movements: Mapped[int | None] = mapped_column(BigInteger)
+    receipt_sha256: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         CheckConstraint(HISTORY_ARCHIVE_RUN_STATE_SQL, name=conv("ck_history_archive_runs_state")),
@@ -3271,6 +3374,18 @@ class HistoryArchiveRun(Base):
         CheckConstraint(
             HISTORY_ARCHIVE_RUN_FINISH_SQL, name=conv("ck_history_archive_runs_finish_shape")
         ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_SKIPS_SQL, name=conv("ck_history_archive_runs_skips_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_BACKUP_SQL, name=conv("ck_history_archive_runs_backup_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_PURGE_SQL, name=conv("ck_history_archive_runs_purge_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_RECEIPT_SQL, name=conv("ck_history_archive_runs_receipt_shape")
+        ),
         # At most one open run: a second request, or a request racing the
         # first, is refused by the database itself.
         Index(
@@ -3297,14 +3412,18 @@ class HistoryArchivedFlow(Base):
     ``component_id`` is the smallest flow id of the component. The composite
     foreign key to ``quantity_flows (id, part_number)`` keeps the flow row
     while its record exists. ``skipped_at`` marks a component that changed
-    between the export and the verification; ``purged_at`` stays empty in
-    step 1 (nothing is deleted) and is set only by the purge of a later
-    step, at most once per flow (``uq_history_archived_flows_flow_id_purged``).
-    Readers add only purged rows, so in step 1 no reader reads this table.
-    The guard trigger ``trg_history_archived_flows_guard_mutation`` admits an
-    insert only while the run is RUNNING and ``partflow.archive_run_id``
-    names it, and no change but marking a record skipped (RUNNING) or purged
-    (PURGING, a later step); no row is ever deleted.
+    after the export (found by the verification or by the purge's re-check);
+    ``purged_at`` is set by the purge (build step 2) in the same transaction
+    that deletes the flow's Movements, at most once per flow
+    (``uq_history_archived_flows_flow_id_purged``). Every reader that derives
+    a figure from Movements adds the PURGED records in the same SQL
+    statement, so it sees either a flow's Movements or its record, never
+    both and never neither; an unpurged record (exported, skipped, or of a
+    failed run) is ignored. The guard trigger
+    ``trg_history_archived_flows_guard_mutation`` admits an insert only while
+    the run is RUNNING and ``partflow.archive_run_id`` names it, and no
+    change but marking a record skipped (RUNNING or PURGING) or purged
+    (PURGING); no row is ever deleted.
     """
 
     __tablename__ = "history_archived_flows"
@@ -3390,13 +3509,30 @@ class HistoryArchivedFlow(Base):
             name=conv("ck_history_archived_flows_skipped_or_purged"),
         ),
         # The flow's records (the foreign key's check when a flow row is
-        # deleted, and the readers of a later step).
+        # deleted).
         Index("ix_history_archived_flows_flow_id", "flow_id"),
-        # At most one purged record per flow (a later step purges).
+        # At most one purged record per flow; also the per-flow reads of the
+        # purged record (lineage, route steps, Tracking, reconcile).
         Index(
             "uq_history_archived_flows_flow_id_purged",
             "flow_id",
             unique=True,
             postgresql_where=text("purged_at IS NOT NULL"),
+        ),
+        # The per-PN readers of the purged records (stocked, scrapped and
+        # introduced quantities) and Tracking's archived history, paged in
+        # the Movement history's order (migration 0041).
+        Index(
+            "ix_history_archived_flows_part_number_purged",
+            "part_number",
+            "last_occurred_at",
+            "last_movement_id",
+            postgresql_where=text("purged_at IS NOT NULL"),
+        ),
+        # The released quantity per demand line (migration 0041).
+        Index(
+            "ix_history_archived_flows_received_demand_id_purged",
+            "received_demand_id",
+            postgresql_where=text("purged_at IS NOT NULL AND received_demand_id IS NOT NULL"),
         ),
     )

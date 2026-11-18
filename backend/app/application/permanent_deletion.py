@@ -1011,11 +1011,15 @@ def build_plan(session: Session, request: DeletionRequest) -> Plan:
             pns=sorted(deleted_pns),
         )
     } | {
+        # A flow released for a deleted line: by its RECEIVED Movement, or —
+        # once its history was purged — by its archive record (refused below).
         int(row.quantity_flow_id)
         for row in _rows(
             session,
             "SELECT quantity_flow_id FROM part_movements WHERE movement_type = :received"
-            " AND (metadata['context'] ->> 'work_order_demand_id')::integer = ANY(:ids)",
+            " AND (metadata['context'] ->> 'work_order_demand_id')::integer = ANY(:ids)"
+            " UNION SELECT flow_id FROM history_archived_flows WHERE purged_at IS NOT NULL"
+            " AND received_demand_id = ANY(:ids)",
             received=MovementType.RECEIVED,
             ids=sorted(demand_ids),
         )

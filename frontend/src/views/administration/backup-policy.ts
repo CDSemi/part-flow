@@ -1,7 +1,8 @@
 // Backup policy helpers of Administration → Backups (Phase 16, owner
-// decision of 2026-11-13): the intervals and ranges the server admits,
-// the parsing of the operator's whole-number entries and the wording of
-// the stored values. The bounds are input validation only — the server
+// decision of 2026-11-13; the pre-purge backups kept since history
+// archival step 2): the intervals and ranges the server admits, the
+// parsing of the operator's whole-number entries and the wording of the
+// stored values. The bounds are input validation only — the server
 // re-validates and stays authoritative, and the stored policy comes only
 // from the server.
 
@@ -14,6 +15,7 @@ export const BACKUP_INTERVAL_HOURS: readonly number[] = [
 export const KEEP_HOURLY_RANGE = [0, 720] as const;
 export const KEEP_DAILY_RANGE = [1, 3650] as const;
 export const KEEP_WEEKLY_RANGE = [0, 520] as const;
+export const KEEP_PRE_PURGE_RANGE = [1, 100] as const;
 
 /** A whole number within the range held by the text, else null (never
  * rounded or clamped). */
@@ -31,8 +33,9 @@ export function formatBackupInterval(hours: number): string {
   return hours === 1 ? 'Every hour' : `Every ${hours} hours`;
 }
 
-/** What the rotation keeps, in words: one backup per period, and the
- * most it can keep (fewer while the periods overlap). */
+/** What the rotation keeps, in words: one scheduled backup per period and
+ * the most it can keep (fewer while the periods overlap), then the
+ * pre-purge backups kept. */
 export function keptSummary(policy: BackupPolicy): string {
   const periods = [
     [policy.keepHourly, 'hour'],
@@ -50,5 +53,9 @@ export function keptSummary(policy: BackupPolicy): string {
       ? `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`
       : named[0];
   const most = policy.keepHourly + policy.keepDaily + policy.keepWeekly;
-  return `Keeps one scheduled backup ${list} — at most ${most} scheduled backup${most === 1 ? '' : 's'}.`;
+  const prePurge =
+    policy.keepPrePurge === 1
+      ? 'the newest pre-purge backup'
+      : `the newest ${policy.keepPrePurge} pre-purge backups`;
+  return `Keeps one scheduled backup ${list} — at most ${most} scheduled backup${most === 1 ? '' : 's'}. Keeps ${prePurge}.`;
 }

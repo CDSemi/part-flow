@@ -7,8 +7,8 @@ Phase 17 item 8):
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_history_archive_schema.py`` with
-  ``0040_phase16_history_archive``;
+  ``tests/test_history_purge_schema.py`` with
+  ``0041_phase16_history_purge``;
 - the migration's literals equal the model constants;
 - a fresh install holds no passkey and no pending registration; every
   existing challenge is a second step; the CHECKs refuse an empty or

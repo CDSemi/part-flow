@@ -584,35 +584,45 @@ class StationCommand(StrEnum):
 
 class HistoryArchiveRunState(StrEnum):
     """Where a Movement-history archival run stands (Phase 16, history
-    archival design §6.1; build step 1: runs without deletion).
+    archival design §6.1; build steps 1 and 2).
 
     APPROVED — requested in Administration (the request is the approval)
-    and waiting for the host job; RUNNING — the job is exporting and
-    verifying the archive; WAITING_FOR_COPY — verified, waiting for a person
-    to confirm the off-host copy (only without a copy folder); COMPLETED —
-    finished (step 1: export only, nothing deleted); NOTHING_ELIGIBLE —
+    and waiting for the host job; RUNNING — the job is exporting,
+    verifying and copying the archive, and the host script takes the
+    pre-purge backup; WAITING_FOR_COPY — verified, waiting for a person to
+    confirm the off-host copy (only without a usable copy folder);
+    PURGING — deleting the archived Movements (the only state in which the
+    database lets them be deleted); COMPLETED — finished, nothing skipped;
+    COMPLETED_WITH_SKIPS — finished, some components were skipped (they
+    changed after the export and stay in the database); NOTHING_ELIGIBLE —
     finished, nothing was eligible at the cutoff; CANCELLED — cancelled in
-    Administration before it finished; FAILED — the job stopped it and
-    recorded why. The last four are final. The design's later states
-    (PROPOSED, DISMISSED, PURGING, COMPLETED_WITH_SKIPS) are added by the
-    build steps that introduce them.
+    Administration before it started deleting; FAILED — the job stopped it
+    and recorded why. The last five are final. The design's PROPOSED and
+    DISMISSED (automatic runs) are added by the build step that introduces
+    them.
     """
 
     APPROVED = "APPROVED"
     RUNNING = "RUNNING"
     WAITING_FOR_COPY = "WAITING_FOR_COPY"
+    PURGING = "PURGING"
     COMPLETED = "COMPLETED"
+    COMPLETED_WITH_SKIPS = "COMPLETED_WITH_SKIPS"
     NOTHING_ELIGIBLE = "NOTHING_ELIGIBLE"
     CANCELLED = "CANCELLED"
     FAILED = "FAILED"
 
 
 class HistoryArchiveRunResult(StrEnum):
-    """The recorded result of a COMPLETED archival run.
+    """The recorded result of a COMPLETED or COMPLETED_WITH_SKIPS archival run.
 
-    EXPORT_ONLY (build step 1): the archive was exported, verified and
-    copied off the host, and nothing was deleted from the database, so a
-    later run archives the same history again before any purge.
+    EXPORT_ONLY: a run finished by build step 1 — exported, verified and
+    copied off the host, nothing deleted; no run gets it any more.
+    PURGED: the purge deleted the archived Movements of at least one
+    component. NOTHING_PURGED: every component was skipped (each changed
+    after the export), so nothing was deleted.
     """
 
     EXPORT_ONLY = "EXPORT_ONLY"
+    PURGED = "PURGED"
+    NOTHING_PURGED = "NOTHING_PURGED"

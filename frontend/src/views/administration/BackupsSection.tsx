@@ -13,6 +13,7 @@ import {
   BACKUP_INTERVAL_HOURS,
   KEEP_DAILY_RANGE,
   KEEP_HOURLY_RANGE,
+  KEEP_PRE_PURGE_RANGE,
   KEEP_WEEKLY_RANGE,
   formatBackupInterval,
   keptSummary,
@@ -31,11 +32,12 @@ import { ADMIN_SECTIONS } from './sections';
 // GUI_DESIGN §9 Data & system): the real backup policy stored in the server's
 // application policy (`/api/policies/backups`), audited and re-validated
 // by the server — how often the server's hourly backup task takes a
-// scheduled backup (every 1, 2, 3, 4, 6, 8, 12 or 24 hours) and how many
-// hourly, daily and weekly scheduled backups its rotation keeps. Saving
-// takes or removes no backup: the task reads the policy at its next run.
-// Without the Configure system settings permission the values read as
-// text.
+// scheduled backup (every 1, 2, 3, 4, 6, 8, 12 or 24 hours), how many
+// hourly, daily and weekly scheduled backups its rotation keeps, and how
+// many pre-purge backups (taken by the history archival job before each
+// purge) it keeps, the newest first. Saving takes or removes no backup:
+// the task reads the policy at its next run. Without the Configure system
+// settings permission the values read as text.
 
 const SUBTITLE =
   ADMIN_SECTIONS.find((section) => section.id === 'backups')?.subtitle ?? '';
@@ -43,6 +45,7 @@ const SUBTITLE =
 const KEEP_HOURLY_ERROR = 'Enter a whole number from 0 to 720.';
 const KEEP_DAILY_ERROR = 'Enter a whole number from 1 to 3650.';
 const KEEP_WEEKLY_ERROR = 'Enter a whole number from 0 to 520.';
+const KEEP_PRE_PURGE_ERROR = 'Enter a whole number from 1 to 100.';
 const UNKNOWN_OUTCOME_MESSAGE =
   'The server did not answer — this change may or may not have been saved. Check the backup settings before trying again; saving the same values again is safe.';
 
@@ -89,8 +92,8 @@ export function BackupsSection() {
       <div className="admin-cards admin-cards-stack">
         <SettingsCard
           title="Scheduled backups"
-          description="How often the server takes a backup on its own, and how many of those backups it keeps."
-          note="The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Backups taken by hand or before an update are never removed. A change applies from the task's next run."
+          description="How often the server takes a backup on its own, and how many scheduled and pre-purge backups it keeps."
+          note="The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Of the pre-purge backups, which the history archival job takes before each purge, it keeps the newest number set here and removes the older ones. Backups taken by hand or before an update are never removed. A change applies from the task's next run."
         >
           {canWrite ? (
             <BackupPolicyForm
@@ -109,6 +112,10 @@ export function BackupsSection() {
                 { label: 'Hourly backups kept', value: saved.keepHourly },
                 { label: 'Daily backups kept', value: saved.keepDaily },
                 { label: 'Weekly backups kept', value: saved.keepWeekly },
+                {
+                  label: 'Pre-purge backups kept',
+                  value: saved.keepPrePurge,
+                },
               ]}
             />
           )}
@@ -135,6 +142,7 @@ function BackupPolicyForm({
   const [hourlyText, setHourlyText] = useState(String(saved.keepHourly));
   const [dailyText, setDailyText] = useState(String(saved.keepDaily));
   const [weeklyText, setWeeklyText] = useState(String(saved.keepWeekly));
+  const [prePurgeText, setPrePurgeText] = useState(String(saved.keepPrePurge));
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState(false);
@@ -142,15 +150,20 @@ function BackupPolicyForm({
   const keepHourly = parseKept(hourlyText, KEEP_HOURLY_RANGE);
   const keepDaily = parseKept(dailyText, KEEP_DAILY_RANGE);
   const keepWeekly = parseKept(weeklyText, KEEP_WEEKLY_RANGE);
+  const keepPrePurge = parseKept(prePurgeText, KEEP_PRE_PURGE_RANGE);
   const policy: BackupPolicy | null =
-    keepHourly !== null && keepDaily !== null && keepWeekly !== null
-      ? { intervalHours, keepHourly, keepDaily, keepWeekly }
+    keepHourly !== null &&
+    keepDaily !== null &&
+    keepWeekly !== null &&
+    keepPrePurge !== null
+      ? { intervalHours, keepHourly, keepDaily, keepWeekly, keepPrePurge }
       : null;
   const dirty =
     intervalHours !== saved.intervalHours ||
     keepHourly !== saved.keepHourly ||
     keepDaily !== saved.keepDaily ||
-    keepWeekly !== saved.keepWeekly;
+    keepWeekly !== saved.keepWeekly ||
+    keepPrePurge !== saved.keepPrePurge;
   useUnsavedWork(dirty);
 
   const edited = (set: (text: string) => void) => (text: string) => {
@@ -223,6 +236,13 @@ function BackupPolicyForm({
           text={weeklyText}
           onChange={edited(setWeeklyText)}
           error={keepWeekly === null ? KEEP_WEEKLY_ERROR : null}
+        />
+        <KeptField
+          label="Pre-purge backups kept"
+          range={KEEP_PRE_PURGE_RANGE}
+          text={prePurgeText}
+          onChange={edited(setPrePurgeText)}
+          error={keepPrePurge === null ? KEEP_PRE_PURGE_ERROR : null}
         />
       </div>
       {policy !== null ? (

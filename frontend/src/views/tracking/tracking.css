@@ -100,6 +100,12 @@
   color: var(--err-t);
 }
 
+/* Why a history went back to its first page (part of it was archived
+   while it was read). */
+.tk-note {
+  color: var(--text);
+}
+
 .tk-filters {
   display: flex;
   gap: 9px;
@@ -522,6 +528,16 @@
   color: var(--warn-t);
 }
 
+/* A step of an archived flow (history archival): its progress is in the
+   archive — neither done nor still to come — so it reads as a dashed,
+   unfilled step; the flow's `History archived in run N` note says why. */
+.rstep.archived {
+  background: transparent;
+  border-style: dashed;
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .rarrow {
   color: var(--faint);
   flex: none;
@@ -539,6 +555,12 @@
    route stays recorded, the actual path differs. */
 .devnote.deviation {
   color: var(--warn-t);
+}
+
+/* `History archived in run N` of an archived flow: a plain record, in
+   the neutral tone. */
+.devnote.archived {
+  color: var(--muted);
 }
 
 /* A consumed or closed Quantity Flow (split, merged, scrapped, stocked)
@@ -611,6 +633,16 @@
 
 .mv .mtype.rev {
   color: var(--err-t);
+}
+
+/* An archived history row (`History archived in run N`) stands in the
+   place of a flow's purged Movements: neutral, never a Movement type. */
+.mv .mtype.arc {
+  color: var(--muted);
+}
+
+.mv li.archived .desc {
+  color: var(--muted);
 }
 
 .mv .desc {

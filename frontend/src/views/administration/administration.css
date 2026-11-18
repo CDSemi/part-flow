@@ -575,20 +575,25 @@
   font-size: 12px;
 }
 
-/* The full timeline of a run, folded under `All times`. */
-.admin-runtimes summary {
+/* The full timeline of a run, folded under `All times`, and the purge's
+   evidence (the pre-purge backup and the receipt), folded under the
+   archive. */
+.admin-runtimes summary,
+.admin-runevidence summary {
   color: var(--info-t);
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 }
 
-.admin-runtimes summary:focus-visible {
+.admin-runtimes summary:focus-visible,
+.admin-runevidence summary:focus-visible {
   outline: 2px solid var(--info-t);
   outline-offset: 2px;
 }
 
-.admin-runtimes > .admin-runlines {
+.admin-runtimes > .admin-runlines,
+.admin-runevidence > .admin-runlines {
   margin-top: 4px;
 }
 

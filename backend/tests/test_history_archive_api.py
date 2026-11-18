@@ -63,6 +63,8 @@ _DEFAULTS = {
     "archive_max_wait_days": 7,
     "archive_start_minute": 20,
     "archive_preview_seconds": 90,
+    "archive_purge_batch_movements": 50000,
+    "archive_purge_batch_part_numbers": 20,
 }
 _E_DENIED = "Your account does not have permission to do this."
 
@@ -150,7 +152,8 @@ def restore_settings(owner: Engine) -> Iterator[None]:
             sa.text(
                 "UPDATE application_policy SET retention_period_months = 24,"
                 " shortest_retention_months = 12, archive_max_wait_days = 7,"
-                " archive_start_minute = 20, archive_preview_seconds = 90"
+                " archive_start_minute = 20, archive_preview_seconds = 90,"
+                " archive_purge_batch_movements = 50000, archive_purge_batch_part_numbers = 20"
             )
         )
         open_ids = list(
@@ -442,6 +445,22 @@ def test_the_shortest_period_changes_only_with_a_reason(client: TestClient, owne
         (
             {"archive_preview_seconds": None},
             "The preview time limit must be a whole number of seconds from 10 to 600.",
+        ),
+        (
+            {"archive_purge_batch_movements": 99},
+            "The Movements per purge batch must be a whole number from 100 to 1000000.",
+        ),
+        (
+            {"archive_purge_batch_movements": 1000001},
+            "The Movements per purge batch must be a whole number from 100 to 1000000.",
+        ),
+        (
+            {"archive_purge_batch_part_numbers": 0},
+            "The Part Numbers per purge batch must be a whole number from 1 to 1000.",
+        ),
+        (
+            {"archive_purge_batch_part_numbers": None},
+            "The Part Numbers per purge batch must be a whole number from 1 to 1000.",
         ),
         ({}, "Change at least one setting of History archival & purge."),
     ],

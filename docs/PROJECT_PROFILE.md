@@ -61,7 +61,7 @@ The system must prioritize:
 1. Tracking accuracy.
 2. Operational simplicity.
 3. Fast barcode-driven workflows.
-4. Complete and immutable movement history.
+4. Complete and immutable movement history (older history may move to verified archive files, §28 Administrative Archival and Purge).
 5. Minimal operator interaction.
 6. Reliable quantity integrity.
 7. Clear production visibility.
@@ -266,8 +266,8 @@ Instead:
 The following rules are mandatory:
 
 1. A recorded PN must never become untraceable.
-2. Movement history is immutable.
-3. Current production state must be derived from Movement history whenever practical.
+2. Movement history is immutable: no Movement is ever changed, and Movements leave the database only through the explicit maintenance of §28 Administrative Archival and Purge — the archival purge, after a verified archive of them exists off the host, and the interim permanent deletion of test data.
+3. Current production state must be derived from Movement history whenever practical; for a flow whose Movements were purged by archival, from its carry-forward record (§28 Administrative Archival and Purge).
 4. A PN may simultaneously have quantity in multiple Areas.
 5. A PN may simultaneously have quantity assigned to multiple Machines.
 6. Quantity must never be accidentally created, destroyed, duplicated, lost, or made negative.
@@ -933,7 +933,7 @@ Rules:
 - Movement is not tied to a specific Work Order Allocation.
 - Movement must never be silently overwritten.
 - Corrections preserve the original event.
-- Current state must be reconstructable from Movement history.
+- Current state must be reconstructable from Movement history, together with the carry-forward records of flows whose Movements were purged by archival (§28 Administrative Archival and Purge).
 
 ---
 
@@ -1114,7 +1114,7 @@ The sum of active quantity must remain reconcilable with:
 introduced quantity = active quantity + stocked quantity + scrapped quantity
 ```
 
-where introduced quantity covers production releases, Modify intakes, and explicit `QUANTITY_ADJUSTED` additions. Scrap never reduces the Work Order Demand requested quantity.
+where introduced quantity covers production releases, Modify intakes, and explicit `QUANTITY_ADJUSTED` additions. Scrap never reduces the Work Order Demand requested quantity. For a flow whose Movements were purged by archival, its introduced, stocked and scrapped quantities come from its carry-forward record (§28 Administrative Archival and Purge), so these figures are the same before and after a purge.
 
 ---
 
@@ -1329,7 +1329,7 @@ New ERP production normally uses Request Type `NEW`.
 
 The starting Area may be Material or another configured starting Area. A **terminal** Area is never a starting Area: it is where finished quantity ends (§18), so production release into it is refused.
 
-**Partial and repeated release.** A Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal. Each part is its own explicit release creating its own Quantity Flow. Parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated below. The demand's released quantity is the sum of the release Movements that record it, and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing.
+**Partial and repeated release.** A Work Order Demand may be released in **parts**: releasing 20 of a 50-piece demand, then 12, then 18 is normal. Each part is its own explicit release creating its own Quantity Flow. Parts are never merged, and every part after the first meets the existing-active-quantity confirmation rule stated below. The demand's released quantity is the sum of the release Movements that record it, plus the released quantity that the carry-forward records of flows purged by archival keep for it (§28 Administrative Archival and Purge), and the remaining quantity (requested minus released) is a hard limit: releasing more than remains, or releasing at all once nothing remains, is refused and creates nothing.
 
 **Restricted edit after release.** Business demand keeps changing after production has started — quantities grow, due dates move, Job Numbers arrive — so a Work Order Demand line that has released quantity stays **editable within limits**; it is not read-only:
 
@@ -1501,7 +1501,7 @@ The Worker recorded on the reversal follows the Area's Worker identification (ID
 
 In scanned-session mode with no active or an expired session, the Scan Station is already blocked until a valid badge scan (§19) — so Undo is only reachable with a valid session.
 
-Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records — for example a transfer that implicitly completed source processing (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — the reversal compensates the whole command rather than blindly reversing one arbitrary row.
+Production Undo must operate on the complete **application command**: when one user action created multiple related Movement records — for example a transfer that implicitly completed source processing (`AREA_COMPLETED` + `TRANSFERRED`, §8.11) — the reversal compensates the whole command rather than blindly reversing one arbitrary row. A command whose Movements were purged by archival can no longer be undone: its Movements are no longer in the database (§28 Administrative Archival and Purge).
 
 Undo is granted by the **Undo recent eligible scans** permission (§20). "Recent eligible" means exactly the eligibility rule above — the most recent eligible completed PN operation — with no separate time window. The initial Operator role holds this permission.
 
@@ -1773,7 +1773,7 @@ The initial Administrator role grants:
 - edit Work Order Demand,
 - edit Work Order Allocation,
 - perform authorized historical corrections,
-- run history archival and purge — its settings, the retention period among them, and its runs (§28 Administrative Archival and Purge),
+- run history archival and purge — its settings, the retention period and the purge batch sizes among them, and its runs, which purge the archived history from the database (§28 Administrative Archival and Purge),
 - configure system settings.
 
 ---
@@ -2020,7 +2020,7 @@ The selected PN view must show:
 - finished (`READY_TO_TRANSFER`) quantity per Area, distinct from active Machine assignment, direct processing, and `STOCKED` — with `AREA_COMPLETED` visible as an immutable Movement in history and operator wording such as `Completed processing at Lathe — ready to transfer` in summaries; the finished rack never appears as a route step,
 - Quantity Flows with their route mode,
 - Planned Routes and Floating actual route traces,
-- actual Movement history,
+- actual Movement history — for a flow whose Movements were purged by archival, one entry that names the archival run, the period and the number of Movements, with the flow's route steps shown as archived (§28 Administrative Archival and Purge),
 - scrap history and cumulative scrapped quantity,
 - time in each Area,
 - stocked quantity,
@@ -2137,7 +2137,7 @@ Administration stays focused on system administration:
 - scan behavior,
 - Worker session policies (the scanned-session sliding inactivity timeout — one default value with per-Area overrides — and the badge-confirmation options of `DONE`, `QUEUE` return and Undo, §19),
 - Department display settings (per Department — including the Production Board rotation timing, §21),
-- history archival and purge maintenance with retention settings (§28 Administrative Archival and Purge),
+- history archival and purge maintenance with its retention and purge batch settings (§28 Administrative Archival and Purge),
 - application settings.
 
 Machines, Route Templates, and PartNumber master metadata are not Administration screens: they are production master data managed permission-based in Management → Machines, Management → Planned Routes, and Management → Part Numbers (§20) with no duplicate Administration screens. Machines remain part of the minimum environment setup prerequisite — configured through Management → Machines before real production runs.
@@ -2297,6 +2297,8 @@ The system should support:
 - route deviation history,
 - correction history.
 
+Reports of history read the Movements kept in the database; history purged by archival is read from its archive files. Quantities are never lost by a purge: released, introduced, stocked and scrapped quantities, per PN and per Area, include the carry-forward records of purged flows (§28 Administrative Archival and Purge).
+
 Reports must distinguish:
 
 - business demand,
@@ -2327,9 +2329,9 @@ The system must preserve a complete audit trail for:
 - Undo,
 - Worker Sessions,
 - administrative configuration changes,
-- administrative archival and purge operations (who, when, scope, reason).
+- administrative archival and purge operations (who, when, scope, reason, result, the archive and its purge receipt).
 
-Historical production records never disappear through normal application workflows — normal production runtime is append-only (**immutable during production runtime**).
+Historical production records never disappear through normal application workflows — normal production runtime is append-only (**immutable during production runtime**). Only the explicit maintenance of *Administrative Archival and Purge* below removes production records: the archival purge, after a verified archive of them exists off the host, and the interim permanent deletion of test data. The archival purge never removes audit events.
 
 Database constraints should enforce, whenever practical:
 
@@ -2375,20 +2377,21 @@ Normal production runtime is append-only and never silently rewrites or deletes 
 
 The archival files become the long-term historical storage for the purged portion of history. Mandatory rules:
 
-- **Normal production runtime may never UPDATE or DELETE `PartMovement` rows** — the append-only guard (UPDATE/DELETE revoked from the application role plus a raise-on-write trigger) stays in force at all times for the application. Archive/purge is executed only through a **separate privileged Admin maintenance path** with its own authorization — never through the application role, the normal application workflows, or any production write path.
-- **Never purge before a successful, verified archive export, and never before the verified archive also exists off the host**: the maintenance job copies it to a second folder on another device and checks the copy, or a person copies it and confirms the copy in Administration.
+- **Normal production runtime may never UPDATE or DELETE `PartMovement` rows.** The application role holds neither privilege; a statement trigger refuses every UPDATE and TRUNCATE; and a row trigger refuses the DELETE of any Movement except an archived Movement of the run that is purging now (state `PURGING`), older than that run's cutoff — the interim permanent deletion of test data, above, is the only other exception. Archive/purge is executed only through a **separate privileged Admin maintenance path** with its own authorization — the host job, as the maintenance database role, whose only DELETE privilege is on Movements — never through the application role, the normal application workflows, or any production write path.
+- **Never purge before a successful, verified archive export, never before the verified archive also exists off the host, and never without a fresh backup**: the maintenance job copies the archive to a second folder on another device and checks the copy, or a person copies it and confirms the copy in Administration; the job then takes a verified backup of the database (a pre-purge backup) that starts after the archive's verification, and records the backup's name on the run before it deletes anything.
 - The archive must retain enough data to identify the PN, quantity, Movement type, Area, Operation, Machine, Worker, timestamps, relationships/correction context, and the required audit fields.
 - The PN in archived history is stored directly as the canonical PN string — never dependent on the PN master.
-- **Purge must never break relationships between Movement records.** Related Movements — for example a `REVERSED` correction and the original Movement it references through `reverses_movement_id`, or the Movements of one atomic application command — are archived and purged together: a retained Movement may never be left referencing a purged row. The retention cutoff selection must keep such chains whole (retain the whole chain until every member falls behind the cutoff), and the archive preserves the relationship context. Selection therefore works on whole flow components — the Quantity Flows joined by split and merge — and takes a component only when every flow in it is closed (no longer `ACTIVE`) and every Movement of it is older than the cutoff.
+- **Purge must never break relationships between Movement records.** Related Movements — for example a `REVERSED` correction and the original Movement it references through `reverses_movement_id`, or the Movements of one atomic application command — are archived and purged together: a retained Movement may never be left referencing a purged row. The retention cutoff selection must keep such chains whole (retain the whole chain until every member falls behind the cutoff), and the archive preserves the relationship context. Selection therefore works on whole flow components — the Quantity Flows joined by split and merge — and takes a component only when every flow in it is closed (no longer `ACTIVE`) and every Movement of it is older than the cutoff. A purged flow keeps its row, its status, its lineage links and its route snapshot, so nothing that references the flow is broken.
+- **The carry-forward record.** Each archived flow gets a record in the database that stays after its Movements are purged: the run, the flow's closing status, its first and last Movement with their times, its number of Movements, the quantities the figures need — released quantity with its demand line, adjusted quantity, stocked and scrapped quantity with their Areas — and the commands of its lineage links that were undone. Wherever this profile derives state, quantities or traces from Movement history, the history of a purged flow means its carry-forward record together with its archive files: every figure that reads Movements adds the records of purged flows in the same query, so released, introduced, stocked and scrapped quantities and the use of Route Templates are the same before and after a purge. Beside the archive files, the record is the evidence of the purged history in the database.
 - **The cutoff never reaches into the retention period.** A run's cutoff is the start of a day on the site calendar, never later than the day that lies the retention period before the day of the run; a manual request may choose an earlier cutoff, never a later one. The retention period is a whole number of months, never shorter than the shortest allowed retention period — itself a setting that changes only with a reason — or no retention period at all, in which case nothing is eligible.
 - Retention/purge is explicit administrative maintenance, never part of a normal production workflow; it may be triggered by the Admin-configured retention policy, an Admin-configured data-size threshold, or a manual Admin request.
-- Maintenance operations require explicit authorization — the permission to run history archival and purge (§20) —, show a scope/impact preview before execution, require a reason, and are fully auditable: scope, cutoff, who/what initiated it, when, and the result. Each request is recorded as a run that keeps its reason and the preview it was approved with; at most one run is open at a time.
-- Records still needed to reconstruct active production state are never archived/purged; active production state and current projections must always remain reconcilable after archival.
-- The purge deletes exactly the archived rows (archive/export first, then purge what was archived) — whole-table truncation is never used.
-- Retention settings live in Administration/configuration, not in production workflow logic.
-- The archive is a set of files on the server, outside the database, with a checksum for each file, which standard tools can check and read; no additional storage infrastructure is presumed (the off-host copy may go to any second device, or be made by hand).
+- Maintenance operations require explicit authorization — the permission to run history archival and purge (§20) —, show a scope/impact preview before execution, require a reason, and are fully auditable: scope, cutoff, who/what initiated it, when, and the result. Each request is recorded as a run that keeps its reason and the preview it was approved with; at most one run is open at a time. A run exports, verifies and copies its archive, takes the pre-purge backup and then purges; it ends completed, or completed with skips when components that changed after their export stay in the database.
+- Records still needed to reconstruct active production state are never archived/purged; active production state and current projections must always remain reconcilable after archival: the reconcile checks count the carry-forward records of purged flows and check that no row kept in the database references purged history.
+- The purge deletes exactly the archived rows (archive/export first, then purge what was archived) — whole-table truncation is never used. It works in batches of whole flow components, each batch one transaction under the Part Number locks of its components; a component that changed since its export is skipped and stays in the database. Each run leaves a purge receipt beside its archive (`<archive name>.purged.json`) that lists every component as purged, skipped or retained.
+- Retention settings live in Administration/configuration, not in production workflow logic — the purge batch sizes (Movements and Part Numbers per batch) among them.
+- The archive is a set of files on the server, outside the database, with a checksum for each file, which standard tools can check and read; no additional storage infrastructure is presumed (the off-host copy may go to any second device, or be made by hand). Once a run has purged, the archive and its off-host copy are the only copies of that Movement history apart from the backups taken before the purge.
 
-Note the distinction: *production identity must remain traceable* (always true — production records carry their canonical PN, and archived history remains part of the permanent record) is **not** the same as *all raw Movement rows must remain forever in the primary database* (not required — retention archival applies).
+Note the distinction: *production identity must remain traceable* (always true — production records carry their canonical PN, and archived history remains part of the permanent record through its archive files and carry-forward records) is **not** the same as *all raw Movement rows must remain forever in the primary database* (not required — retention archival applies).
 
 ---
 
@@ -2501,7 +2504,8 @@ Every future feature must reinforce these principles:
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §20 and §28: the permission to run history archival and purge, the cutoff and flow-component rules of a run, and the off-host copy of the archive. |
+| 2026-11-18 | uncommitted | §2, §6, §8.11, §11, §13, §16, §20, §21, §27 and §28: runs purge archived Movement history after the off-host copy and a pre-purge backup, and the carry-forward record keeps every figure unchanged. |
+| 2026-11-17 | 2f12d33 | §20 and §28: the permission to run history archival and purge, the cutoff and flow-component rules of a run, and the off-host copy of the archive. |
 | 2026-11-17 | 4539a2b | §20 and §21: Administration → Security gathers the sign-in settings, with configurable password rules and Remember me. |
 | 2026-11-17 | 4be2389 | §15 and §20: a User who may manage Scan Stations can view any Scan Station from a browser that is not enrolled, read-only. |
 | 2026-11-17 | 4cfaf35 | Machines and Part Numbers: printing many barcode labels at once; the date added and last-use orders of the Part Number master records. |

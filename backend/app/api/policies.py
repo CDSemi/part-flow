@@ -38,10 +38,11 @@ handlers in ``app.api.errors`` translate typed failures.
   policy, also when nothing changed.
 - ``GET /policies/data-retention`` — the settings of Administration →
   History archival & purge (Phase 13 slice 11; Phase 16 history archival,
-  design B step 1): the Movement-history retention period in whole months
-  or ``null`` (no retention period), the shortest allowed period, the days
-  a run may wait for its copy confirmation, the Start minute of the host
-  job's hourly work and the preview time limit.
+  design B steps 1 and 2): the Movement-history retention period in whole
+  months or ``null`` (no retention period), the shortest allowed period,
+  the days a run may wait for its copy confirmation, the Start minute of
+  the host job's hourly work, the preview time limit and the purge batch
+  limits (Movements and Part Numbers per batch).
 - ``PUT /policies/data-retention`` — a partial merge like User sign-in
   (strict integers; ``retention_period_months: null`` clears the period; an
   empty body or an extra field is 422) plus ``reason``, required when the
@@ -60,14 +61,17 @@ handlers in ``app.api.errors`` translate typed failures.
   names the signed-in administrator.
 - ``GET /policies/backups`` — Administration → Backups (Phase 16, owner
   decision of 2026-11-13): the interval of the scheduled backups in whole
-  hours and the hourly, daily and weekly backups their rotation keeps.
-  Requires a signed-in User.
-- ``PUT /policies/backups`` — a full replace like Due Soon: all four
-  fields are required strict integers (a missing field, a string, float,
-  bool, ``null`` or an extra field is 422); the allowed intervals and the
-  ranges are the Application's 422; requires ``CONFIGURE_SYSTEM_SETTINGS``;
-  answers with the stored policy, also when nothing changed. Saving takes
-  or removes no backup: the host's hourly backup task reads it.
+  hours, the hourly, daily and weekly backups their rotation keeps, and
+  (history archival step 2) the pre-purge backups kept. Requires a
+  signed-in User.
+- ``PUT /policies/backups`` — a full replace like Due Soon of the four
+  fields of the scheduled backups, each a required strict integer (a
+  missing field, a string, float, bool, ``null`` or an extra field is 422);
+  ``backup_keep_pre_purge`` is optional (left out keeps the stored value);
+  the allowed intervals and the ranges are the Application's 422; requires
+  ``CONFIGURE_SYSTEM_SETTINGS``; answers with the stored policy, also when
+  nothing changed. Saving takes or removes no backup: the host's hourly
+  backup task reads it.
 - ``GET /policies/mail-server`` — Administration → Settings → Outgoing mail
   server (Phase 17, owner decision of 2026-11-13): host (null = none),
   port, connection security, user name, whether a password is stored and
@@ -237,6 +241,8 @@ class HistoryArchivePolicyResponse(BaseModel):
     archive_max_wait_days: int
     archive_start_minute: int
     archive_preview_seconds: int
+    archive_purge_batch_movements: int
+    archive_purge_batch_part_numbers: int
     # The singleton row's timestamp, shared by every policy section.
     updated_at: datetime.datetime
 
@@ -257,6 +263,8 @@ class HistoryArchivePolicyPutRequest(BaseModel):
     archive_max_wait_days: StrictInt | None = None
     archive_start_minute: StrictInt | None = None
     archive_preview_seconds: StrictInt | None = None
+    archive_purge_batch_movements: StrictInt | None = None
+    archive_purge_batch_part_numbers: StrictInt | None = None
     reason: str | None = None
 
 
@@ -267,6 +275,8 @@ def _history_archive_response(policy: ApplicationPolicy) -> HistoryArchivePolicy
         archive_max_wait_days=policy.archive_max_wait_days,
         archive_start_minute=policy.archive_start_minute,
         archive_preview_seconds=policy.archive_preview_seconds,
+        archive_purge_batch_movements=policy.archive_purge_batch_movements,
+        archive_purge_batch_part_numbers=policy.archive_purge_batch_part_numbers,
         updated_at=policy.updated_at,
     )
 
@@ -276,17 +286,24 @@ class BackupPolicyResponse(BaseModel):
     backup_keep_hourly: int
     backup_keep_daily: int
     backup_keep_weekly: int
+    # The newest verified pre-purge backups kept (history archival step 2).
+    backup_keep_pre_purge: int
     # The singleton row's timestamp, shared by every policy section.
     updated_at: datetime.datetime
 
 
 class BackupPolicyPutRequest(BaseModel):
+    """The four fields of the scheduled backups (each required) and, optionally,
+    the pre-purge backups kept (left out: the stored value stays; an explicit
+    ``null`` reaches the service and is refused there)."""
+
     model_config = ConfigDict(extra="forbid")
 
     backup_interval_hours: StrictInt
     backup_keep_hourly: StrictInt
     backup_keep_daily: StrictInt
     backup_keep_weekly: StrictInt
+    backup_keep_pre_purge: StrictInt | None = None
 
 
 def _backup_response(policy: ApplicationPolicy) -> BackupPolicyResponse:
@@ -295,6 +312,7 @@ def _backup_response(policy: ApplicationPolicy) -> BackupPolicyResponse:
         backup_keep_hourly=policy.backup_keep_hourly,
         backup_keep_daily=policy.backup_keep_daily,
         backup_keep_weekly=policy.backup_keep_weekly,
+        backup_keep_pre_purge=policy.backup_keep_pre_purge,
         updated_at=policy.updated_at,
     )
 
@@ -439,12 +457,14 @@ def get_backup_policy(principal: SignedInDep, session: SessionDep) -> BackupPoli
 def put_backup_policy(
     principal: SystemSettingsManagerDep, body: BackupPolicyPutRequest, session: SessionDep
 ) -> BackupPolicyResponse:
+    given = body.model_dump(exclude_unset=True)
     policy = policies.update_backup_policy(
         session,
         interval_hours=body.backup_interval_hours,
         keep_hourly=body.backup_keep_hourly,
         keep_daily=body.backup_keep_daily,
         keep_weekly=body.backup_keep_weekly,
+        keep_pre_purge=given.get("backup_keep_pre_purge", UNSET),
         actor_user_id=principal.user_id,
     )
     return _backup_response(policy)

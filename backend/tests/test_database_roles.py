@@ -354,15 +354,19 @@ def test_every_model_table_is_classified() -> None:
     assert set(MAINTENANCE_PRIVILEGES) <= set(TABLE_CLASSES)
     assert len(MAINTENANCE_PRIVILEGES) == 22
     # Reads what the archive export reads; writes the archival tables and its
-    # own audit rows (history archival design §8.3, step 1); never deletes.
+    # own audit rows (history archival design §8.3, step 1); deletes only
+    # Movements, and only those the purge's row guard admits (step 2).
     assert {
         table for table, privileges in MAINTENANCE_PRIVILEGES.items() if privileges != {"SELECT"}
-    } == {"audit_events", "history_archive_runs", "history_archived_flows"}
+    } == {"audit_events", "history_archive_runs", "history_archived_flows", "part_movements"}
     assert MAINTENANCE_PRIVILEGES["audit_events"] == {"INSERT"}
     # It never requests a run: only a person does, in Administration.
     assert MAINTENANCE_PRIVILEGES["history_archive_runs"] == {"SELECT", "UPDATE"}
     assert MAINTENANCE_PRIVILEGES["history_archived_flows"] == {"SELECT", "INSERT", "UPDATE"}
-    assert not any("DELETE" in privileges for privileges in MAINTENANCE_PRIVILEGES.values())
+    assert MAINTENANCE_PRIVILEGES["part_movements"] == {"SELECT", "DELETE"}
+    assert [
+        table for table, privileges in MAINTENANCE_PRIVILEGES.items() if "DELETE" in privileges
+    ] == ["part_movements"]
     assert not {
         "user_credentials",
         "user_sessions",
@@ -1422,8 +1426,8 @@ def test_check_h_passes_through_the_cli(
         "roles": 2,
         "tables": 37,
         "sequences": 27,
-        "triggers": 16,
-        "guard_functions": 13,
+        "triggers": 17,
+        "guard_functions": 14,
     }
 
 
@@ -1887,7 +1891,7 @@ def test_check_h_under_another_search_path(context: Context) -> None:
                 connection, roles=context.roles, required=True
             )
             assert integrity.findings == []
-            assert integrity.examined["triggers"] == 16
+            assert integrity.examined["triggers"] == 17
             assert connection.execute(sa.text("SHOW search_path")).scalar_one() == "pg_catalog"
         report = reconciliation.run_reconciliation(
             context.engine,

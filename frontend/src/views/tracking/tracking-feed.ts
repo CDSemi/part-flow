@@ -9,9 +9,9 @@
 // A Management view is read while work moves on the floor, so it
 // follows the feed rather than waiting for a manual reload.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { errorMessage } from '../../api/client';
+import { ApiError, errorMessage } from '../../api/client';
 import type { Area, Operation } from '../../api/environment';
 import { listAreas, listOperations } from '../../api/environment';
 import type { Machine } from '../../api/machines';
@@ -147,6 +147,18 @@ interface OlderState<T> extends OlderPages<T> {
   wanted: number;
 }
 
+/** What a history section says after its cursor named a Movement that an
+ * archival run purged meanwhile, and the section started again from its
+ * first page. */
+export const STALE_CURSOR_NOTICE =
+  'Part of this history was archived while it was read, so it was reloaded from the newest entries.';
+
+/** A continuation refused because its cursor no longer exists (404: a
+ * Movement purged since the page was read). */
+function staleCursor(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
 /**
  * Continuation of a paged section below the FIRST page the detail feed
  * delivered.
@@ -160,20 +172,37 @@ interface OlderState<T> extends OlderPages<T> {
  * pages are dropped and the same depth is read again below the new
  * boundary, so the section never shows a gap, a duplicate or a stale
  * row; a refresh that changes neither keeps the pages as they are.
+ *
+ * `onStaleCursor` (the history sections, whose cursor may name a Movement
+ * an archival run purges meanwhile): a continuation refused with 404 drops
+ * the appended pages, says `STALE_CURSOR_NOTICE` (`notice`, until the
+ * reader pages again) and calls it to read the first page again. Any
+ * other refusal (a 409 after the server's own retries included) is shown
+ * as the server words it, and showing older rows tries again.
  */
 export function useOlderPages<T>(
   boundary: number | null,
   revision: string,
   load: (before: number) => Promise<{ items: T[]; nextBefore: number | null }>,
+  onStaleCursor?: () => void,
 ): {
   older: OlderPages<T> | null;
   /** Load the next older page (a no-op while one is loading). */
   showOlder: () => void;
+  /** Why the section went back to its first page, until it pages again. */
+  notice: string | null;
 } {
   const generation = `${boundary ?? 'none'}|${revision}`;
   const [state, setState] = useState<OlderState<T> | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const current =
     state !== null && state.generation === generation ? state : null;
+  // The generation the hook shows now — a refusal of an earlier
+  // generation's read must not restart the section a second time.
+  const shownGeneration = useRef(generation);
+  useEffect(() => {
+    shownGeneration.current = generation;
+  }, [generation]);
 
   useEffect(() => {
     if (state === null) return;
@@ -213,17 +242,27 @@ export function useOlderPages<T>(
                 loaded: latest.loaded + 1,
               },
         ),
-      (error: unknown) =>
+      (error: unknown) => {
+        if (onStaleCursor !== undefined && staleCursor(error)) {
+          if (shownGeneration.current !== generation) return;
+          // Back to the first page, which is read again.
+          setState(null);
+          setNotice(STALE_CURSOR_NOTICE);
+          onStaleCursor();
+          return;
+        }
         setState((latest) =>
           latest === null || latest.generation !== generation
             ? latest
             : { ...latest, loading: false, error: errorMessage(error) },
-        ),
+        );
+      },
     );
-  }, [state, generation, boundary, load]);
+  }, [state, generation, boundary, load, onStaleCursor]);
 
   const showOlder = useCallback(() => {
     if (boundary === null) return;
+    setNotice(null);
     setState((latest) => {
       const base: OlderState<T> =
         latest !== null && latest.generation === generation
@@ -243,5 +282,5 @@ export function useOlderPages<T>(
     });
   }, [boundary, generation]);
 
-  return { older: current, showOlder };
+  return { older: current, showOlder, notice };
 }

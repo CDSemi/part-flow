@@ -63,7 +63,7 @@ import datetime
 from collections.abc import Sequence
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import ColumnElement, delete, func, or_, select, union_all
 from sqlalchemy.orm import Session
 
 from app.application import audit
@@ -75,6 +75,7 @@ from app.infrastructure.models import (
     Area,
     AssignedRoute,
     AssignedRouteStep,
+    HistoryArchivedFlow,
     Machine,
     Operation,
     PartMovement,
@@ -242,11 +243,33 @@ def _ever_used_ids(session: Session, template_ids: Sequence[int]) -> set[int]:
     }
 
 
+def _released(flow: type[QuantityFlow] | Any) -> ColumnElement[bool]:
+    """The flow was released: it has a RECEIVED Movement, or — once its history
+    was archived and purged — its record keeps the released quantity (one
+    statement, so a purge never changes a count)."""
+    return or_(
+        select(PartMovement.id)
+        .where(
+            PartMovement.quantity_flow_id == flow.id,
+            PartMovement.movement_type == MovementType.RECEIVED,
+        )
+        .exists(),
+        select(HistoryArchivedFlow.flow_id)
+        .where(
+            HistoryArchivedFlow.flow_id == flow.id,
+            HistoryArchivedFlow.purged_at.is_not(None),
+            HistoryArchivedFlow.received_quantity.is_not(None),
+        )
+        .exists(),
+    )
+
+
 def _usage_counts(session: Session, template_ids: Sequence[int]) -> dict[int, int]:
     """Released Quantity Flows per template: flows whose snapshot names
     the template and that have a RECEIVED Movement (the release and the
     Scan Station receipt both append one; split children and merge
-    results carry the provenance but were never released with it)."""
+    results carry the provenance but were never released with it), or a
+    purged archive record that keeps one."""
     if not template_ids:
         return {}
     rows = session.execute(
@@ -255,10 +278,9 @@ def _usage_counts(session: Session, template_ids: Sequence[int]) -> dict[int, in
             func.count(func.distinct(QuantityFlow.id)),
         )
         .join(QuantityFlow, QuantityFlow.assigned_route_id == AssignedRoute.id)
-        .join(PartMovement, PartMovement.quantity_flow_id == QuantityFlow.id)
         .where(
             AssignedRoute.source_route_template_id.in_(template_ids),
-            PartMovement.movement_type == MovementType.RECEIVED,
+            _released(QuantityFlow),
         )
         .group_by(AssignedRoute.source_route_template_id)
     )
@@ -294,18 +316,35 @@ def list_route_templates(session: Session) -> list[RouteTemplateRecord]:
 def route_template_usage(session: Session, template_id: int) -> RouteTemplateUsage:
     """The Quantity Flows released with the template (PROJECT_PROFILE
     §21): newest RECEIVED first, at most ``USAGE_LIST_LIMIT``, plus the
-    total. Works for archived templates."""
+    total. Works for archived templates. A flow whose history was archived
+    and purged answers with the release time its record keeps (in the same
+    statement as the retained RECEIVED Movements)."""
     _get_template(session, template_id)
-    released_at = func.min(PartMovement.occurred_at).label("released_at")
-    released = (
-        select(QuantityFlow.id, QuantityFlow.part_number, released_at)
+    released = union_all(
+        select(
+            QuantityFlow.id.label("id"),
+            QuantityFlow.part_number.label("part_number"),
+            func.min(PartMovement.occurred_at).label("released_at"),
+        )
         .join(AssignedRoute, AssignedRoute.id == QuantityFlow.assigned_route_id)
         .join(PartMovement, PartMovement.quantity_flow_id == QuantityFlow.id)
         .where(
             AssignedRoute.source_route_template_id == template_id,
             PartMovement.movement_type == MovementType.RECEIVED,
         )
-        .group_by(QuantityFlow.id, QuantityFlow.part_number)
+        .group_by(QuantityFlow.id, QuantityFlow.part_number),
+        select(
+            QuantityFlow.id.label("id"),
+            QuantityFlow.part_number.label("part_number"),
+            HistoryArchivedFlow.received_at.label("released_at"),
+        )
+        .join(AssignedRoute, AssignedRoute.id == QuantityFlow.assigned_route_id)
+        .join(HistoryArchivedFlow, HistoryArchivedFlow.flow_id == QuantityFlow.id)
+        .where(
+            AssignedRoute.source_route_template_id == template_id,
+            HistoryArchivedFlow.purged_at.is_not(None),
+            HistoryArchivedFlow.received_at.is_not(None),
+        ),
     ).subquery()
     total = session.scalar(select(func.count()).select_from(released)) or 0
     rows = session.execute(

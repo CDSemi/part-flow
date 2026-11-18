@@ -3,7 +3,7 @@
 
 Usage:
   python3 deploy/production/monitor_report.py status STATUS_JSON RC [--growth-file FILE]
-  python3 deploy/production/monitor_report.py archive ARCHIVE_STATUS_JSON RC [--copy-reason TEXT]
+  python3 deploy/production/monitor_report.py archive ARCHIVE_STATUS_JSON RC [--copy-reason TEXT] [--purge-reconcile FILE]
   python3 deploy/production/monitor_report.py reconcile REPORT RC
 
 `status` (deploy/production/check.sh): prints exactly four lines, `PASS|FAIL|SKIP <id> <reason>` for database, schema,
@@ -11,14 +11,18 @@ backup_age and archival_proposal, plus optional `NOTE` lines; exit 0 no FAIL, 1 
 2 usage error only. A report is valid only when it is one JSON document with report_version 1, command `status` and
 an exit_code equal to RC (the process status; P16-S1 exit-code rule). With --growth-file, a database that answered adds
 one line per UTC day (date, database bytes, Movement rows, Movement bytes) to FILE. check.sh takes its archival_proposal
-line from `archive` instead of this one.
+line from `archive` instead of this one. backup_age names the newest backup of any kind, a pre-purge backup included.
 
 `archive` (deploy/production/check.sh): prints exactly one line, `PASS|FAIL archival_proposal <reason>`, from the report
 of `python -m app.cli history-archive status` (the `maintenance` service): FAIL naming each finding
-(copy_confirmation_overdue, last_run_failed, archive_dir_unusable, copy_dir_unusable), FAIL when the report is not valid
-(report_version 1, command `history-archive status`, exit_code equal to RC) or carries an error, otherwise PASS with
-the open run, the last finished run and the archive folder's free space; exit 0 PASS, 1 FAIL, 2 usage error only.
---copy-reason: why check.sh did not mount the copy folder; it explains copy_dir_unusable.
+(copy_confirmation_overdue, last_run_failed, archive_dir_unusable, copy_dir_unusable, receipt_not_copied), FAIL when the
+report is not valid (report_version 1, command `history-archive status`, exit_code equal to RC) or carries an error,
+otherwise PASS with the open run (a PURGING run with what it purged so far), the last finished run (its result, what it
+purged and what it skipped) and the archive folder's free space; exit 0 PASS, 1 FAIL, 2 usage error only.
+--copy-reason: why check.sh did not mount the copy folder; it explains copy_dir_unusable. --purge-reconcile: the
+incident record that archive.sh writes when the reconcile after a purge did not end clean
+(<records-dir>/archive/reconcile-after-purge, key=value lines); it makes the line FAIL with reconcile_after_purge first,
+whatever the report says.
 
 `reconcile` (deploy/production/scheduled-reconcile.sh): `RECONCILE clean|mismatch|error <path> (<n> findings, <ms> ms)`
 and one `FAIL <check> <title>: ...` line per failing check; exit = the report's exit_code when it is valid, otherwise
@@ -236,8 +240,90 @@ def run_text(run):
     return f"run {run.get('id')} {run.get('state')}"
 
 
-def archive_line(document, rc, copy_reason=None):
-    """The archival_proposal line of one `history-archive status` report (`document` None = unreadable)."""
+def count(value):
+    return str(value) if is_int(value) else "?"
+
+
+def purged_text(run):
+    """What a run purged ("118 components, 305 flows, 4190 Movements"), or None before its purge started."""
+    purged = run.get("purged")
+    if not isinstance(purged, dict):
+        return None
+    return (f"{count(purged.get('components'))} components, {count(purged.get('flows'))} flows,"
+            f" {count(purged.get('movements'))} Movements")
+
+
+def skipped_text(run):
+    """What a run skipped ("2 components, 5 flows"), or None when nothing was skipped."""
+    components = run.get("skipped_components")
+    if not is_int(components) or components <= 0:
+        return None
+    return f"{components} components, {count(run.get('skipped_flows'))} flows"
+
+
+def last_run_text(run):
+    """The last finished run with its result: what it purged and what it skipped (design §10: skips are named)."""
+    text = run_text(run)
+    result = run.get("result")
+    purged = purged_text(run)
+    skipped = skipped_text(run)
+    if result == "PURGED":
+        details = [f"PURGED: {purged or '?'} purged"] + ([f"{skipped} skipped"] if skipped else [])
+        text += f" ({'; '.join(details)})"
+    elif result == "NOTHING_PURGED":
+        text += f" (NOTHING_PURGED: {skipped or 'every component'} skipped)"
+    elif result:
+        text += f" ({result})"
+    return text
+
+
+def read_incident(path):
+    """The key=value lines of archive.sh's incident record; {} when the file is gone, None when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError):
+        return None
+    values = {}
+    for raw in text.splitlines():
+        key, separator, value = raw.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def incident_text(path):
+    """reconcile_after_purge: the reconcile after a purge did not end clean (None when the record is gone)."""
+    values = read_incident(path)
+    if values is None:
+        return (f"reconcile_after_purge: the incident record {path} cannot be read (OPERATIONS_RUNBOOK §8, Reconcile"
+                " finding after a purge)")
+    if not values:
+        return None
+    result = values.get("result") or "unknown"
+    checks = values.get("failing_checks")
+    if result == "mismatch":
+        what = "found a mismatch" + (f" in checks {checks}" if checks else "")
+    elif result == "interrupted":
+        what = "did not end (archive.sh was interrupted)"
+    else:
+        what = (f"did not complete ({result}, exit {values.get('exit_code') or '?'})"
+                + (f" in checks {checks}" if checks else ""))
+    text = f"reconcile_after_purge: the reconcile after the purge of run {values.get('run') or '?'} {what}"
+    if values.get("finished_at"):
+        text += f" at {values['finished_at']}"
+    text += ": an incident, OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge)"
+    if values.get("report"):
+        text += f"; report {values['report']}"
+    return text
+
+
+def archive_line(document, rc, copy_reason=None, incident=None):
+    """The archival_proposal line of one `history-archive status` report (`document` None = unreadable); `incident`,
+    the reconcile_after_purge text of archive.sh's incident record, comes first and always fails the line."""
+    first = [incident] if incident else []
     if (
         document is None
         or document.get("report_version") != 1
@@ -245,23 +331,27 @@ def archive_line(document, rc, copy_reason=None):
         or not is_int(document.get("exit_code"))
         or document.get("exit_code") != rc
     ):
-        return line("FAIL", "archival_proposal", f"history-archive status could not run (exit {rc}); see archive-status.err")
+        return line("FAIL", "archival_proposal", "; ".join(
+            first + [f"history-archive status could not run (exit {rc}); see archive-status.err"]))
     error = document.get("error") if isinstance(document.get("error"), dict) else None
     if error is not None:
-        return line("FAIL", "archival_proposal", error.get("message") or error.get("code") or "history-archive status failed")
+        return line("FAIL", "archival_proposal", "; ".join(
+            first + [error.get("message") or error.get("code") or "history-archive status failed"]))
     open_run = section(document, "open_run")
     last = section(document, "last_finished_run")
     archive_dir = section(document, "archive_dir")
     copy_dir = section(document, "copy_dir")
     findings = [str(f) for f in document.get("findings") or []]
-    if findings:
-        texts = []
+    if findings or first:
+        texts = list(first)
         for code in findings:
             if code == "copy_confirmation_overdue":
                 texts.append(f"{code}: {run_text(open_run)} has waited {days(open_run.get('waiting_seconds'))} for its"
                              f" off-host copy confirmation (limit {document.get('max_wait_days')} days)")
             elif code == "last_run_failed":
-                texts.append(f"{code}: {run_text(last)}: {last.get('failure_reason') or 'no reason recorded'}")
+                purged = purged_text(last)
+                after = f" after purging {purged}" if purged else ""
+                texts.append(f"{code}: {run_text(last)}{after}: {last.get('failure_reason') or 'no reason recorded'}")
             elif code == "archive_dir_unusable":
                 texts.append(f"{code}: the archive folder (PARTFLOW_ARCHIVE_DIR) is missing or not writable")
             elif code == "copy_dir_unusable" and copy_reason:
@@ -269,19 +359,26 @@ def archive_line(document, rc, copy_reason=None):
             elif code == "copy_dir_unusable":
                 texts.append(f"{code}: the copy folder (PARTFLOW_ARCHIVE_COPY_DIR) is not mounted, missing, not writable"
                              " or not on another device")
+            elif code == "receipt_not_copied":
+                names = [str(name) for name in document.get("receipts_not_copied") or []]
+                texts.append(f"{code}: the purge receipt of {', '.join(names) or 'a finished run'} is missing or differs"
+                             " in the copy folder; the next archive.sh start copies it again")
             else:
                 texts.append(code)
         return line("FAIL", "archival_proposal", "; ".join(texts))
     parts = []
     if open_run:
         text = run_text(open_run)
+        purged = purged_text(open_run)
+        if open_run.get("state") == "PURGING" and purged:
+            text += f" ({purged} purged so far)"
         if is_int(open_run.get("waiting_seconds")):
             text += (f" waiting {days(open_run.get('waiting_seconds'))} for its copy confirmation"
                      f" (limit {document.get('max_wait_days')} days)")
         parts.append(text)
     else:
         parts.append("no open run")
-    parts.append(f"last finished {run_text(last)}" if last else "no finished run")
+    parts.append(f"last finished {last_run_text(last)}" if last else "no finished run")
     parts.append(f"archive folder {gib(archive_dir.get('free_bytes'))} free")
     if copy_dir:
         parts.append(f"copy folder {gib(copy_dir.get('free_bytes'))} free")
@@ -289,12 +386,24 @@ def archive_line(document, rc, copy_reason=None):
 
 
 def run_archive(arguments):
-    copy_reason = None
-    if len(arguments) == 4 and arguments[2] == "--copy-reason":
-        copy_reason = arguments[3]
-    elif len(arguments) != 2:
-        raise UsageError("archive needs ARCHIVE_STATUS_JSON RC [--copy-reason TEXT]")
-    text = archive_line(load(arguments[0]), parse_rc(arguments[1]), copy_reason)
+    options = {"--copy-reason": None, "--purge-reconcile": None}
+    positional = []
+    index = 0
+    while index < len(arguments):
+        name = arguments[index]
+        if name in options:
+            if index + 1 >= len(arguments) or options[name] is not None:
+                raise UsageError(f"{name} needs one value")
+            options[name] = arguments[index + 1]
+            index += 2
+            continue
+        positional.append(name)
+        index += 1
+    if len(positional) != 2:
+        raise UsageError("archive needs ARCHIVE_STATUS_JSON RC [--copy-reason TEXT] [--purge-reconcile FILE]")
+    rc = parse_rc(positional[1])
+    incident = None if options["--purge-reconcile"] is None else incident_text(options["--purge-reconcile"])
+    text = archive_line(load(positional[0]), rc, options["--copy-reason"], incident)
     print(text)
     return 1 if text.startswith("FAIL ") else 0
 
@@ -340,6 +449,11 @@ def parse_rc(text):
 
 
 def main(argv):
+    # The lines are UTF-8 whatever the host interpreter's locale: a reason may cite "OPERATIONS_RUNBOOK §8" or carry a
+    # report's own text, and check.sh, the scheduler's emails and the records read them as UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         if not argv or argv[0] not in ("status", "archive", "reconcile"):
             raise UsageError("the first argument must be status, archive or reconcile")

@@ -1,7 +1,7 @@
 # Hướng dẫn triển khai PartFlow
 
-> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa
-> commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`DEPLOYMENT.md`](./DEPLOYMENT.md). Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi chưa
+> commit ngày 2026-11-18. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Hướng dẫn này là điểm khởi đầu để cài đặt và vận hành PartFlow trong môi trường production. Hãy đọc §1 và §2 trước: hai
@@ -170,7 +170,7 @@ liệu đó trỏ về đây khi bạn cần một chi tiết.
 | `db-roles` | Ops job: `python -m app.cli provision-roles` (mặc định), `apply-grants` hoặc `delete-permanently` | Tạo hoặc sửa các database role và áp dụng các quyền (Database roles, bên dưới); `pf delete-permanently` chạy việc xóa dữ liệu thử nghiệm trong đó ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) §10). Kết nối bằng owner role và mount ba tệp bí mật. |
 | `backup-tools` | Ops job: `python -m app.cli backup-manifest`, `backup-verify` hoặc `backup-rotate` | Do `backup.sh` dùng. Không có network, không có database và không có bí mật; chỉ mount thư mục sao lưu tại `/backups`. |
 | `status` | Ops job: `python -m app.cli status` | Báo cáo chỉ đọc dưới role `partflow_app`, với thư mục sao lưu được mount chỉ đọc. Do `check.sh` dùng. |
-| `maintenance` | Ops job: `python -m app.cli history-archive <step>` | Job lưu trữ lịch sử ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) §11), do `archive.sh` chạy (và `status` do `check.sh` chạy). Kết nối bằng database role `partflow_maintenance` và chỉ mount tệp mật khẩu của role đó. Là dịch vụ duy nhất mount thư mục lưu trữ (tại `/archive`); `archive.sh` thêm thư mục sao chép tại `/archive-copy` khi nó dùng được (Các thư mục lưu trữ, bên dưới). Chỉ ở network `internal`. Nó xuất và sao chép bản lưu trữ và không bao giờ xóa gì. |
+| `maintenance` | Ops job: `python -m app.cli history-archive <step>` | Job lưu trữ lịch sử ([`deployment/OPERATIONS_RUNBOOK.vi.md`](./deployment/OPERATIONS_RUNBOOK.vi.md) §11), do `archive.sh` chạy (và `status` do `check.sh` chạy). Kết nối bằng database role `partflow_maintenance` và chỉ mount tệp mật khẩu của role đó. Là dịch vụ duy nhất mount thư mục lưu trữ (tại `/archive`); `archive.sh` thêm thư mục sao chép tại `/archive-copy` khi nó dùng được (Các thư mục lưu trữ, bên dưới). Chỉ ở network `internal`. Nó xuất, kiểm tra và sao chép bản lưu trữ rồi purge lịch sử Movement đã lưu trữ khỏi database, sau khi `archive.sh` đã tạo bản sao lưu trước purge; nó không bao giờ mount thư mục sao lưu. |
 
 Mỗi service có chính sách restart, giới hạn bộ nhớ và bộ xử lý lấy từ `.env.production`, và xoay vòng log (`json-file`,
 10 MiB mỗi tệp, 5 tệp). Mỗi service chạy lâu dài đều có health check; health check của `backend` gọi route liveness, nên
@@ -241,28 +241,40 @@ nêu nội dung. Đổi mật khẩu về sau là một việc thường quy (ru
 
 #### Các thư mục lưu trữ (Archive folders)
 
-History archival & purge xuất lịch sử Movement cũ ra các tệp lưu trữ (runbook §11). **Bước xây dựng hiện tại chỉ xuất
-và sao chép bản lưu trữ và không bao giờ xóa gì.** Hai thư mục trên máy chủ giữ các bản lưu trữ; backend không bao giờ
-thấy thư mục nào trong số đó.
+History archival & purge xuất lịch sử Movement cũ ra các tệp lưu trữ, sao chép chúng ra ngoài máy chủ rồi purge (xóa
+hẳn) phần lịch sử đó khỏi database (runbook §11). **Sau một lần purge, các bản lưu trữ và bản sao của chúng giữ phần
+lịch sử đó; database giữ các flow và một bản ghi chuyển tiếp (carry-forward record) cho mỗi flow đã lưu trữ thay cho
+các Movement của chúng.** Hai thư mục trên máy chủ giữ các bản lưu trữ; backend không bao giờ thấy thư mục nào trong
+số đó.
 
 | Thư mục | Thiết lập | Quy tắc |
 | --- | --- | --- |
 | Thư mục lưu trữ | `PARTFLOW_ARCHIVE_DIR` | Bắt buộc trước lần lưu trữ đầu tiên. Một đường dẫn tuyệt đối, viết không có dấu nháy, không có khoảng trắng hay `:`; nằm ngoài bản checkout của bản phát hành, thư mục bí mật và thư mục sao lưu. Thuộc sở hữu của tài khoản chạy `archive.sh` và `check.sh` (cùng tài khoản với thư mục sao lưu; `root` trên NAS), mode 0700: job `maintenance` chạy dưới tài khoản đó (`--user`) và ghi vào đây. Khi không có thiết lập này, dịch vụ `maintenance` mount một đường dẫn không tồn tại, nên một lần lưu trữ thất bại thay vì ghi vào nơi khác. Được sao chép ra ngoài máy chủ cùng các bản sao lưu (hướng dẫn NAS §11.3). |
-| Thư mục sao chép | `PARTFLOW_ARCHIVE_COPY_DIR` | Tùy chọn. Một thư mục trên **thiết bị khác**, như một thư mục chia sẻ qua mạng hoặc một ổ USB được mount trên máy chủ, ghi được bởi cùng tài khoản. Khi có nó, mỗi bản lưu trữ được sao chép vào đó và được kiểm tra, và lần lưu trữ hoàn tất mà không cần người. `archive.sh` và `check.sh` chỉ mount nó tại `/archive-copy` khi nó tồn tại, ghi được và nằm trên một hệ thống tệp không phải của thư mục lưu trữ và không phải hệ thống tệp gốc `/`, và `archive.sh` kiểm tra lại điều này trước mỗi bước. Việc mount là một bind dạng cú pháp dài với `create_host_path: false` trong một tệp Compose override được tạo ra (`docker compose run -v` sẽ tạo ra thư mục bị thiếu), nên Docker từ chối một thư mục đã biến mất trong lúc đó. Vì vậy một ổ đĩa hoặc thư mục chia sẻ chưa được mount không bao giờ bị nhầm là bản sao. Khi không có nó, một lần lưu trữ chờ cho đến khi bản sao của nó được xác nhận trong Administration. |
+| Thư mục sao chép | `PARTFLOW_ARCHIVE_COPY_DIR` | Tùy chọn. Một thư mục trên **thiết bị khác**, như một thư mục chia sẻ qua mạng hoặc một ổ USB được mount trên máy chủ, ghi được bởi cùng tài khoản. Khi có nó, mỗi bản lưu trữ được sao chép vào đó và được kiểm tra, và lần lưu trữ tiếp tục tới bản sao lưu trước purge và việc purge mà không cần người; biên nhận purge cũng được sao chép tới đó. `archive.sh` và `check.sh` chỉ mount nó tại `/archive-copy` khi nó tồn tại, ghi được và nằm trên một hệ thống tệp không phải của thư mục lưu trữ và không phải hệ thống tệp gốc `/`, và `archive.sh` kiểm tra lại điều này trước mỗi bước. Việc mount là một bind dạng cú pháp dài với `create_host_path: false` trong một tệp Compose override được tạo ra (`docker compose run -v` sẽ tạo ra thư mục bị thiếu), nên Docker từ chối một thư mục đã biến mất trong lúc đó. Vì vậy một ổ đĩa hoặc thư mục chia sẻ chưa được mount không bao giờ bị nhầm là bản sao. Khi không có nó, một lần lưu trữ chờ cho đến khi bản sao của nó được xác nhận trong Administration. |
 
 Bố cục của thư mục lưu trữ (thư mục sao chép giữ cùng các tên):
 
 ```text
 <PARTFLOW_ARCHIVE_DIR>/
   .partial/run-<id>-<UTC time>/   while a run is exported and verified (mode 0700)
+  .partial/run-<id>-<UTC time>.purged.json
+                                  while the purge receipt is written
   run-<id>-<UTC time>/            published by the verification with one rename, never changed afterwards:
                                   movements.jsonl.gz, flows.jsonl.gz, lineage.jsonl.gz, assigned_routes.jsonl.gz,
                                   context.json, manifest.json, README.txt, SHA256SUMS
+  run-<id>-<UTC time>.purged.json the purge receipt of a purged run: which components were purged, skipped or
+                                  retained; written with one rename, its SHA-256 recorded on the run
 ```
 
 Các tệp có mode 0600 và các thư mục 0700, như trong thư mục sao lưu. `sha256sum -c SHA256SUMS` bên trong một thư mục
-lần lưu trữ kiểm tra mọi tệp chỉ bằng các công cụ chuẩn. Một lần chuyển sang máy chủ khác mang theo thư mục lưu trữ
-(runbook §6 và §11).
+lần lưu trữ kiểm tra mọi tệp chỉ bằng các công cụ chuẩn; biên nhận purge nằm ngoài thư mục đó. Thư mục sao chép cũng
+nhận biên nhận của một lần lưu trữ mà job đã sao chép bản lưu trữ tới đó. Một lần chuyển sang máy chủ khác mang theo
+thư mục lưu trữ (runbook §6 và §11).
+
+**Dung lượng.** Trước mỗi lần purge, `archive.sh` tạo một bản sao lưu loại `pre-purge` trong thư mục sao lưu (mỗi bản
+một bản dump; Administration → Backups mặc định giữ 3 bản mới nhất, runbook §3): hãy dự trù dung lượng thư mục sao lưu
+cho chúng. Một lần purge giải phóng chỗ bên trong database cho các Movement mới, nên database ngừng lớn lên, nhưng các
+tệp của nó chỉ nhỏ đi bằng `VACUUM FULL` (runbook §11).
 
 #### Image và định danh bản phát hành
 
@@ -352,7 +364,7 @@ Database production có ba role:
 | --- | --- | --- |
 | Owner (`POSTGRES_USER`, mặc định `partflow_owner`) | `db`, `migrate`, `db-roles`, các bản sao lưu | Superuser PostgreSQL được tạo cùng database; nó sở hữu mọi object. Tên của nó phải khác hai role bên dưới. |
 | `partflow_app` | `backend` (API và các lệnh `reconcile`, `revision` cùng các lệnh khôi phục của nó) và `status` | Chỉ giữ các đặc quyền trong bảng tiếp theo. |
-| `partflow_maintenance` | `maintenance` (job lưu trữ lịch sử, runbook §11) | Đọc lịch sử mà nó lưu trữ và ghi các bản ghi lưu trữ (`history_archive_runs`, `history_archived_flows`) cùng các audit row của chúng; nó giữ `SELECT` trên một danh sách bảng có tên, `SELECT`, `INSERT` và `UPDATE` trên hai bảng đó và `INSERT` trên `audit_events`, và không bao giờ có `DELETE`. |
+| `partflow_maintenance` | `maintenance` (job lưu trữ lịch sử, runbook §11) | Đọc lịch sử mà nó lưu trữ, ghi các bản ghi lưu trữ (`history_archive_runs`, `history_archived_flows`) cùng các audit row của chúng, và purge các Movement đã lưu trữ; nó giữ `SELECT` trên một danh sách bảng có tên, `SELECT` và `UPDATE` trên `history_archive_runs`, `SELECT`, `INSERT` và `UPDATE` trên `history_archived_flows`, `INSERT` trên `audit_events`, và `SELECT` và `DELETE` trên `part_movements`, quyền `DELETE` duy nhất của nó. Row trigger `trg_part_movements_guard_delete` từ chối việc xóa mọi Movement, với mọi role, kể cả owner, trừ các dòng đã lưu trữ của một lần lưu trữ ở `PURGING`. |
 
 | Loại bảng | Đặc quyền của `partflow_app` | Bảng |
 | --- | --- | --- |
@@ -361,6 +373,9 @@ Database production có ba role:
 | no update | `SELECT`, `INSERT`, `DELETE` | `assigned_route_steps` |
 | read only | `SELECT` | `alembic_version`, `history_archived_flows` |
 | ordinary | `SELECT`, `INSERT`, `UPDATE`, `DELETE` | mọi bảng khác |
+
+Bảng này chứa các quyền của `partflow_app`. `partflow_maintenance` chỉ giữ danh sách trong bảng role ở trên, nên quyền
+`DELETE` của nó trên `part_movements`, mà row trigger giới hạn vào việc purge, không phải là một lớp của bảng này.
 
 - `provision-roles` (mặc định của `db-roles`) tạo hoặc sửa `partflow_app` và `partflow_maintenance` với
   `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, không có membership, không có thiết lập theo
@@ -524,15 +539,16 @@ Security (HSTS) là việc của reverse proxy; `web` không đặt nó.
 | `release.sh` | Cài một bản phát hành mới: sao lưu, build, migration, chuyển đổi và kiểm tra. | runbook §5 |
 | `smoke.sh` | Kiểm tra một bản phát hành đang chạy thông qua `web` trên port loopback. Trước đó nó chờ tối đa 120 giây chừng nào `web` chưa nhận kết nối, hoặc trả 502/504 vì backend còn đang khởi động, vì `up -d` trả về trước khi chúng sẵn sàng. | runbook §5 |
 | `backup.sh` | Tạo, xác minh và xoay vòng một bản sao lưu. | runbook §3 |
-| `archive.sh` | Job lưu trữ lịch sử: được trình lập lịch của máy chủ chạy mỗi 5 phút với `--scheduled`, nó làm phần việc hằng giờ của History archival & purge mỗi giờ một lần vào Start minute của Administration (xuất, kiểm tra và sao chép một lần lưu trữ đã được yêu cầu). Nó không bao giờ xóa gì. | runbook §11 |
+| `archive.sh` | Job lưu trữ lịch sử: được trình lập lịch của máy chủ chạy mỗi 5 phút với `--scheduled`, nó làm phần việc hằng giờ của History archival & purge mỗi giờ một lần vào Start minute của Administration: xuất, kiểm tra và sao chép ra ngoài máy chủ một lần lưu trữ đã được yêu cầu, tạo bản sao lưu trước purge của nó (`backup.sh --kind pre-purge`), purge lịch sử Movement đã lưu trữ khỏi database và chạy đối soát đầy đủ sau đó. | runbook §11 |
 | `restore-test.sh` | Khôi phục một bản sao lưu vào một stack dùng một lần và kiểm tra nó. | runbook §4 |
 | `check.sh` | Được trình lập lịch của máy chủ chạy mỗi 15 phút, và thông báo lỗi của trình lập lịch chính là cảnh báo. Nó kiểm tra readiness qua HTTPS, chứng chỉ, các container, số lần restart, lỗi backend, các ổ đĩa, báo cáo `status` chỉ đọc và trạng thái lưu trữ chỉ đọc, không bao giờ thay đổi gì, và thoát với mã khác 0 khi có điều cần báo cáo. | runbook §2 |
 | `scheduled-reconcile.sh` | Chạy đối soát đầy đủ mỗi ngày một lần, sau bản sao lưu hằng ngày. | runbook §7 |
 | `reconcile_regression.py`, `monitor_report.py` | Các helper mà script gọi; không bao giờ chạy bằng tay. | — |
 
-Theo mặc định, `check.sh` báo lỗi khi bản sao lưu mới nhất cũ hơn 26 giờ, một ổ đĩa còn dưới 15 % dung lượng trống,
-chứng chỉ hết hạn trong vòng 21 ngày, một container đã restart, hoặc `backend` ghi log một lỗi mới; một lỗi không đổi
-được báo lại sau 6 giờ.
+Theo mặc định, `check.sh` báo lỗi khi bản sao lưu mới nhất cũ hơn khoảng thời gian sao lưu theo lịch của
+Administration → Backups cộng 2 giờ (ban đầu là 3 giờ; `--max-backup-age-hours` đặt giới hạn khác), một ổ đĩa còn dưới
+15 % dung lượng trống, chứng chỉ hết hạn trong vòng 21 ngày, một container đã restart, hoặc `backend` ghi log một lỗi
+mới; một lỗi không đổi được báo lại sau 6 giờ.
 
 ## 4. Chọn máy chủ
 
@@ -778,8 +794,10 @@ Tham chiếu: [Git tags](https://git-scm.com/docs/git-tag) và
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §1.2, §3.1, §8: `pf archive`, dịch vụ `maintenance` và role nó dùng, `archive.sh`, các thư mục lưu trữ và sao chép cùng các thiết lập của chúng, và thời gian chờ 610 s của các route lưu trữ lịch sử; bước xây dựng hiện tại chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì. |
-| 2026-11-17 | uncommitted | §1.2, §3.1: `pf delete-permanently` trong danh sách các lệnh `pf` và là một lệnh của `db-roles`. |
+| 2026-11-18 | uncommitted | §3.1 Script và giám sát: theo mặc định `check.sh` báo một bản sao lưu cũ hơn khoảng thời gian sao lưu cộng 2 giờ, không còn là 26 giờ. |
+| 2026-11-18 | uncommitted | §3.1: job lưu trữ lịch sử purge lịch sử Movement đã lưu trữ: dịch vụ `maintenance` và `archive.sh` xóa qua việc purge, quyền `DELETE` của role bảo trì trên `part_movements` và row guard của nó, biên nhận purge cạnh thư mục lưu trữ, và dung lượng của các bản sao lưu trước purge và của database sau một lần purge. |
+| 2026-11-17 | `2f12d33` | §1.2, §3.1, §8: `pf archive`, dịch vụ `maintenance` và role nó dùng, `archive.sh`, các thư mục lưu trữ và sao chép cùng các thiết lập của chúng, và thời gian chờ 610 s của các route lưu trữ lịch sử; bước xây dựng hiện tại chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì. |
+| 2026-11-17 | `01ce427` | §1.2, §3.1: `pf delete-permanently` trong danh sách các lệnh `pf` và là một lệnh của `db-roles`. |
 | 2026-11-17 | `1fc96e1` | §3.1: giới hạn tần suất của các yêu cầu passkey. |
 | 2026-11-17 | `aa6287d` | §3.1: giới hạn tần suất của bước thứ hai trong xác thực hai bước, của việc user tự đổi địa chỉ email và của các thay đổi xác thực hai bước có kiểm tra mật khẩu. |
 | 2026-11-16 | `252f678` | §3.1: `backend` truy cập outgoing mail server được đặt trong Administration → Settings qua network `edge`. |

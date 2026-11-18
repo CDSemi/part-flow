@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `1490927` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi chưa commit ngày 2026-11-18.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -868,6 +868,10 @@ riêng và **không có danh sách Recent Scans**.
   cục tóm tắt xác nhận có cấu trúc như các wizard sản xuất (§4.6). Cancel không ghi gì.
 - Undo tạo lịch sử bù trừ (đảo ngược); thao tác gốc không bao giờ bị xóa. Sau một Undo đã xác nhận, Last Scanned PN lùi
   tới thao tác PN trước đó đủ điều kiện kế tiếp. Khi không còn gì đủ điều kiện, Undo bị vô hiệu hóa.
+- **Lịch sử đã archive không thể undo.** Một command có các Movement đã bị một lần chạy archival purge (§9 History
+  archival & purge, PROJECT_PROFILE §28 Administrative Archival and Purge) không còn đủ điều kiện: các row của nó không
+  còn trong database. Last Scanned PN chỉ đưa ra các thao tác có lịch sử vẫn được giữ, và một Undo theo id của một
+  command đã archive bị từ chối vì không còn sự kiện sản xuất nào được ghi nhận dưới id đó.
 - **Danh tính Worker cho Undo** tuân theo Worker ID mode của Area (§4.12): Disabled không ghi Worker; Fixed Worker ghi
   Worker đã cấu hình; Scanned session với phiên hợp lệ ghi **Worker đang hoạt động tại thời điểm Undo được xác nhận** vào
   bản ghi (audit) `REVERSED`. Phần xác nhận hiển thị Worker của thao tác gốc làm ngữ cảnh và Worker thực hiện đảo ngược
@@ -2373,6 +2377,12 @@ trap**, được xếp lớp bên dưới thanh điều hướng và các dialog
    - **Flow `FLOATING`.** Nó hiển thị **dấu vết route thực tế được suy ra từ Movement history**: các Area lặp lại được
      giữ nguyên, các flow tách được hiển thị độc lập, và các lần chuyển Repair được đánh dấu tường minh, ví dụ
      `A → B → C → D → B ⟲ REPAIR`.
+   - **Flow đã archive.** Một flow có các Movement đã bị một lần chạy archival purge (§9 History archival & purge) vẫn
+     giữ khối, trạng thái, các liên kết lineage và snapshot route của nó, nhưng dấu vết và các sai lệch của nó nằm trong
+     archive. Ở chỗ của dấu vết, khối hiển thị dòng `History archived in run N (first – last, M Movements)` kèm tên của
+     archive. Mọi chip snapshot của một flow `PLANNED` đã archive đều hiển thị là đã archive: một chip viền nét đứt,
+     không tô nền, không phải done cũng không phải sắp tới (trạng thái bước `ARCHIVED` của server). Một flow `FLOATING`
+     đã archive không hiển thị dấu vết nào, và ghi chú của nó nói rằng dấu vết thực tế nằm trong archive.
    - **Bước và mũi tên** hiển thị như **các flex item anh em riêng biệt** (bước, mũi tên, bước, …): mỗi mũi tên được căn
      giữa giữa các bước kề nhau, mũi tên không bao giờ chồng lên card bước, và việc xuống dòng vẫn dễ đọc.
    - Giá thành phẩm không bao giờ xuất hiện như một bước route: `AREA_COMPLETED` là việc hoàn thành bên trong Area nguồn
@@ -2394,6 +2404,15 @@ trap**, được xếp lớp bên dưới thanh điều hướng và các dialog
    - Các row Movement nêu tên Worker đã được ghi nhận là `W: <name>`, và các ghi chú sai lệch route thêm ` by <name>`;
      các row không có Worker được ghi nhận thì bỏ phần này.
    - Một bản gốc đã được undo vẫn hiển thị với badge `REVERSED` tường minh, bên cạnh row `REVERSED` đã undo nó.
+   - **Các mục đã archive.** Mỗi flow có các Movement đã bị một lần chạy archival purge là một row, một mục đã archive
+     (archived entry), ở vị trí của Movement đã archive mới nhất của nó: ngày và giờ của Movement đó, luôn kèm năm
+     (`Nov 18, 2023 02:06`, vì lịch sử đã archive cũ hơn retention period, trong khi các row khác hiển thị
+     `Nov 18 02:06`), một dấu `ARCHIVED` ở tông trung tính, và `History archived in run N (first – last, M Movements)`
+     kèm flow và tên của archive (một ngày duy nhất khi lịch sử của flow bắt đầu và kết thúc trong cùng một ngày). Các
+     mục này xen kẽ với các Movement, mới
+     nhất trước: một Movement theo thời điểm và id của nó, một mục đã archive theo thời điểm và id của Movement đã
+     archive mới nhất của nó. Các ngày và số Movement là bản ghi của server; trình duyệt không bao giờ tính một quantity
+     đã archive.
    - Ở độ rộng điện thoại, một row Movement history cho phần mô tả xuống dòng riêng của nó.
    - Các mục trạng thái hiện tại phân biệt việc gán Machine đang hoạt động, xử lý trực tiếp trong Area, hoàn thành trong
      Area (sẵn sàng chuyển, với cách diễn đạt cho người vận hành như
@@ -2401,7 +2420,9 @@ trap**, được xếp lớp bên dưới thanh điều hướng và các dialog
      vào Stockroom. Quantity sẵn sàng chuyển không bao giờ bị ngụ ý là `STOCKED`.
    - Lịch sử chỉ đọc; không tồn tại gợi ý tương tác chỉnh sửa nào.
 6. **Scrap history.** Các sự kiện `SCRAPPED` của PN và quantity scrapped tích lũy, kèm ghi chú đối chiếu
-   (introduced = active + stocked + scrapped; scrap không bao giờ làm giảm quantity được yêu cầu).
+   (introduced = active + stocked + scrapped; scrap không bao giờ làm giảm quantity được yêu cầu). Một flow đã archive
+   có bản ghi giữ một scrap hiệu lực được liệt kê ở đó dưới dạng mục đã archive của nó, xen kẽ như Movement history; con
+   số tích lũy và con số đối chiếu là của server và đã bao gồm các quantity đã archive.
 7. **Stocked & Allocation history.** Quantity stocked và các mục Work Order Allocation, kèm ghi chú thứ tự của
    PROJECT_PROFILE §18, và một trạng thái rỗng khi không có gì stocked. Một mục của Management nêu tên người dùng đã ghi
    nhận nó, và một mục của trạm Stockroom nêu tên Worker mà trạm đó đã xác định (`Worker <tên>`; không có gì khi Area
@@ -2464,10 +2485,19 @@ route trước đó vẫn nằm trong lịch sử kiểm toán.
   thất bại giữ detail hoàn chỉnh cuối cùng, với ghi chú `Feed stale — reconnecting` dưới PN.
 - **Movement history** theo thứ tự thời gian ngược theo timestamp (`occurred_at`, với id của Movement để phân định hòa)
   và được phân trang theo cùng thứ tự đó (`Showing n of m Movements`; `Show older Movements` nối thêm trang kế tiếp của
-  lịch sử bất biến mà không có khoảng trống hay trùng lặp).
+  lịch sử bất biến mà không có khoảng trống hay trùng lặp). Server chọn mỗi trang từ các Movement và các mục đã archive
+  cùng lúc (§7.2 mục 5), và trang tiếp tục bên dưới con trỏ (cursor) mà server đã trả lời, được gửi lại nguyên vẹn; nó
+  có thể chỉ tới một mục đã archive. Khi có các mục đã archive trong phạm vi, dòng đếm nêu cả hai loại, mỗi loại so với
+  tổng của chính nó: `Showing n of m Movements and a of b archived entries` (`entry` khi b bằng 1).
+- **Lịch sử bị archive trong lúc đọc.** Khi con trỏ chỉ tới một Movement mà một lần chạy archival đã purge sau khi
+  trang được đọc, server từ chối nó, và lịch sử bắt đầu lại từ trang đầu tiên, được đọc lại, với dòng
+  `Part of this history was archived while it was read, so it was reloaded from the newest entries.` cho tới khi các
+  row cũ hơn được hiển thị lại. Một trang mà một lần purge cứ làm thay đổi qua các lần thử lại của chính server bị từ
+  chối với thông báo của server, được hiển thị đúng như vậy; hiển thị các row cũ hơn sẽ thử lại.
 - **Scrap history** (§7.2 mục 6) liệt kê các sự kiện `SCRAPPED` của PN như các row của cùng lịch sử đó (timestamp,
   quantity, Area, lý do; một sự kiện đã bị undo được giữ lại kèm badge `REVERSED`) dưới con số tích lũy ròng, với
-  `Show older scrap events`.
+  `Show older scrap events`. Các mục đã archive của nó được đếm như ở Movement history
+  (`Showing n of m scrap events and a of b archived entries`).
 - **Quantity Flows** được phân trang theo một thứ tự ổn định: flow mới nhất trước, theo id bất biến của flow. Trạng thái
   đang hoạt động hay đã đóng của một flow là thuộc về trình bày và không bao giờ là vị trí của nó. Mỗi lần chỉ tải một
   trang có giới hạn (`Show older Quantity Flows`); các quantity hiện tại vẫn đầy đủ trong mục
@@ -2476,7 +2506,8 @@ route trước đó vẫn nằm trong lịch sử kiểm toán.
   với.
 - Một trang được nối thêm của bất kỳ mục nào bị bỏ đi và đọc lại đến cùng độ sâu khi một lần refresh làm dịch chuyển ranh
   giới của nó hoặc thay đổi nội dung mà các row của nó hiển thị (một flow bị đóng hoặc mở lại, một scrap bị undo, một
-  route được điều chỉnh), không bao giờ ở một lần refresh không thay đổi gì liên quan.
+  route được điều chỉnh, lịch sử của một flow được archive), không bao giờ ở một lần refresh không thay đổi gì liên
+  quan.
 
 ## 7.4 Audit trail
 
@@ -2917,9 +2948,11 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
 
 ### History archival & purge
 
-History archival & purge xuất lịch sử Movement cũ ra các file archive trên server (PROJECT_PROFILE §28 Administrative
-Archival and Purge). **Trong phiên bản này một lần chạy chỉ xuất và không xóa gì**: toàn bộ lịch sử Movement vẫn nằm
-trong database, và kết quả của một lần chạy đã hoàn tất ghi `Exported to files; nothing deleted.` Mọi người
+History archival & purge xuất lịch sử Movement cũ ra các file archive trên server rồi purge nó khỏi database
+(PROJECT_PROFILE §28 Administrative Archival and Purge): sau bản sao archive ngoài server và một pre-purge backup, một
+lần chạy xóa các Movement đã archive theo từng batch gồm các component trọn vẹn. Sau đó Tracking hiển thị một mục đã
+archive, `History archived in run N`, cho mỗi flow đã archive (§7.2), và các command đã archive không thể undo được nữa
+(§4.5). Các lần chạy đã kết thúc trước khi lần chạy có purge giữ kết quả `Exported to files; nothing deleted.` Mọi người
 dùng đã đăng nhập đều đọc được các thiết lập và các lần chạy. Preview, việc yêu cầu một lần chạy và mọi thay đổi cần
 permission **Run history archival and purge**; không có nó thì một dòng `View only` nêu permission đó, thẻ Preview
 không hiển thị và không có thao tác nào được cung cấp. Section theo quy tắc thẻ, với tối đa hai cột: thẻ **Retention and
@@ -2927,19 +2960,27 @@ schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng 
 25rem, bề rộng mà nhãn và giá trị rộng nhất của nó vẫn nằm trên một dòng), nếu không thì một cột rộng hết trang; rồi thẻ
 **Runs** rộng hết trang.
 
-- **Retention and schedule** — `How long Movement history stays in the database, and when the server's archival job
-  does its work.` Thẻ hiển thị **Retention period** (ban đầu `24 months (2 years)`; `No retention period` nghĩa là không
-  có gì đủ điều kiện), **Shortest allowed period** (ban đầu 12 tháng), **Start minute** của phần việc hằng giờ của job
-  (`20 minutes past each hour`), **Preview time limit** (90 giây) và **Report a waiting run after** (7 ngày). Trường
-  `Preview time limit (seconds)` của dialog giải thích: `Keep it below the wait of every proxy in front of PartFlow:
-  through Cloudflare a request ends after 100 seconds.` Trường `Report a waiting run after (days)` giải thích: `When a run waits longer than this for its off-host copy
-  to be confirmed, the server's monitoring check reports it.` (Một lần chạy gần nhất bị thất bại luôn được báo, bất kể
-  thiết lập này.) `Edit retention and schedule…` mở dialog: `No retention period` hoặc `Keep a set period of history` kèm số
-  tháng, rồi bốn con số còn lại. Thay đổi shortest allowed period thêm một trường reason bắt buộc. Lưu chỉ gửi các giá
-  trị đã đổi; server kiểm tra mọi khoảng giá trị và thông báo của nó được hiển thị trong dialog, còn dialog chỉ tự từ
-  chối một giá trị không phải số nguyên.
-- **Preview** — `What a run would export at a cutoff date, before you request it.` Trường **Cutoff date** ban đầu để
-  trống, nghĩa là hỏi ngày mới nhất mà retention period cho phép; một lần chạy xuất lịch sử trước đầu ngày đó.
+- **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
+  its work, and how much it purges at a time.` Thẻ hiển thị **Retention period** (ban đầu `24 months (2 years)`;
+  `No retention period` nghĩa là không có gì đủ điều kiện), **Shortest allowed period** (ban đầu 12 tháng), **Start
+  minute** của phần việc hằng giờ của job (`20 minutes past each hour`), **Preview time limit** (90 giây), **Report a
+  waiting run after** (7 ngày), **Movements per purge batch** (ban đầu 50,000) và **Part Numbers per purge batch** (ban
+  đầu 20). Trường `Preview time limit (seconds)` của dialog giải thích: `Keep it below the wait of every proxy in front
+  of PartFlow: through Cloudflare a request ends after 100 seconds.` Trường `Report a waiting run after (days)` giải
+  thích: `When a run waits longer than this for its off-host copy to be confirmed, the server's monitoring check
+  reports it.` (Một lần chạy gần nhất bị thất bại luôn được báo, bất kể thiết lập này.) Trường
+  `Movements per purge batch` giải thích: `The purge deletes whole components, in batches of at most this many
+  Movements; a larger component is a batch of its own.` Trường `Part Numbers per purge batch` giải thích: `A batch
+  locks at most this many Part Numbers; work on them waits until the batch ends.` `Edit retention and schedule…` mở
+  dialog: `No retention period` hoặc `Keep a set period of history` kèm số tháng, rồi một trường cho mỗi giá trị còn
+  lại của thẻ. Thay đổi shortest allowed period thêm một trường reason bắt buộc. Lưu chỉ gửi các giá trị đã đổi; server
+  kiểm tra mọi khoảng giá trị và thông báo của nó được hiển thị trong dialog, còn dialog chỉ tự từ chối một giá trị
+  không phải số nguyên.
+- **Preview** — `What a run would archive and purge at a cutoff date, before you request it.` Trường **Cutoff date**
+  ban đầu để trống, nghĩa là hỏi ngày mới nhất mà retention period cho phép; một lần chạy archive rồi purge lịch sử
+  trước đầu ngày đó. Chú thích cuối thẻ nói điều xảy ra sau đó: `After the off-host copy and a pre-purge backup, a run
+  deletes the archived Movement history from the database. Tracking then shows one “History archived in run N” line
+  per archived flow, and archived commands can no longer be undone.`
   `Run preview` hiển thị `Running the preview… N s (time limit N s)` trong khi server làm việc, có thể kéo dài tới
   preview time limit, và phần còn lại của trang vẫn dùng được trong lúc đó. Kết quả hiển thị cutoff date (cũng được điền
   vào trường, với ngày mới nhất được phép ở bên dưới), số component, flow và Movement, Movement đầu tiên và cuối cùng,
@@ -2947,35 +2988,48 @@ schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng 
   lại. Một lần từ chối (không có retention period, cutoff quá mới, hết time limit) được hiển thị đúng như server diễn
   đạt. Khi không có gì đủ điều kiện, thẻ nói như vậy và không cho yêu cầu chạy.
 - **Request a run** — `Request a run…`, sau một lần preview, mở một dialog với cutoff date, các con số preview và một
-  reason bắt buộc. `Request run` gửi reason và cutoff date đã preview; server kiểm tra lại các con số (tối đa preview
-  time limit) và lưu chúng cùng lần chạy, rồi lần chạy chờ job. Một lần từ chối (một lần chạy khác vẫn đang mở, không
-  có gì đủ điều kiện) ở lại trong dialog và reason được giữ. Khi yêu cầu không nhận được câu trả lời rõ ràng (không có
-  câu trả lời, hoặc lỗi gateway hay timeout như 502, 504 hoặc 524), dialog đóng lại, danh sách lần chạy được tải lại, và
-  thẻ nói rằng lần chạy có thể đã hoặc chưa được yêu cầu và phải kiểm tra bảng các lần chạy trước khi yêu cầu lại.
-- **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server; in this version
-  nothing is deleted.` Một nút `Reload`, rồi các lần chạy, mới nhất trước: số của lần chạy; trạng thái bằng lời thường
-  dưới dạng status pill (`Requested — waiting for the job`, `Running`, `Waiting for the off-host copy`, `Copy
-  confirmed — waiting for the job`, `Completed`, `Nothing eligible`, `Cancelled`, `Failed`); cutoff date; các con số;
-  ai đã yêu cầu, kèm reason; các mốc thời gian; tên và dung lượng thư mục archive; và kết quả hoặc lý do thất bại. Bảng
-  rộng giữ một lần chạy điển hình trong khoảng năm dòng:
+  reason bắt buộc. Văn bản của nó nói lần chạy làm gì: `The run exports the Movement history before <date> to archive
+  files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database.`, tiếp theo là
+  câu thứ hai trong chú thích cuối của thẻ Preview. `Request run` gửi reason và cutoff date đã preview; server kiểm tra
+  lại các con số (tối đa preview time limit) và lưu chúng cùng lần chạy, rồi lần chạy chờ job. Một lần từ chối (một lần
+  chạy khác vẫn đang mở, không có gì đủ điều kiện) ở lại trong dialog và reason được giữ. Khi yêu cầu không nhận được
+  câu trả lời rõ ràng (không có câu trả lời, hoặc lỗi gateway hay timeout như 502, 504 hoặc 524), dialog đóng lại, danh
+  sách lần chạy được tải lại, và thẻ nói rằng lần chạy có thể đã hoặc chưa được yêu cầu và phải kiểm tra bảng các lần
+  chạy trước khi yêu cầu lại.
+- **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server and, after the
+  off-host copy and a pre-purge backup, purges it from the database.` Chú thích cuối của thẻ nói một lần
+  `Archived commands can no longer be undone.` Một nút `Reload`, rồi các lần chạy, mới nhất trước: số của lần chạy;
+  trạng thái bằng lời thường dưới dạng status pill (`Requested — waiting for the job`, `Running`, `Waiting for the
+  off-host copy`, `Copy confirmed — waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing
+  eligible`, `Cancelled`, `Failed`); cutoff date; các con số; ai đã yêu cầu, kèm reason; các mốc thời gian; tên và dung
+  lượng thư mục archive, kèm pre-purge backup và purge receipt; và kết quả hoặc lý do thất bại. Kết quả của một lần chạy
+  đã hoàn tất ghi `Archived and purged.`, `Nothing purged (every component changed).` hoặc, với một lần chạy đã kết
+  thúc trước khi lần chạy có purge, `Exported to files; nothing deleted.` Bảng rộng giữ một lần chạy điển hình trong
+  khoảng năm dòng:
   - **Các con số** hiển thị các con số đã xuất khi đã có, nếu không thì con số của preview: số Movement trước
     (`4,210 Movements`), rồi `120 components · 310 flows` trên một dòng nhỏ hơn. Thêm một dòng `From the preview` khi
-    chưa xuất gì, hoặc các con số của preview khi con số đã xuất khác chúng, và một dòng `Skipped (changed during the
-    run)` chỉ xuất hiện khi có component bị bỏ qua;
-  - **Các mốc thời gian** chỉ hiển thị `Requested` và bước gần nhất (`Finished`, `Verified`, `Exported` hoặc
-    `Started`), mỗi mốc giữ ngày và giờ đi liền nhau; toàn bộ dòng thời gian được gập dưới `All times`, một phần mở
-    rộng mở được bằng bàn phím;
-  - **tên thư mục archive** dùng font monospace nhỏ hơn, xuống dòng ở bất kỳ chỗ nào, với dung lượng ở bên dưới.
+    chưa xuất gì, hoặc các con số của preview khi con số đã xuất khác chúng. Khi purge đã bắt đầu, một dòng nêu những gì
+    nó đã xóa, theo cách đếm của server (`Purged: 4,190 Movements · 118 components · 305 flows`, `Purged so far: …` khi
+    lần chạy đang purge; một lần chạy thất bại trong lúc purge vẫn giữ các component trọn vẹn mà nó đã purge). Một dòng
+    `Skipped (changed during the run)` chỉ xuất hiện khi có component bị bỏ qua, bởi bước verify hoặc bởi bước kiểm tra
+    riêng của purge;
+  - **Các mốc thời gian** chỉ hiển thị `Requested` và bước gần nhất (`Finished`, `Purge started`, `Verified`,
+    `Exported` hoặc `Started`), mỗi mốc giữ ngày và giờ đi liền nhau; toàn bộ dòng thời gian, với `Backup started`
+    (pre-purge backup) và `Purge started`, được gập dưới `All times`, một phần mở rộng mở được bằng bàn phím;
+  - **tên thư mục archive** dùng font monospace nhỏ hơn, xuống dòng ở bất kỳ chỗ nào, với dung lượng ở bên dưới, rồi
+    hai phần mở rộng mở được bằng bàn phím: `Pre-purge backup` với tên của backup, và `Purge receipt` với tên file của
+    receipt (`<archive folder name>.purged.json`, nằm cạnh thư mục archive) và SHA-256 của nó.
 
   Dưới 800 px các dòng xếp chồng.
   - `Cancel…` trên một lần chạy đã được yêu cầu hoặc đang chờ bản sao ngoài server hỏi trước (`Cancel run N?`, với
-    `Cancel run` và `Keep run (Esc)`); thư mục archive của một lần chạy đang chờ vẫn ở lại trên server.
+    `Cancel run` và `Keep run (Esc)`); thư mục archive của một lần chạy đang chờ vẫn ở lại trên server. Một lần chạy mà
+    job đang xử lý (`Running`, `Purging`) không có `Cancel…`, và server từ chối hủy nó.
   - `Confirm copy…` (tên truy cập `Confirm the off-host copy of run N…`) trên một lần chạy đang chờ bản sao ngoài server
     mở `Confirm the off-host copy of run N`, dialog hiển thị tên thư mục archive và manifest
     SHA-256, và giải thích rằng trước hết thư mục phải được sao chép từ thư mục archive của server sang nơi lưu trữ
     ngoài server, ví dụ bằng cách thêm thư mục archive vào task Hyper Backup. `Confirm copy` được bật khi đã đánh dấu
-    `The archive folder is copied off the server` và gửi SHA-256 đang hiển thị; job hoàn tất lần chạy ở lần khởi động
-    kế tiếp.
+    `The archive folder is copied off the server` và gửi SHA-256 đang hiển thị; ở lần khởi động kế tiếp job sẽ tạo
+    pre-purge backup rồi purge lịch sử đã archive.
   - Một lần từ chối được hiển thị trong dialog đúng như server diễn đạt. Khi một lần hủy hay một lần xác nhận không nhận
     được câu trả lời rõ ràng, danh sách lần chạy được tải lại và thẻ nhắc kiểm tra trạng thái của lần chạy; làm lại cả
     hai thao tác đều an toàn.
@@ -2990,13 +3044,16 @@ system settings.
 - **Hourly backups kept** (0–720, ban đầu 48), **Daily backups kept** (1–3650, ban đầu 30) và **Weekly backups kept**
   (0–520, ban đầu 52) là các số nguyên, mỗi ô có lỗi inline riêng. Việc rotation giữ backup scheduled mới nhất của mỗi
   giờ, ngày và tuần trong chừng ấy giờ, ngày và tuần (UTC).
-- Một dòng trung tính nhắc lại retention và giới hạn trên của nó, ví dụ `Keeps one scheduled backup per hour for the
-  last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups.`
+- **Pre-purge backups kept** (1–100, ban đầu 3) là một số nguyên có lỗi inline riêng: trong các pre-purge backup, mà job
+  history archival tạo trước mỗi lần purge (§9 History archival & purge), việc rotation giữ chừng ấy backup mới nhất.
+- Một dòng trung tính nhắc lại retention và giới hạn trên của nó, rồi số pre-purge backup được giữ, ví dụ `Keeps one
+  scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at
+  most 130 scheduled backups. Keeps the newest 3 pre-purge backups.`
 - Văn bản trợ giúp nêu rằng tác vụ tạo một backup khi khoảng thời gian đã trôi qua kể từ backup scheduled mới nhất,
-  rằng các backup tạo bằng tay hoặc trước khi cập nhật không bao giờ bị xóa, và rằng một thay đổi có hiệu lực từ lần
-  chạy kế tiếp của tác vụ. Việc lưu là một lần thay thế toàn bộ có audit, không hỏi xác nhận và không tạo hay xóa
-  backup nào.
-- Không có permission thì bốn giá trị hiển thị dưới dạng văn bản.
+  rằng nó giữ các pre-purge backup mới nhất tới số đã đặt và xóa các bản cũ hơn, rằng các backup tạo bằng tay hoặc
+  trước khi cập nhật không bao giờ bị xóa, và rằng một thay đổi có hiệu lực từ lần chạy kế tiếp của tác vụ. Việc lưu là
+  một lần thay thế toàn bộ năm giá trị có audit, không hỏi xác nhận và không tạo hay xóa backup nào.
+- Không có permission thì năm giá trị hiển thị dưới dạng văn bản.
 
 ---
 
@@ -4233,7 +4290,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: History archival & purge hiển thị các thiết lập, preview, việc yêu cầu một lần chạy và các lần chạy với Cancel và Confirm off-host copy; một lần chạy xuất lịch sử và không xóa gì, và permission mới Run history archival and purge bảo vệ section. |
+| 2026-11-18 | uncommitted | §4.5, §7.2, §7.3 và §9: một lần chạy archival purge lịch sử đã archive sau bản sao ngoài server và một pre-purge backup, Tracking hiển thị các mục đã archive và các bước route đã archive, các command đã archive không thể undo được nữa, và các giới hạn batch của purge cùng Pre-purge backups kept là các thiết lập. |
+| 2026-11-17 | 2f12d33 | §9: History archival & purge hiển thị các thiết lập, preview, việc yêu cầu một lần chạy và các lần chạy với Cancel và Confirm off-host copy; một lần chạy xuất lịch sử và không xóa gì, và permission mới Run history archival and purge bảo vệ section. |
 | 2026-11-17 | 1490927 | §11: Add Part đề xuất, xem trước và tạo dạng chuẩn của một PN mới mà server suy ra từ giá trị đã nhập. |
 | 2026-11-17 | 1a553f2 | §9: mọi section thiết lập của Administration hiển thị mỗi nhóm thiết lập thành một thẻ riêng, như Security. |
 | 2026-11-17 | 932473a | §9: các thẻ Security lấp đầy bề rộng trang theo các cột rộng bằng nhau, mỗi thẻ ít nhất đủ rộng cho nhãn và giá trị rộng nhất của nó. |

@@ -86,18 +86,20 @@ TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
 _READ: Final = frozenset({"SELECT"})
 
 #: The exact table privileges of the maintenance database role (CD5;
-#: history archival design §8.3, build step 1): SELECT on what the archive
-#: export reads — Movements, flows, lineage, Assigned Routes and their
-#: steps, Work Orders and demand lines, the Part Number master, the context
-#: tables, Users/roles/role permissions, the application policy and
-#: ``alembic_version`` for the archive manifest —; on the two archival
-#: tables SELECT and the UPDATE their guard triggers allow, and INSERT on
-#: the records only (a run is requested by a person in Administration,
-#: never by the job); and INSERT on ``audit_events``, which
-#: ``trg_audit_events_maintenance_scope`` limits to ``HistoryArchiveRun``
-#: rows (no SELECT: it never reads the audit trail). Never credentials,
-#: sign-in sessions, mail or Scan Station devices; no DELETE (the purge step
-#: adds it on ``part_movements``).
+#: history archival design §8.3, build steps 1 and 2): SELECT on what the
+#: archive export reads — Movements, flows, lineage, Assigned Routes and
+#: their steps, Work Orders and demand lines, the Part Number master, the
+#: context tables, Users/roles/role permissions (also the purge's re-check
+#: of the requester), the application policy and ``alembic_version`` for the
+#: archive manifest —; on the two archival tables SELECT and the UPDATE
+#: their guard triggers allow, and INSERT on the records only (a run is
+#: requested by a person in Administration, never by the job); INSERT on
+#: ``audit_events``, which ``trg_audit_events_maintenance_scope`` limits to
+#: ``HistoryArchiveRun`` rows (no SELECT: it never reads the audit trail);
+#: and DELETE on ``part_movements`` only, which
+#: ``trg_part_movements_guard_delete`` limits to the archived rows of a run
+#: in PURGING (build step 2). Never credentials, sign-in sessions, mail or
+#: Scan Station devices.
 MAINTENANCE_PRIVILEGES: Final[Mapping[str, frozenset[str]]] = {
     "alembic_version": _READ,
     "application_policy": _READ,
@@ -109,7 +111,7 @@ MAINTENANCE_PRIVILEGES: Final[Mapping[str, frozenset[str]]] = {
     "history_archived_flows": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "machines": _READ,
     "operations": _READ,
-    "part_movements": _READ,
+    "part_movements": frozenset({"SELECT", "DELETE"}),
     "part_numbers": _READ,
     "quantity_flow_lineage": _READ,
     "quantity_flows": _READ,
@@ -217,7 +219,15 @@ GUARD_TRIGGERS: Final[Mapping[str, GuardTrigger]] = {
         " public.machines FOR EACH ROW WHEN ((new.asset_tag IS DISTINCT FROM old.asset_tag))"
         " EXECUTE FUNCTION partflow_machines_forbid_asset_tag_change()",
     ),
-    "trg_part_movements_forbid_mutation": _statement_guard("part_movements", _ALL_EVENTS),
+    # Movements: never updated or truncated; a delete is judged row by row
+    # and allowed only to the purge of an archival run (0041).
+    "trg_part_movements_forbid_mutation": _statement_guard("part_movements", "UPDATE OR TRUNCATE"),
+    "trg_part_movements_guard_delete": GuardTrigger(
+        "part_movements",
+        "partflow_part_movements_guard_delete",
+        "CREATE TRIGGER trg_part_movements_guard_delete BEFORE DELETE ON public.part_movements"
+        " FOR EACH ROW EXECUTE FUNCTION partflow_part_movements_guard_delete()",
+    ),
     "trg_quantity_flow_lineage_forbid_mutation": _statement_guard(
         "quantity_flow_lineage", _ALL_EVENTS
     ),
@@ -255,10 +265,10 @@ GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
         "38b0a49d48776f44e16b9537e8469bddc52893d379a4d1a484142a1ce0f2f0b3"
     ),
     "partflow_history_archive_runs_guard_mutation": (
-        "81af37aab747cbdaca01c680a0a8592549ed44b2bcf7d68f88d60899727d43d8"
+        "40c21ea2f2c577c385c682377470476f218c1dc37c747f38e2aad0fb302f52af"
     ),
     "partflow_history_archived_flows_guard_mutation": (
-        "fb284f5f0586513936b3a5a27be02ae164dce0894871e31d6b5d4ee64a8585d7"
+        "bd48a533b98c9b6d7571c9888fe50b64e7d1c81aa16ec46e115018b93e3504fd"
     ),
     "partflow_machine_lifecycle_events_forbid_mutation": (
         "6a29a65f2e3ddee67b0f3bbda429d72b7fed6ff72564bc6bd7466724109f52b1"
@@ -271,6 +281,9 @@ GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
     ),
     "partflow_part_movements_forbid_mutation": (
         "e66962957036fd21cd17cc9cc002450969508d29165811845626d87317dd6764"
+    ),
+    "partflow_part_movements_guard_delete": (
+        "6ed5d28e62af237848a0ed0fbd48fcb511abf67a0b1d2d64fe899d934b891545"
     ),
     "partflow_quantity_flow_lineage_forbid_mutation": (
         "de7c37d36a72a5c7286e7d4c2293a404d546a7ed2a8aaddfbbbaaa0818a5614a"

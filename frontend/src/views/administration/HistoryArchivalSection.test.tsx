@@ -17,14 +17,17 @@ import type { SessionValue } from '../../app/session-context';
 import { HistoryArchivalSection } from './HistoryArchivalSection';
 
 // Administration → History archival & purge (Phase 16, archival design B
-// step 1): the settings card and its partial-PUT dialog, the preview with
-// its progress and the server's refusals, the request of a run (and a
-// request whose answer was lost), and the runs table with Cancel and
-// Confirm off-host copy. The /api surface is faked in memory with the
-// contract's routes and shapes; the server's messages are shown as given.
+// steps 1 and 2): the settings card and its partial-PUT dialog (with the
+// purge batch limits), the preview with its progress and the server's
+// refusals, the request of a run (and a request whose answer was lost),
+// what a run purges, and the runs table with the purge's states, results,
+// counts and evidence, Cancel and Confirm off-host copy. The /api surface
+// is faked in memory with the contracts' routes and shapes; the server's
+// messages are shown as given.
 
 const T0 = '2026-11-17T08:00:00Z';
 const SHA = 'a'.repeat(64);
+const RECEIPT_SHA = 'b'.repeat(64);
 
 interface RunWire {
   id: number;
@@ -61,6 +64,11 @@ interface RunWire {
   copy_confirmed_at: string | null;
   copy_confirmed_by: { user_id: number; display_name: string } | null;
   cancelled_by: { user_id: number; display_name: string } | null;
+  pre_purge_backup: { name: string; dump_started_at: string } | null;
+  purge_started_at: string | null;
+  purged: { components: number; flows: number; movements: number } | null;
+  receipt_name: string | null;
+  receipt_sha256: string | null;
   finished_at: string | null;
   result: string | null;
   failure_reason: string | null;
@@ -96,6 +104,11 @@ function run(id: number, overrides: Partial<RunWire> = {}): RunWire {
     copy_confirmed_at: null,
     copy_confirmed_by: null,
     cancelled_by: null,
+    pre_purge_backup: null,
+    purge_started_at: null,
+    purged: null,
+    receipt_name: null,
+    receipt_sha256: null,
     finished_at: null,
     result: null,
     failure_reason: null,
@@ -122,12 +135,40 @@ const WAITING = (id: number) =>
     skipped: { components: 0, flows: 0 },
   });
 
+/** A run the job copied, backed up and is purging (step 2). */
+const PURGING = (id: number) =>
+  run(id, {
+    ...WAITING(id),
+    state: 'PURGING',
+    copied_at: '2026-11-17T09:23:00Z',
+    pre_purge_backup: {
+      name: `20261117T092400Z-pre-purge-run-${id}-20261117T092000Z`,
+      dump_started_at: '2026-11-17T09:24:00Z',
+    },
+    purge_started_at: '2026-11-17T09:26:00Z',
+    purged: { components: 40, flows: 100, movements: 1400 },
+  });
+
+/** A run that purged every component it archived. */
+const PURGED = (id: number) =>
+  run(id, {
+    ...PURGING(id),
+    state: 'COMPLETED',
+    purged: { components: 120, flows: 310, movements: 4210 },
+    receipt_name: `run-${id}-20261117T092000Z.purged.json`,
+    receipt_sha256: RECEIPT_SHA,
+    finished_at: '2026-11-17T09:40:00Z',
+    result: 'PURGED',
+  });
+
 interface Policy {
   retention_period_months: number | null;
   shortest_retention_months: number;
   archive_start_minute: number;
   archive_preview_seconds: number;
   archive_max_wait_days: number;
+  archive_purge_batch_movements: number;
+  archive_purge_batch_part_numbers: number;
 }
 
 let policy: Policy;
@@ -281,6 +322,8 @@ beforeEach(() => {
     archive_start_minute: 20,
     archive_preview_seconds: 90,
     archive_max_wait_days: 7,
+    archive_purge_batch_movements: 50000,
+    archive_purge_batch_part_numbers: 20,
   };
   runs = [];
   writes = [];
@@ -336,7 +379,7 @@ function runRow(id: number): Record<string, string> {
   return Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? '']));
 }
 
-test('HA-1: the section shows the settings, the preview and the runs, and says that nothing is deleted', async () => {
+test('HA-1: the section shows the settings, the preview and the runs, and says what a run purges', async () => {
   runs = [
     run(3, { state: 'RUNNING', started_at: '2026-11-17T09:20:00Z' }),
     run(2, {
@@ -361,14 +404,25 @@ test('HA-1: the section shows the settings, the preview and the runs, and says t
     'Start minute': '20 minutes past each hour',
     'Preview time limit': '90 seconds',
     'Report a waiting run after': '7 days',
+    'Movements per purge batch': '50,000',
+    'Part Numbers per purge batch': '20',
   });
   expect(
     screen.getByRole('button', { name: 'Edit retention and schedule…' }),
   ).toBeEnabled();
-  expect(card('Preview')).toBeInTheDocument();
-  expect(card('Runs').textContent).toContain(
-    'Each run exports the Movement history before its cutoff to archive files on the server; in this version nothing is deleted.',
+  expect(card('Preview').textContent).toContain(
+    'After the off-host copy and a pre-purge backup, a run deletes the archived Movement history from the database. Tracking then shows one “History archived in run N” line per archived flow, and archived commands can no longer be undone.',
   );
+  expect(card('Runs').textContent).toContain(
+    'Each run exports the Movement history before its cutoff to archive files on the server and, after the off-host copy and a pre-purge backup, purges it from the database.',
+  );
+  // Said once in the runs card, never per run.
+  expect(
+    within(card('Runs')).getAllByText(
+      'Archived commands can no longer be undone.',
+    ),
+  ).toHaveLength(1);
+  expect(card('Runs').textContent).not.toContain('nothing is deleted');
   expect(screen.queryByText(/View only/)).toBeNull();
 
   expect(runRow(3)).toMatchObject({
@@ -685,7 +739,11 @@ test('HA-7: a request shows the preview numbers, posts the reason and the cutoff
   expect(dialog.textContent).toContain(
     '120 components · 310 flows · 4,210 Movements',
   );
-  expect(dialog.textContent).toContain('deletes nothing');
+  // What the run does, before it is requested: the purge and what follows.
+  expect(dialog.textContent).toContain(
+    'The run exports the Movement history before Nov 17, 2024 to archive files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database. Tracking then shows one “History archived in run N” line per archived flow, and archived commands can no longer be undone.',
+  );
+  expect(dialog.textContent).not.toContain('deletes nothing');
 
   // A definite refusal keeps the dialog and the reason.
   const OPEN =
@@ -813,6 +871,9 @@ test('HA-11: Confirm off-host copy shows the archive and its SHA-256, needs the 
   expect(dialog.textContent).toContain('run-3-20261117T092000Z');
   expect(dialog.textContent).toContain(SHA);
   expect(dialog.textContent).toContain('Hyper Backup task');
+  expect(dialog.textContent).toContain(
+    'At its next start the archival job on the server then takes the pre-purge backup and purges the archived history from the database.',
+  );
   const confirm = within(dialog).getByRole('button', { name: 'Confirm copy' });
   expect(confirm).toBeDisabled();
   fireEvent.click(
@@ -824,7 +885,7 @@ test('HA-11: Confirm off-host copy shows the archive and its SHA-256, needs the 
 
   expect(
     await within(card('Runs')).findByText(
-      '✓ The off-host copy of run 3 is confirmed. The archival job on the server completes the run at its next start.',
+      '✓ The off-host copy of run 3 is confirmed. At its next start the archival job on the server takes the pre-purge backup and purges the archived history.',
     ),
   ).toBeInTheDocument();
   expect(writes).toEqual([
@@ -878,4 +939,219 @@ test('HA-13: a failed load of the runs offers Retry', async () => {
   await waitFor(() =>
     expect(runRow(1).State).toBe('Requested — waiting for the job'),
   );
+});
+
+/** The labels of a run's full timeline, under All times. */
+function allTimes(id: number): string[] {
+  const row = within(card('Runs'))
+    .getAllByRole('row')
+    .find((tr) => tr.querySelector('td')?.textContent === String(id))!;
+  const details = row.querySelector(
+    'td[data-label="Times"] details',
+  ) as HTMLElement;
+  return Array.from(
+    details.querySelectorAll('.admin-runtime'),
+    (line) => line.firstChild?.textContent?.trim() ?? '',
+  );
+}
+
+/** The archive cell of a run's row. */
+function archiveCell(id: number): HTMLElement {
+  const row = within(card('Runs'))
+    .getAllByRole('row')
+    .find((tr) => tr.querySelector('td')?.textContent === String(id))!;
+  return row.querySelector('td[data-label="Archive"]') as HTMLElement;
+}
+
+test('HA-14: the runs show the purge — its states and results, the purged and skipped counts, the purge start, the backup and the receipt', async () => {
+  runs = [
+    PURGING(9),
+    PURGED(8),
+    {
+      ...PURGED(7),
+      state: 'COMPLETED_WITH_SKIPS',
+      purged: { components: 118, flows: 305, movements: 4190 },
+      // The verification's and the purge's skips together.
+      skipped: { components: 2, flows: 5 },
+    },
+    // Every component changed after the export: the verification finished
+    // the run, with a receipt and without a copy or a backup.
+    {
+      ...WAITING(6),
+      state: 'COMPLETED_WITH_SKIPS',
+      skipped: { components: 120, flows: 310 },
+      receipt_name: 'run-6-20261117T092000Z.purged.json',
+      receipt_sha256: RECEIPT_SHA,
+      finished_at: '2026-11-17T09:23:00Z',
+      result: 'NOTHING_PURGED',
+    },
+    {
+      ...PURGING(5),
+      state: 'FAILED',
+      receipt_name: 'run-5-20261117T092000Z.purged.json',
+      receipt_sha256: RECEIPT_SHA,
+      failure_reason:
+        'A purge batch deleted 9 Movements where its records count 10.',
+      finished_at: '2026-11-17T09:30:00Z',
+    },
+    {
+      ...WAITING(4),
+      state: 'COMPLETED',
+      copied_at: '2026-11-17T09:23:00Z',
+      finished_at: '2026-11-17T09:23:00Z',
+      result: 'EXPORT_ONLY',
+    },
+  ];
+  renderSection();
+  await loaded();
+
+  // Purging: open, its progress so far, never cancellable.
+  expect(runRow(9)).toMatchObject({
+    State: 'Purging',
+    Result: '—',
+    Actions: '',
+  });
+  expect(runRow(9).Counts).toBe(
+    '4,210 Movements120 components · 310 flowsPurged so far: 1,400 Movements · 40 components · 100 flows',
+  );
+  expect(runRow(9).Times).toMatch(/^Requested .+Purge started .+All times/);
+  expect(allTimes(9)).toEqual([
+    'Requested',
+    'Started',
+    'Exported',
+    'Verified',
+    'Copied',
+    'Backup started',
+    'Purge started',
+  ]);
+  const purging = archiveCell(9);
+  expect(within(purging).getByText('Pre-purge backup').tagName).toBe('SUMMARY');
+  expect(purging.textContent).toContain(
+    '20261117T092400Z-pre-purge-run-9-20261117T092000Z',
+  );
+  expect(within(purging).queryByText('Purge receipt')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Cancel run 9…' })).toBeNull();
+
+  // Completed: the result in plain words, the purged counts, the backup
+  // and the receipt with its SHA-256.
+  expect(runRow(8)).toMatchObject({
+    State: 'Completed',
+    Result: 'Archived and purged.',
+  });
+  expect(runRow(8).Counts).toBe(
+    '4,210 Movements120 components · 310 flowsPurged: 4,210 Movements · 120 components · 310 flows',
+  );
+  expect(runRow(8).Times).toMatch(/^Requested .+Finished .+All times/);
+  expect(allTimes(8).slice(-3)).toEqual([
+    'Backup started',
+    'Purge started',
+    'Finished',
+  ]);
+  const purged = archiveCell(8);
+  expect(within(purged).getByText('Purge receipt').tagName).toBe('SUMMARY');
+  expect(purged.textContent).toContain('run-8-20261117T092000Z.purged.json');
+  expect(purged.textContent).toContain(`SHA-256 ${RECEIPT_SHA}`);
+  expect(purged.textContent).toContain(
+    '20261117T092400Z-pre-purge-run-8-20261117T092000Z',
+  );
+
+  expect(runRow(7)).toMatchObject({
+    State: 'Completed with skips',
+    Result: 'Archived and purged.',
+  });
+  expect(runRow(7).Counts).toBe(
+    '4,210 Movements120 components · 310 flowsPurged: 4,190 Movements · 118 components · 305 flowsSkipped (changed during the run): 2 components · 5 flows',
+  );
+
+  expect(runRow(6)).toMatchObject({
+    State: 'Completed with skips',
+    Result: 'Nothing purged (every component changed).',
+  });
+  expect(runRow(6).Counts).not.toContain('Purged');
+  expect(within(archiveCell(6)).getByText('Purge receipt')).toBeTruthy();
+  expect(within(archiveCell(6)).queryByText('Pre-purge backup')).toBeNull();
+
+  // A run that failed while purging keeps the whole components it purged.
+  expect(runRow(5)).toMatchObject({
+    State: 'Failed',
+    Result: 'A purge batch deleted 9 Movements where its records count 10.',
+  });
+  expect(runRow(5).Counts).toContain(
+    'Purged: 1,400 Movements · 40 components · 100 flows',
+  );
+
+  // A run that step 1 finished keeps its result.
+  expect(runRow(4).Result).toBe('Exported to files; nothing deleted.');
+  expect(runRow(4).Counts).not.toContain('Purged');
+  expect(writes).toEqual([]);
+});
+
+test('HA-15: the purge batch limits are edited in the dialog, sent only when changed, and a refusal is shown as given', async () => {
+  renderSection();
+  await loaded();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit retention and schedule…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Retention and schedule' });
+  expect(
+    within(dialog).getByLabelText('Movements per purge batch'),
+  ).toHaveValue(50000);
+  expect(
+    within(dialog).getByLabelText('Part Numbers per purge batch'),
+  ).toHaveValue(20);
+  fireEvent.change(
+    within(dialog).getByLabelText('Part Numbers per purge batch'),
+    { target: { value: '5' } },
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Retention and schedule' }),
+    ).toBeNull(),
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: { archive_purge_batch_part_numbers: 5 },
+    },
+  ]);
+  await waitFor(() =>
+    expect(
+      rows(card('Retention and schedule'))['Part Numbers per purge batch'],
+    ).toBe('5'),
+  );
+
+  // The server checks the range; its message stays in the dialog.
+  writes = [];
+  const REFUSAL =
+    'The Movements per purge batch must be a whole number from 100 to 1000000.';
+  failures['PUT policy'] = { status: 422, detail: REFUSAL };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit retention and schedule…' }),
+  );
+  const again = screen.getByRole('dialog', { name: 'Retention and schedule' });
+  const movements = within(again).getByLabelText('Movements per purge batch');
+  fireEvent.change(movements, { target: { value: '50' } });
+  fireEvent.click(within(again).getByRole('button', { name: 'Save changes' }));
+  expect(await within(again).findByRole('alert')).toHaveTextContent(REFUSAL);
+  expect(movements).toHaveValue(50);
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: { archive_purge_batch_movements: 50 },
+    },
+  ]);
+
+  // Only a value that is not a whole number is refused in the dialog.
+  fireEvent.change(movements, { target: { value: '2.5' } });
+  expect(
+    within(again)
+      .getAllByRole('alert')
+      .map((alert) => alert.textContent),
+  ).toContain('Enter a whole number.');
+  expect(
+    within(again).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
 });

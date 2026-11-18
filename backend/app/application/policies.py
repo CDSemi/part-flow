@@ -27,9 +27,11 @@ the shortest allowed period to 1200, or none —, the shortest allowed period
 (1-1200 months, initially 12, changed only with a reason that the audit
 row's metadata keeps), the days a run may wait for its copy confirmation
 before the host job's status reports it (1-365, initially 7), the Start
-minute of the host job's hourly work (0-59, initially 20) and the preview
-time limit (10-600 seconds, initially 90), a partial merge guarded by Run
-history archival and purge. Only the
+minute of the host job's hourly work (0-59, initially 20), the preview
+time limit (10-600 seconds, initially 90) and (design B step 2) the purge
+batch limits — Movements per batch (100-1,000,000, initially 50,000) and
+Part Numbers per batch (1-1000, initially 20) —, a partial merge guarded by
+Run history archival and purge. Only the
 archival module (``app.application.history_archive``) and the host job read
 them — never production workflow logic (PROJECT_PROFILE §28 "retention
 settings live in Administration/configuration"). Audited under its own
@@ -47,8 +49,10 @@ Administration → Backups (owner decision of 2026-11-13; ``entity_id``
 ``backups``, a full replace like Due Soon): the interval of the scheduled
 backups (1, 2, 3, 4, 6, 8, 12 or 24 hours, default 1) and the hourly
 (0-720, default 48), daily (1-3650, default 30) and weekly (0-520, default
-52) backups their rotation keeps. Only the host's hourly backup task
-(``app.cli backup-policy``) and ``status`` read it, from their next run.
+52) backups their rotation keeps, and (history archival step 2) the
+pre-purge backups kept (1-100, default 3; optional in the write, left out =
+kept). Only the host's hourly backup task (``app.cli backup-policy``) and
+``status`` read it, from their next run.
 Phase 17 adds the outgoing mail server of Administration → Settings (owner
 decision of 2026-11-13; ``entity_id`` ``mail-server``, a full replace like
 Backups except the password, which is kept unless replaced or cleared):
@@ -115,6 +119,8 @@ from app.infrastructure.models import (
     BACKUP_KEEP_DAILY_MIN,
     BACKUP_KEEP_HOURLY_MAX,
     BACKUP_KEEP_HOURLY_MIN,
+    BACKUP_KEEP_PRE_PURGE_MAX,
+    BACKUP_KEEP_PRE_PURGE_MIN,
     BACKUP_KEEP_WEEKLY_MAX,
     BACKUP_KEEP_WEEKLY_MIN,
     DUE_SOON_DAYS_MAX,
@@ -380,11 +386,15 @@ HISTORY_ARCHIVE_COLUMNS: Final = (
     "archive_max_wait_days",
     "archive_start_minute",
     "archive_preview_seconds",
+    "archive_purge_batch_movements",
+    "archive_purge_batch_part_numbers",
 )
 _SHORTEST_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["shortest_retention_months"]
 _MAX_WAIT_DAYS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_max_wait_days"]
 _START_MINUTE_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_start_minute"]
 _PREVIEW_SECONDS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_preview_seconds"]
+_BATCH_MOVEMENTS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_purge_batch_movements"]
+_BATCH_PART_NUMBERS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_purge_batch_part_numbers"]
 _SHORTEST_RETENTION_MESSAGE: Final = (
     "The shortest allowed period must be a whole number of months from"
     f" {_SHORTEST_RANGE[0]} to {_SHORTEST_RANGE[1]}."
@@ -400,6 +410,14 @@ _START_MINUTE_MESSAGE: Final = (
 _PREVIEW_SECONDS_MESSAGE: Final = (
     "The preview time limit must be a whole number of seconds from"
     f" {_PREVIEW_SECONDS_RANGE[0]} to {_PREVIEW_SECONDS_RANGE[1]}."
+)
+_BATCH_MOVEMENTS_MESSAGE: Final = (
+    "The Movements per purge batch must be a whole number from"
+    f" {_BATCH_MOVEMENTS_RANGE[0]} to {_BATCH_MOVEMENTS_RANGE[1]}."
+)
+_BATCH_PART_NUMBERS_MESSAGE: Final = (
+    "The Part Numbers per purge batch must be a whole number from"
+    f" {_BATCH_PART_NUMBERS_RANGE[0]} to {_BATCH_PART_NUMBERS_RANGE[1]}."
 )
 _HISTORY_ARCHIVE_REASON_MESSAGE: Final = (
     "Enter the reason for changing the shortest allowed period: 1 to 500 characters of plain text."
@@ -438,9 +456,11 @@ def update_history_archive_policy(
     period to 1200, or ``None`` (no retention period: nothing is eligible);
     the shortest allowed period (1-1200 months) changes only with a
     ``reason``, which the audit row's metadata keeps; the waiting limit of a
-    copy confirmation is 1-365 days, the Start minute 0-59 and the preview
-    time limit 10-600 seconds. Saving archives, deletes or schedules
-    nothing: the host job and the preview read the settings.
+    copy confirmation is 1-365 days, the Start minute 0-59, the preview
+    time limit 10-600 seconds, the Movements per purge batch 100-1,000,000
+    and the Part Numbers per purge batch 1-1000. Saving archives, deletes or
+    schedules nothing: the host job and the preview read the settings (a
+    purge reads its batch limits at each start).
     """
     policy = _policy_for_edit(session)
     if not changes:
@@ -450,6 +470,8 @@ def update_history_archive_policy(
         ("archive_max_wait_days", _MAX_WAIT_DAYS_MESSAGE),
         ("archive_start_minute", _START_MINUTE_MESSAGE),
         ("archive_preview_seconds", _PREVIEW_SECONDS_MESSAGE),
+        ("archive_purge_batch_movements", _BATCH_MOVEMENTS_MESSAGE),
+        ("archive_purge_batch_part_numbers", _BATCH_PART_NUMBERS_MESSAGE),
     ):
         if column in changes and not _is_whole_in(
             changes[column], *HISTORY_ARCHIVE_POLICY_RANGES[column]
@@ -592,6 +614,12 @@ class BackupPolicy(NamedTuple):
     keep_hourly: int
     keep_daily: int
     keep_weekly: int
+    #: The newest verified pre-purge backups kept (history archival step 2).
+    keep_pre_purge: int
+
+
+#: The pre-purge backups kept: whole numbers in this range (inclusive).
+BACKUP_KEEP_PRE_PURGE_RANGE: Final = (BACKUP_KEEP_PRE_PURGE_MIN, BACKUP_KEEP_PRE_PURGE_MAX)
 
 
 def backup_policy(policy: ApplicationPolicy) -> BackupPolicy:
@@ -600,6 +628,7 @@ def backup_policy(policy: ApplicationPolicy) -> BackupPolicy:
         keep_hourly=policy.backup_keep_hourly,
         keep_daily=policy.backup_keep_daily,
         keep_weekly=policy.backup_keep_weekly,
+        keep_pre_purge=policy.backup_keep_pre_purge,
     )
 
 
@@ -614,6 +643,7 @@ def _backup_snapshot(policy: ApplicationPolicy) -> dict[str, Any]:
         "backup_keep_hourly": policy.backup_keep_hourly,
         "backup_keep_daily": policy.backup_keep_daily,
         "backup_keep_weekly": policy.backup_keep_weekly,
+        "backup_keep_pre_purge": policy.backup_keep_pre_purge,
     }
 
 
@@ -624,12 +654,15 @@ def update_backup_policy(
     keep_hourly: object,
     keep_daily: object,
     keep_weekly: object,
+    keep_pre_purge: object = UNSET,
     actor_user_id: int | None,
 ) -> ApplicationPolicy:
-    """Replace the backup policy (all four fields); a no-op writes and audits nothing.
+    """Replace the backup policy; a no-op writes and audits nothing.
 
-    Saving it takes, removes or schedules no backup: the host's hourly
-    backup task reads it at its next run.
+    The four fields of the scheduled backups are a full replace; the
+    pre-purge backups kept (1-100) is replaced when given and keeps its
+    stored value when left out. Saving it takes, removes or schedules no
+    backup: the host's hourly backup task reads it at its next run.
     """
     policy = session.get(
         ApplicationPolicy, _POLICY_ID, with_for_update=_EDIT_LOCK, populate_existing=True
@@ -644,12 +677,21 @@ def update_backup_policy(
         raise InvalidInputError("Daily backups kept must be a whole number from 1 to 3650.")
     if not _is_whole_in(keep_weekly, BACKUP_KEEP_WEEKLY_MIN, BACKUP_KEEP_WEEKLY_MAX):
         raise InvalidInputError("Weekly backups kept must be a whole number from 0 to 520.")
+    pre_purge = policy.backup_keep_pre_purge if isinstance(keep_pre_purge, UnsetType) else None
+    if pre_purge is None:
+        if not _is_whole_in(keep_pre_purge, *BACKUP_KEEP_PRE_PURGE_RANGE):
+            raise InvalidInputError(
+                "Pre-purge backups kept must be a whole number from"
+                f" {BACKUP_KEEP_PRE_PURGE_MIN} to {BACKUP_KEEP_PRE_PURGE_MAX}."
+            )
+        pre_purge = keep_pre_purge
     before = _backup_snapshot(policy)
     after = {
         "backup_interval_hours": interval_hours,
         "backup_keep_hourly": keep_hourly,
         "backup_keep_daily": keep_daily,
         "backup_keep_weekly": keep_weekly,
+        "backup_keep_pre_purge": pre_purge,
     }
     if after == before:
         return policy
@@ -657,6 +699,7 @@ def update_backup_policy(
     policy.backup_keep_hourly = keep_hourly
     policy.backup_keep_daily = keep_daily
     policy.backup_keep_weekly = keep_weekly
+    policy.backup_keep_pre_purge = pre_purge
     policy.updated_at = func.now()
     audit.append_audit_event(
         session,

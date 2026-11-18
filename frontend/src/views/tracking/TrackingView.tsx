@@ -5,10 +5,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { partNumberImageUrl } from '../../api/part-numbers';
 import type {
   TrackingAllocation,
+  TrackingArchivedHistory,
   TrackingDetail,
   TrackingFilters,
   TrackingFlow,
   TrackingMovement,
+  TrackingMovementPage,
   TrackingRow,
 } from '../../api/tracking';
 import {
@@ -48,7 +50,7 @@ import {
   useTrackingFilterOptions,
   useTrackingListFeed,
 } from './tracking-feed';
-import type { DetailRevisions } from './tracking-logic';
+import type { DetailRevisions, HistoryEntry } from './tracking-logic';
 import {
   ALLOCATIONS_PAGE_SIZE,
   FLOWS_PAGE_SIZE,
@@ -61,10 +63,15 @@ import {
   STATUS_TITLE,
   TRACKING_MAX_ROWS,
   TRACKING_PAGE_SIZE,
+  archivedHistoryText,
+  archivedTimestamp,
+  describeArchivedHistory,
   describeMovement,
   detailRevisions,
   filtersAreDefault,
   flowId,
+  historyEntries,
+  historyEntryKey,
   locationPercent,
   locationRow,
   movementTypeClass,
@@ -570,10 +577,18 @@ function CloseDetailButton({ onClose }: { onClose: () => void }) {
 /** One paged detail section: the first page plus the older pages loaded. */
 interface PagedSection<T> {
   items: T[];
+  /** `Showing n of m`: the rows of the section's noun shown, and their
+   * total in scope. */
+  shown: number;
   total: number;
+  /** A history section's archived entries, shown and in scope; null when
+   * none is in scope (and for every other section). */
+  archived: { shown: number; total: number } | null;
   hasOlder: boolean;
   loading: boolean;
   error: string | null;
+  /** Why the section went back to its first page, until it pages again. */
+  notice: string | null;
   showOlder: () => void;
 }
 
@@ -582,22 +597,62 @@ function pagedSection<T>(
   older: OlderPages<T> | null,
   showOlder: () => void,
 ): PagedSection<T> {
+  const items = [...first.items, ...(older?.items ?? [])];
   return {
-    items: [...first.items, ...(older?.items ?? [])],
+    items,
+    shown: items.length,
     total: first.total,
+    archived: null,
     hasOlder:
       older === null || older.loaded === 0
         ? first.hasMore
         : older.nextBefore !== null,
     loading: older?.loading ?? false,
     error: older?.error ?? null,
+    notice: null,
     showOlder,
   };
 }
 
+/** A history section (Movement history, Scrap history): its Movements and
+ * archived entries, interleaved page by page; `Showing` counts each kind
+ * against its own total. */
+function historySection(
+  first: TrackingMovementPage,
+  older: OlderPages<HistoryEntry> | null,
+  paging: { showOlder: () => void; notice: string | null },
+): PagedSection<HistoryEntry> {
+  const section = pagedSection(
+    {
+      items: historyEntries(first),
+      total: first.total,
+      hasMore: first.hasMore,
+    },
+    older,
+    paging.showOlder,
+  );
+  const archivedShown = section.items.filter(
+    (entry) => entry.kind === 'archived',
+  ).length;
+  return {
+    ...section,
+    shown: section.items.length - archivedShown,
+    archived:
+      first.archivedTotal > 0
+        ? { shown: archivedShown, total: first.archivedTotal }
+        : null,
+    notice: paging.notice,
+  };
+}
+
+/** A continuation page of a history section, interleaved. */
+function historyPage(page: TrackingMovementPage) {
+  return { items: historyEntries(page), nextBefore: page.nextBeforeMovementId };
+}
+
 interface DetailPaging {
-  movements: PagedSection<TrackingMovement>;
-  scrap: PagedSection<TrackingMovement>;
+  movements: PagedSection<HistoryEntry>;
+  scrap: PagedSection<HistoryEntry>;
   flows: PagedSection<TrackingFlow>;
   allocations: PagedSection<TrackingAllocation>;
 }
@@ -668,17 +723,21 @@ function TrackingDetailPanel({
     (feed.state.status === 'ready' && feed.state.stale);
   const revisions = detail === null ? NO_REVISIONS : detailRevisions(detail);
 
+  // The history sections continue below the cursor the server answered,
+  // passed back unchanged (it may name an archived entry). A cursor whose
+  // Movement an archival run purged meanwhile (404) starts the section
+  // again from its first page, which the detail reads again.
   const movements = useOlderPages(
     detail?.movements.nextBeforeMovementId ?? null,
     revisions.movements,
     useCallback(
       (before: number) =>
-        loadTrackingMovements(pn, before, MOVEMENTS_PAGE_SIZE).then((page) => ({
-          items: page.movements,
-          nextBefore: page.nextBeforeMovementId,
-        })),
+        loadTrackingMovements(pn, before, MOVEMENTS_PAGE_SIZE).then(
+          historyPage,
+        ),
       [pn],
     ),
+    feed.reload,
   );
   const scrap = useOlderPages(
     detail?.scrapHistory.nextBeforeMovementId ?? null,
@@ -686,13 +745,11 @@ function TrackingDetailPanel({
     useCallback(
       (before: number) =>
         loadTrackingMovements(pn, before, SCRAP_PAGE_SIZE, 'SCRAPPED').then(
-          (page) => ({
-            items: page.movements,
-            nextBefore: page.nextBeforeMovementId,
-          }),
+          historyPage,
         ),
       [pn],
     ),
+    feed.reload,
   );
   const flows = useOlderPages(
     detail?.flows.nextBeforeFlowId ?? null,
@@ -750,24 +807,12 @@ function TrackingDetailPanel({
             detail={detail}
             stale={stale}
             paging={{
-              movements: pagedSection(
-                {
-                  items: detail.movements.movements,
-                  total: detail.movements.total,
-                  hasMore: detail.movements.hasMore,
-                },
+              movements: historySection(
+                detail.movements,
                 movements.older,
-                movements.showOlder,
+                movements,
               ),
-              scrap: pagedSection(
-                {
-                  items: detail.scrapHistory.movements,
-                  total: detail.scrapHistory.total,
-                  hasMore: detail.scrapHistory.hasMore,
-                },
-                scrap.older,
-                scrap.showOlder,
-              ),
+              scrap: historySection(detail.scrapHistory, scrap.older, scrap),
               flows: pagedSection(
                 {
                   items: detail.flows.flows,
@@ -872,7 +917,9 @@ interface CorrectionActions {
   onViewAuditTrail: (() => void) | null;
 }
 
-/** `Showing n of m <noun>` with the explicit continuation control. */
+/** `Showing n of m <noun>` with the explicit continuation control; a
+ * history section with archived entries adds `and a of b archived
+ * entries`. */
 function OlderControl<T>({
   section,
   noun,
@@ -885,7 +932,15 @@ function OlderControl<T>({
   return (
     <div className="tk-paging">
       <span>
-        Showing <b>{section.items.length}</b> of <b>{section.total}</b> {noun}
+        Showing <b>{section.shown}</b> of <b>{section.total}</b> {noun}
+        {section.archived !== null ? (
+          <>
+            {' '}
+            and <b>{section.archived.shown}</b> of{' '}
+            <b>{section.archived.total}</b> archived{' '}
+            {section.archived.total === 1 ? 'entry' : 'entries'}
+          </>
+        ) : null}
       </span>
       {section.hasOlder ? (
         <button
@@ -896,12 +951,44 @@ function OlderControl<T>({
           {section.loading ? 'Loading…' : label}
         </button>
       ) : null}
+      {section.notice ? (
+        <span className="tk-note" role="status">
+          {section.notice}
+        </span>
+      ) : null}
       {section.error ? (
         <span className="tk-error" role="alert">
           {section.error}
         </span>
       ) : null}
     </div>
+  );
+}
+
+/** One row of a history section: a Movement, or a flow's archived
+ * history. */
+function HistoryRow({ entry }: { entry: HistoryEntry }) {
+  return entry.kind === 'movement' ? (
+    <MovementRow movement={entry.movement} />
+  ) : (
+    <ArchivedHistoryRow archived={entry.archived} />
+  );
+}
+
+/** One flow's archived history, in its place among the Movements: the
+ * time of its newest archived Movement, then `History archived in run N
+ * (first – last, M Movements)`, the flow and the archive's name. */
+function ArchivedHistoryRow({
+  archived,
+}: {
+  archived: TrackingArchivedHistory;
+}) {
+  return (
+    <li className="archived">
+      <span className="t">{archivedTimestamp(archived.lastOccurredAt)}</span>
+      <span className="mtype arc">ARCHIVED</span>
+      <span className="desc">{describeArchivedHistory(archived)}</span>
+    </li>
   );
 }
 
@@ -1187,8 +1274,8 @@ function TrackingDetailContent({
           <span className="tag">complete activity history</span>
         </h4>
         <ul className="mv history">
-          {paging.movements.items.map((m) => (
-            <MovementRow movement={m} key={m.id} />
+          {paging.movements.items.map((entry) => (
+            <HistoryRow entry={entry} key={historyEntryKey(entry)} />
           ))}
         </ul>
         <OlderControl
@@ -1212,13 +1299,13 @@ function TrackingDetailContent({
           {d.activeQuantity} + stocked {d.stockedQuantity} + scrapped{' '}
           {d.scrappedQuantity}.
         </div>
-        {paging.scrap.total === 0 ? (
+        {paging.scrap.total === 0 && paging.scrap.archived === null ? (
           <div className="prognote">No scrap recorded for this PN.</div>
         ) : (
           <>
             <ul className="mv scrap">
-              {paging.scrap.items.map((m) => (
-                <MovementRow movement={m} key={m.id} />
+              {paging.scrap.items.map((entry) => (
+                <HistoryRow entry={entry} key={historyEntryKey(entry)} />
               ))}
             </ul>
             <OlderControl
@@ -1359,7 +1446,9 @@ function TrackingDetailContent({
   );
 }
 
-/** One Quantity Flow: header, position line and route line. */
+/** One Quantity Flow: header, position line and route line. An archived
+ * flow (its history purged) keeps its snapshot steps, marked archived,
+ * and says `History archived in run N` where its trace would be. */
 function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
   const steps = routeSteps(flow);
   return (
@@ -1392,11 +1481,13 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
             const stepNode = (
               <span
                 key={step.key}
-                className={`rstep ${step.state === 'done' ? 'done' : step.state === 'cur' ? 'cur' : ''} ${step.repair ? 'repair' : ''}`}
+                className={`rstep ${step.state === 'future' ? '' : step.state} ${step.repair ? 'repair' : ''}`}
                 title={
                   step.inherited
                     ? 'Before the split — recorded on the source Quantity Flow'
-                    : undefined
+                    : step.state === 'archived'
+                      ? 'Archived — the progress on this step is in the archive'
+                      : undefined
                 }
               >
                 {step.label}
@@ -1418,13 +1509,22 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
             ];
           })}
         </div>
-      ) : (
+      ) : flow.archived !== null ? null : (
         <div className="devnote">
           {flow.position === null
             ? (FLOW_STATUS_LABEL[flow.status] ?? flow.status)
             : 'No arrival recorded on this Quantity Flow yet.'}
         </div>
       )}
+      {flow.archived !== null ? (
+        // The trace and the deviations are in the archive.
+        <div className="devnote archived">
+          {archivedHistoryText(flow.archived)}
+          {flow.archived.archiveName !== null
+            ? ` · ${flow.archived.archiveName}`
+            : ''}
+        </div>
+      ) : null}
       {flow.routeMode === 'PLANNED' ? (
         <div className="devnote">
           Planned Route{' '}
@@ -1435,6 +1535,10 @@ function FlowBlock({ flow, now }: { flow: TrackingFlow; now: number }) {
           — guidance only; actual Movement history stays authoritative.
           {flow.trace.length > 0 ? ` Actual path: ${traceText(flow)}.` : ''}
           {flow.offRoute ? ' Currently off the Planned Route.' : ''}
+        </div>
+      ) : flow.archived !== null ? (
+        <div className="devnote">
+          Floating Route — its actual trace is in the archive.
         </div>
       ) : (
         <div className="devnote">

@@ -1,6 +1,8 @@
-"""P16-S6: deploy/production/monitor_report.py, the stdlib helper that turns a `status` or `reconcile` JSON report into
-check lines (P16-S6 SPEC section 6.3, cases MR-1..MR-9). The helper runs as a subprocess of this interpreter on
-temporary report files; nothing touches Docker or a database.
+"""P16-S6: deploy/production/monitor_report.py, the stdlib helper that turns a `status`, `history-archive status` or
+`reconcile` JSON report into check lines (P16-S6 SPEC section 6.3, cases MR-1..MR-9; Movement-history archival adds
+MR-10 (step 1) and MR-11..MR-14 (step 2: the purge states and results, receipt_not_copied, the incident record of a
+reconcile after a purge, a pre-purge backup as the newest backup)). The helper runs as a subprocess of this interpreter
+on temporary report files; nothing touches Docker or a database.
 
 Run with the other production tests:
   python -B -m unittest discover -s deploy/production/tests -p 'test*.py'
@@ -226,18 +228,28 @@ class Status(Helper):
         self.assertIn("line one?line two", lines[2])
 
 
-def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None):
-    """A `python -m app.cli history-archive status` report (Movement-history archival step 1, contract §2.3)."""
+def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None, receipts=()):
+    """A `python -m app.cli history-archive status` report (Movement-history archival steps 1 and 2)."""
     document = {
         "report_version": 1, "command": "history-archive status", "result": "finding" if findings else "ok",
         "exit_code": exit_code, "started_at": "2026-10-08T10:00:00Z", "finished_at": "2026-10-08T10:00:01Z",
         "duration_ms": 10, "run_id": None, "state": None, "open_run": open_run, "last_finished_run": last,
         "archive_dir": {"path": "/archive", "usable": True, "free_bytes": 3 * 1073741824,
                         "total_bytes": 4 * 1073741824, "partial": []},
-        "copy_dir": None, "max_wait_days": 7, "findings": list(findings),
+        "copy_dir": None, "receipts_not_copied": list(receipts), "max_wait_days": 7, "findings": list(findings),
         "error": {"code": error[0], "message": error[1]} if error else None,
     }
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
+
+
+def run_summary(run_id, state, result=None, purged=None, skipped=(None, None), failure=None):
+    """The run summary of `history-archive status` (contract §3)."""
+    return {"id": run_id, "state": state, "cutoff": "2024-10-08T07:00:00Z", "requested_at": "2026-10-08T09:00:00Z",
+            "archive_name": f"run-{run_id}-20261008T092000Z", "manifest_sha256": "a" * 64, "copied": True,
+            "copy_confirmed": False, "skipped_components": skipped[0], "skipped_flows": skipped[1],
+            "pre_purge_backup_name": None, "receipt_sha256": None, "finished_at": None, "result": result,
+            "failure_reason": failure,
+            "purged": None if purged is None else dict(zip(("components", "flows", "movements"), purged))}
 
 
 class Archive(Helper):
@@ -260,6 +272,92 @@ class Archive(Helper):
                                                    f" {code}); see archive-status.err"]))
         rc, lines = self.run_helper("archive", "x.json")
         self.assertEqual((rc, lines), (2, []))
+
+    # MR-11 (archival step 2): the new states and results: a PURGING open run with what it purged so far; the last
+    # finished run with its result, its purged counts and its skips (COMPLETED_WITH_SKIPS passes and names them).
+    def test_mr11_states_and_results(self):
+        cases = (
+            (run_summary(4, "PURGING", purged=(40, 90, 1200)), None,
+             "run 4 PURGING (40 components, 90 flows, 1200 Movements purged so far); no finished run"),
+            (None, run_summary(3, "COMPLETED", "PURGED", (118, 305, 4190), (0, 0)),
+             "no open run; last finished run 3 COMPLETED (PURGED: 118 components, 305 flows, 4190 Movements purged)"),
+            (None, run_summary(3, "COMPLETED_WITH_SKIPS", "PURGED", (118, 305, 4190), (2, 5)),
+             "no open run; last finished run 3 COMPLETED_WITH_SKIPS (PURGED: 118 components, 305 flows, 4190 Movements"
+             " purged; 2 components, 5 flows skipped)"),
+            (None, run_summary(3, "COMPLETED_WITH_SKIPS", "NOTHING_PURGED", (0, 0, 0), (3, 7)),
+             "no open run; last finished run 3 COMPLETED_WITH_SKIPS (NOTHING_PURGED: 3 components, 7 flows skipped)"),
+            (None, run_summary(3, "COMPLETED", "EXPORT_ONLY", None, (0, 0)),
+             "no open run; last finished run 3 COMPLETED (EXPORT_ONLY)"),
+            (None, run_summary(3, "NOTHING_ELIGIBLE"), "no open run; last finished run 3 NOTHING_ELIGIBLE"),
+        )
+        for open_run, last, text in cases:
+            with self.subTest(text=text):
+                rc, lines = self.run_helper("archive", self.write("a.json", archive_status_doc(open_run=open_run,
+                                                                                             last=last)), 0)
+                self.assertEqual((rc, lines), (0, [f"PASS archival_proposal {text}; archive folder 3.0 GiB free"]))
+
+    # MR-12 (archival step 2): receipt_not_copied names the archives; a run that failed while purging says what it purged.
+    def test_mr12_new_findings(self):
+        document = archive_status_doc(1, ["receipt_not_copied"], receipts=["run-3-20261008T092000Z"])
+        rc, lines = self.run_helper("archive", self.write("r.json", document), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal receipt_not_copied: the purge receipt of"
+                                           " run-3-20261008T092000Z is missing or differs in the copy folder; the next"
+                                           " archive.sh start copies it again"]))
+        last = run_summary(3, "FAILED", purged=(12, 30, 400), failure="A purge batch deleted 9 Movements.")
+        rc, lines = self.run_helper("archive", self.write("f.json", archive_status_doc(1, ["last_run_failed"], last=last)), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal last_run_failed: run 3 FAILED after purging 12"
+                                           " components, 30 flows, 400 Movements: A purge batch deleted 9 Movements."]))
+
+    # MR-13 (archival step 2): archive.sh's incident record of a reconcile after a purge fails the line first, whatever
+    # the status report says; a record that is gone again adds nothing; an unreadable one fails.
+    def test_mr13_incident_record(self):
+        incident = self.write("incident", "result=mismatch\nexit_code=1\nrun=3\narchive_name=run-3-20261008T092000Z\n"
+                                          "pre_purge_backup=x\nfailing_checks=c g\nfinished_at=2026-10-08T10:21:00Z\n"
+                                          "report=/r/reconcile.json\n")
+        expected = ("reconcile_after_purge: the reconcile after the purge of run 3 found a mismatch in checks c g at"
+                    " 2026-10-08T10:21:00Z: an incident, OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); report"
+                    " /r/reconcile.json")
+        clean = self.write("a.json", archive_status_doc())
+        rc, lines = self.run_helper("archive", clean, 0, "--purge-reconcile", incident)
+        self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal {expected}"]))
+        rc, lines = self.run_helper("archive", clean, 0, "--copy-reason", "x", "--purge-reconcile", incident)
+        self.assertEqual((rc, lines[0][:60]), (1, f"FAIL archival_proposal {expected}"[:60]))
+        rc, lines = self.run_helper("archive", self.write("e.json", ""), 2, "--purge-reconcile", incident)
+        self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal {expected}; history-archive status could not run (exit"
+                                           " 2); see archive-status.err"]))
+        for content, text in (
+            ("result=could_not_run\nexit_code=2\nrun=4\n",
+             "reconcile_after_purge: the reconcile after the purge of run 4 did not complete (could_not_run, exit 2): an"
+             " incident, OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge)"),
+            ("result=interrupted\nexit_code=2\nrun=4\nfailing_checks=\n",
+             "reconcile_after_purge: the reconcile after the purge of run 4 did not end (archive.sh was interrupted): an"
+             " incident, OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge)"),
+        ):
+            with self.subTest(content=content):
+                rc, lines = self.run_helper("archive", clean, 0, "--purge-reconcile", self.write("i2", content))
+                self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal {text}"]))
+        rc, lines = self.run_helper("archive", clean, 0, "--purge-reconcile", self.tmp / "gone")
+        self.assertEqual((rc, lines), (0, ["PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB"
+                                           " free"]))
+        unreadable = self.tmp / "folder"
+        unreadable.mkdir()
+        rc, lines = self.run_helper("archive", clean, 0, "--purge-reconcile", unreadable)
+        self.assertEqual(rc, 1)
+        self.assertTrue(lines[0].startswith("FAIL archival_proposal reconcile_after_purge: the incident record"), lines)
+        for arguments in (("archive", clean, 0, "--purge-reconcile"), ("archive", clean, 0, "--purge-reconcile", "a",
+                                                                        "--purge-reconcile", "b")):
+            with self.subTest(arguments=arguments):
+                rc, lines = self.run_helper(*arguments)
+                self.assertEqual((rc, lines), (2, []))
+
+    # MR-14 (archival step 2): backup_age accepts a pre-purge backup as the newest backup.
+    def test_mr14_pre_purge_backup_is_the_newest(self):
+        name = "20261008T092030Z-pre-purge-run-3-20261008T092000Z"
+        document = json.loads(status_doc())
+        document["backup"]["latest"].update({"name": name, "kind": "pre-purge", "age_hours": 0.6})
+        rc, lines = self.run_helper("status", self.write("s.json", json.dumps(document, indent=2) + "\n"), 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(lines[2], f"PASS backup_age {name} completed 0.6 h ago (limit 26 h)")
 
 
 class Reconcile(Helper):

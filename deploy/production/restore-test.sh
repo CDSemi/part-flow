@@ -8,8 +8,10 @@
 # pg_restore --single-transaction -> provision-roles -> apply-grants -> revision -> backend and web -> readiness ->
 # full reconcile -> smoke.sh -> evidence.json -> teardown (`down -v` of the drill project only, after the evidence
 # exists, and only when this run created the project). It never runs migrate and never writes to the backup directory
-# or to the production project. --db-image restores onto a candidate PostgreSQL image (the glibc/PostgreSQL-image half
-# of reconcile check (j)).
+# or to the production project, and never names the production archive or copy folder (PARTFLOW_ARCHIVE_DIR and
+# PARTFLOW_ARCHIVE_COPY_DIR are empty in the drill's env file: a pre-purge backup restores like any other kind, and its
+# archival run never reaches the archive job). --db-image restores onto a candidate PostgreSQL image (the
+# glibc/PostgreSQL-image half of reconcile check (j)).
 #
 # Evidence and step outputs: <records-dir>/<UTC>-restore-test-<NAME>/ (mode 0700). Exit status: 0 passed or
 # passed_with_preexisting_findings; 1 failed or insufficient_space; 2 could_not_run or interrupted; 3 the teardown
@@ -18,7 +20,8 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
+# Every kind backup.sh writes, the pre-purge backups of history archival included: each restores the same way.
+NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release|pre-purge)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 PROJECT_PATTERN='^partflow-restore-[a-z0-9][a-z0-9-]{0,40}$'
 DRILL_DATABASE=partflow_restore_test

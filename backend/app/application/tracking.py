@@ -54,6 +54,14 @@ Board, the Area Board or the Scan Station about a quantity:
   paged on the append-only id (`before_movement_id`) so a long history
   is never loaded whole; a reversed original is reported together with
   the `REVERSED` row that undid it, and neither is ever hidden.
+- **Archived history** (Phase 16, history archival design B §4.3): once an
+  archival run purged a flow's Movements, its history reads as ONE entry
+  ("History archived in run N": the flow, its dates, its number of
+  Movements, the archive's name), in the Movement history at the place of
+  its newest archived Movement — the same keyset, so the two kinds page
+  together — and on the flow itself; the flow's route steps read
+  ``ARCHIVED``. Every figure (stocked, scrapped, introduced, released)
+  adds the purged records in the same statement as the Movements.
 
 Derived status of a PN: ``ACTIVE`` while any quantity is in production;
 otherwise ``COMPLETED`` when no open demand remains (only history);
@@ -79,8 +87,8 @@ import datetime
 from collections.abc import Collection, Iterable, Mapping
 from typing import Any, Final, Literal, NamedTuple
 
-from sqlalchemy import Select, func, or_, select, tuple_
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy import Select, false, func, literal, or_, select, tuple_, union_all
+from sqlalchemy.orm import Session
 
 from app.application import route_adjustments, station_identity, user_access
 from app.application.allocations import (
@@ -89,7 +97,7 @@ from app.application.allocations import (
     active_allocated_quantity_of,
     open_demand_context,
 )
-from app.application.errors import NotFoundError
+from app.application.errors import ConflictError, NotFoundError
 from app.application.lineage import snapshot_steps
 from app.application.part_numbers import canonical_part_number, masters_by_part_number
 from app.application.production_board import (
@@ -101,6 +109,7 @@ from app.application.production_board import (
 from app.application.production_release import released_quantities
 from app.application.projections import (
     effective_lineage_edges,
+    effective_total_of,
     effective_totals_by_area,
     reversed_movement_ids,
     route_positions,
@@ -114,6 +123,8 @@ from app.infrastructure.models import (
     Area,
     AssignedRoute,
     AssignedRouteStep,
+    HistoryArchivedFlow,
+    HistoryArchiveRun,
     Machine,
     Operation,
     PartMovement,
@@ -130,7 +141,9 @@ from app.infrastructure.models import (
 TrackingStatus = Literal["ACTIVE", "STOCKED", "OPEN", "COMPLETED"]
 StatusFilter = Literal["ACTIVE", "STOCKED", "OPEN", "COMPLETED", "ALL"]
 DueWindow = Literal["ANY", "OVERDUE", "THIS_WEEK", "THIS_MONTH"]
-RouteStepState = Literal["DONE", "CURRENT", "FUTURE"]
+#: ARCHIVED: the flow's history was archived and purged; its route progress
+#: is in the archive (history archival, design B §4.3).
+RouteStepState = Literal["DONE", "CURRENT", "FUTURE", "ARCHIVED"]
 
 # Bounds of one answer (long-data behaviour): the list pages on
 # offset / limit over the derived rows in their one deterministic
@@ -269,6 +282,22 @@ class LineageLink(NamedTuple):
     relation: str
 
 
+class ArchivedHistory(NamedTuple):
+    """One flow's archived history: what its purged carry-forward record keeps."""
+
+    flow_id: int
+    run_id: int
+    archive_name: str | None
+    flow_status: str
+    movement_count: int
+    first_occurred_at: datetime.datetime
+    last_occurred_at: datetime.datetime
+    #: The id of its newest archived Movement — its place (and paging
+    #: cursor) in the Movement history.
+    last_movement_id: int
+    purged_at: datetime.datetime
+
+
 class TrackingFlow(NamedTuple):
     flow: QuantityFlow
     # The derived current position and its Area — ACTIVE flows only.
@@ -286,6 +315,8 @@ class TrackingFlow(NamedTuple):
     deviations: list[RouteDeviationView]
     # Every adjustment of this flow's own snapshot, oldest first (Phase 14).
     route_adjustments: list[RouteAdjustmentNote]
+    # Set once an archival run purged the flow's Movements (Phase 16).
+    archived: ArchivedHistory | None = None
 
 
 class FlowPage(NamedTuple):
@@ -343,6 +374,16 @@ class MovementPage(NamedTuple):
     total: int
     has_more: bool
     references: HistoryReferences
+    # The archived flows whose place falls on this page (Phase 16): one
+    # entry each, ordered like the Movements by (last_occurred_at,
+    # last_movement_id), newest first; the two lists interleave by
+    # (time, id) into the one page.
+    archived: list[ArchivedHistory]
+    archived_total: int
+    # The paging cursor of the next page: the id of the page's last entry
+    # (a Movement id, or an archived entry's `last_movement_id`); None on
+    # the last page.
+    next_before: int | None
 
 
 class TrackingDetail(NamedTuple):
@@ -759,6 +800,18 @@ def _route_steps(
     # position's arrival fulfilled a step. Area equality is never the
     # test: a deviation back into an earlier step's Area stays off route.
     route_position = route_positions(session, [flow.id])[flow.id]
+    if route_position.archived:
+        # The flow's history was archived and purged (Phase 16): its route
+        # progress is in the archive, so no step is judged done or future.
+        return [
+            RouteStepView(
+                step=step,
+                area=areas[step.area_id],
+                operation=operations.get(step.operation_id) if step.operation_id else None,
+                state="ARCHIVED",
+            )
+            for step in steps
+        ], False
     known = next((step for step in steps if step.id == route_position.known_step_id), None)
     active = flow.status == QuantityFlowStatus.ACTIVE
     # Off-route quantity has no current Assigned Route Step (PROJECT_PROFILE
@@ -982,6 +1035,7 @@ def _tracking_flows(
     operations = _operations(session, operation_ids)
     templates = _source_templates(session, route_ids)
     adjustments = route_adjustments.route_adjustment_notes(session, route_ids)
+    archived = archived_histories(session, [flow.id for flow in flows])
 
     result: list[TrackingFlow] = []
     for flow in flows:
@@ -1000,6 +1054,7 @@ def _tracking_flows(
                 off_route=off_route,
                 deviations=_deviations(session, flow, areas, operations),
                 route_adjustments=adjustments.get(route_id, []) if route_id is not None else [],
+                archived=archived.get(flow.id),
             )
         )
     return FlowPage(
@@ -1026,15 +1081,66 @@ def flow_page_of(
 
 
 def _effective_total(session: Session, pn: str, movement_types: Collection[MovementType]) -> int:
-    reversal = aliased(PartMovement)
-    total = session.scalar(
-        select(func.coalesce(func.sum(PartMovement.quantity), 0)).where(
-            PartMovement.part_number == pn,
-            PartMovement.movement_type.in_(movement_types),
-            ~select(reversal.id).where(reversal.reverses_movement_id == PartMovement.id).exists(),
+    """The PN's effective total of the types, its purged archive records included."""
+    return effective_total_of(session, pn, movement_types)
+
+
+def _archived_scope(pn: str, movement_types: Collection[MovementType] | None) -> Select[Any]:
+    """The PN's purged records that the history (of the types) shows as an entry."""
+    scope = select(HistoryArchivedFlow).where(
+        HistoryArchivedFlow.part_number == pn, HistoryArchivedFlow.purged_at.is_not(None)
+    )
+    if movement_types is not None:
+        # A type-filtered history (the Scrap history) shows an archived flow
+        # only when its record keeps an effective quantity of the type.
+        kept = [
+            column.is_not(None)
+            for column in (
+                _ARCHIVED_QUANTITY.get(movement_type) for movement_type in movement_types
+            )
+            if column is not None
+        ]
+        scope = scope.where(or_(*kept) if kept else false())
+    return scope
+
+
+#: The record column that keeps a Movement type's effective quantity.
+_ARCHIVED_QUANTITY: Final[Mapping[str, Any]] = {
+    MovementType.RECEIVED: HistoryArchivedFlow.received_quantity,
+    MovementType.QUANTITY_ADJUSTED: HistoryArchivedFlow.adjusted_quantity,
+    MovementType.STOCKED: HistoryArchivedFlow.stocked_quantity,
+    MovementType.SCRAPPED: HistoryArchivedFlow.scrapped_quantity,
+}
+
+
+def _archived_history(record: HistoryArchivedFlow, archive_name: str | None) -> ArchivedHistory:
+    assert record.purged_at is not None
+    return ArchivedHistory(
+        flow_id=record.flow_id,
+        run_id=record.run_id,
+        archive_name=archive_name,
+        flow_status=record.flow_status,
+        movement_count=record.movement_count,
+        first_occurred_at=record.first_occurred_at,
+        last_occurred_at=record.last_occurred_at,
+        last_movement_id=record.last_movement_id,
+        purged_at=record.purged_at,
+    )
+
+
+def archived_histories(session: Session, flow_ids: Collection[int]) -> dict[int, ArchivedHistory]:
+    """The archived history of each flow whose Movements were purged (one query)."""
+    if not flow_ids:
+        return {}
+    rows = session.execute(
+        select(HistoryArchivedFlow, HistoryArchiveRun.archive_name)
+        .join(HistoryArchiveRun, HistoryArchiveRun.id == HistoryArchivedFlow.run_id)
+        .where(
+            HistoryArchivedFlow.flow_id.in_(list(flow_ids)),
+            HistoryArchivedFlow.purged_at.is_not(None),
         )
     )
-    return int(total or 0)
+    return {record.flow_id: _archived_history(record, name) for record, name in rows}
 
 
 def _demand_contexts(session: Session, demand_ids: Collection[int]) -> dict[int, DemandContext]:
@@ -1068,13 +1174,24 @@ def _history_cursor(
     The public cursor is the id of the last row a page delivered; the
     server resolves its timestamp so the continuation follows the SAME
     reverse-chronological order the page had — never the id order
-    alone, which a backdated ``occurred_at`` would disagree with.
+    alone, which a backdated ``occurred_at`` would disagree with. An
+    archived entry's cursor is its record's newest archived Movement id,
+    resolved to the record's newest occurrence. A Movement purged after the
+    page was read is no cursor any more (404: reload from the top).
     """
     occurred_at = session.scalar(
         select(PartMovement.occurred_at).where(
             PartMovement.id == before_movement_id, PartMovement.part_number == pn
         )
     )
+    if occurred_at is None:
+        occurred_at = session.scalar(
+            select(HistoryArchivedFlow.last_occurred_at).where(
+                HistoryArchivedFlow.last_movement_id == before_movement_id,
+                HistoryArchivedFlow.part_number == pn,
+                HistoryArchivedFlow.purged_at.is_not(None),
+            )
+        )
     if occurred_at is None:
         raise NotFoundError(f"Movement {before_movement_id} is not part of {pn}'s history.")
     return occurred_at, before_movement_id
@@ -1101,22 +1218,122 @@ def movement_history(
     undid it — with the audit context the row carries: the lineage
     edges of a SPLIT / MERGED command, the initiating demand of a
     ``RECEIVED``, the fulfilled snapshot step.
+
+    Archived history (Phase 16): each flow whose Movements an archival run
+    purged is ONE entry, placed by its record's ``(last_occurred_at,
+    last_movement_id)`` in the same order and keyset as the Movements —
+    the page is chosen from both kinds in one statement. Should a purge
+    remove a Movement of the chosen page before it is loaded, the page is
+    read again (it then holds the flow's archived entry instead).
     """
+    for _ in range(_HISTORY_READ_ATTEMPTS - 1):
+        page = _movement_history_page(session, pn, before_movement_id, limit, movement_types)
+        if page is not None:
+            return page
+    page = _movement_history_page(session, pn, before_movement_id, limit, movement_types)
+    if page is None:
+        raise ConflictError(
+            f"The history of {pn} changed while it was read (an archival run purged part of"
+            " it). Reload it."
+        )
+    return page
+
+
+#: How often a history page is read before a purge racing it is reported.
+_HISTORY_READ_ATTEMPTS: Final = 3
+
+
+def _movement_history_page(
+    session: Session,
+    pn: str,
+    before_movement_id: int | None,
+    limit: int,
+    movement_types: Collection[MovementType] | None,
+) -> MovementPage | None:
+    """One page of the history, or None when a purge removed one of its Movements meanwhile."""
     scope: Select[tuple[PartMovement]] = select(PartMovement).where(PartMovement.part_number == pn)
     if movement_types is not None:
         scope = scope.where(PartMovement.movement_type.in_(movement_types))
-    query = scope
+    archived_scope = _archived_scope(pn, movement_types)
+    moved = scope.subquery()
+    kept = archived_scope.subquery()
+    movement_keys = select(
+        literal("M").label("kind"),
+        moved.c.id.label("sort_id"),
+        moved.c.occurred_at.label("sort_at"),
+    )
+    archived_keys = select(
+        literal("A").label("kind"),
+        kept.c.last_movement_id.label("sort_id"),
+        kept.c.last_occurred_at.label("sort_at"),
+    )
     if before_movement_id is not None:
         cursor = _history_cursor(session, pn, before_movement_id)
-        query = query.where(tuple_(PartMovement.occurred_at, PartMovement.id) < cursor)
-    page = list(
-        session.scalars(
-            query.order_by(PartMovement.occurred_at.desc(), PartMovement.id.desc()).limit(limit + 1)
+        movement_keys = movement_keys.where(tuple_(moved.c.occurred_at, moved.c.id) < cursor)
+        archived_keys = archived_keys.where(
+            tuple_(kept.c.last_occurred_at, kept.c.last_movement_id) < cursor
+        )
+    # Each kind uses its own index and limit; the page is the newest of both.
+    newest = [
+        keys.order_by(column_at.desc(), column_id.desc()).limit(limit + 1).subquery()
+        for keys, column_at, column_id in (
+            (movement_keys, moved.c.occurred_at, moved.c.id),
+            (archived_keys, kept.c.last_occurred_at, kept.c.last_movement_id),
+        )
+    ]
+    combined = union_all(*(select(part) for part in newest)).subquery()
+    chosen = list(
+        session.execute(
+            select(combined.c.kind, combined.c.sort_id)
+            .order_by(combined.c.sort_at.desc(), combined.c.sort_id.desc())
+            .limit(limit + 1)
         )
     )
-    has_more = len(page) > limit
-    page = page[:limit]
-    total = int(session.scalar(select(func.count()).select_from(scope.subquery())) or 0)
+    has_more = len(chosen) > limit
+    chosen = chosen[:limit]
+    movement_ids = [int(sort_id) for kind, sort_id in chosen if kind == "M"]
+    archived_ids = [int(sort_id) for kind, sort_id in chosen if kind == "A"]
+    by_id = (
+        {
+            movement.id: movement
+            for movement in session.scalars(
+                select(PartMovement).where(PartMovement.id.in_(movement_ids))
+            )
+        }
+        if movement_ids
+        else {}
+    )
+    if len(by_id) != len(movement_ids):
+        return None
+    page = sorted(by_id.values(), key=lambda movement: (movement.occurred_at, movement.id))[::-1]
+    archived_rows = (
+        list(
+            session.execute(
+                select(HistoryArchivedFlow, HistoryArchiveRun.archive_name)
+                .join(HistoryArchiveRun, HistoryArchiveRun.id == HistoryArchivedFlow.run_id)
+                .where(
+                    HistoryArchivedFlow.part_number == pn,
+                    HistoryArchivedFlow.purged_at.is_not(None),
+                    HistoryArchivedFlow.last_movement_id.in_(archived_ids),
+                )
+            )
+        )
+        if archived_ids
+        else []
+    )
+    archived = sorted(
+        (_archived_history(record, name) for record, name in archived_rows),
+        key=lambda entry: (entry.last_occurred_at, entry.last_movement_id),
+        reverse=True,
+    )
+    totals = session.execute(
+        select(
+            select(func.count()).select_from(scope.subquery()).scalar_subquery(),
+            select(func.count()).select_from(archived_scope.subquery()).scalar_subquery(),
+        )
+    ).one()
+    total, archived_total = int(totals[0] or 0), int(totals[1] or 0)
+    next_before = int(chosen[-1][1]) if has_more and chosen else None
     ids = [movement.id for movement in page]
     reversed_by: dict[int, int] = {}
     if ids:
@@ -1218,6 +1435,9 @@ def movement_history(
         references=HistoryReferences(
             areas=_all_areas(session), operations=operations, machines=machines, workers=workers
         ),
+        archived=archived,
+        archived_total=archived_total,
+        next_before=next_before,
     )
 
 

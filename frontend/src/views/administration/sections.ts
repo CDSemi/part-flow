@@ -163,7 +163,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     group: 'Data & system',
     label: 'Backups',
     subtitle:
-      'How often the server takes a scheduled backup, and how many hourly, daily and weekly backups it keeps',
+      'How often the server takes a scheduled backup, and how many hourly, daily, weekly and pre-purge backups it keeps',
   },
   {
     id: 'data-retention',
@@ -172,7 +172,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     group: 'Data & system',
     label: 'History archival & purge',
     subtitle:
-      'Export Movement history older than the retention period to archive files, with a preview, a reason and a full audit',
+      'Export Movement history older than the retention period to archive files and purge it from the database, with a preview, a reason and a full audit',
   },
   {
     id: 'settings',

@@ -28,12 +28,23 @@ comparators and set-based SQL.
 Check (j) re-evaluates the canonical identities under the RUNNING
 interpreter (Unicode tables) and the RUNNING database server (its libc,
 the database collation and ctype) — the platform-upgrade identity
-check. Check (g) reports ``not_applicable`` until Movement history
-archival exists. Check (h) (Phase 16 slice 4) verifies guard integrity —
+check. Check (h) (Phase 16 slice 4) verifies guard integrity —
 guard triggers and functions, database-role privileges and attributes,
 ``session_replication_role`` — through ``database_roles.guard_integrity``;
 it reports ``not_applicable`` on a database without the PartFlow
 database roles (development, test, staging).
+
+Archived history (Phase 16, history archival design B §9.2): once an
+archival run purged a component's Movements, its flows' carry-forward
+records stand in for them. (a) takes a purged flow's status from its
+record; (b) no longer asks a purged flow for a Movement; (c), (e) and (f)
+add the records' released, added, stocked and scrapped quantities to the
+Movement terms; and (g) checks the purge itself: a purged flow keeps no
+Movement, no lineage edge joins a purged flow and a retained one, every
+purged record belongs to a run whose purge started (``PURGING``,
+``COMPLETED``, ``COMPLETED_WITH_SKIPS``, or ``FAILED`` while purging), every
+record of a run that finished its purge was purged or skipped, and each
+run's purged counts match its records.
 """
 
 import datetime
@@ -113,6 +124,7 @@ CHECK_TITLES: Final[Mapping[str, str]] = {
 
 _REPLAY_TABLES: Final = (
     "areas",
+    "history_archived_flows",
     "machines",
     "part_movements",
     "quantity_flow_lineage",
@@ -120,6 +132,7 @@ _REPLAY_TABLES: Final = (
 )
 _WORK_ORDER_TABLES: Final = (
     "audit_events",
+    "history_archived_flows",
     "part_movements",
     "work_order_allocations",
     "work_order_demands",
@@ -130,12 +143,23 @@ _WORK_ORDER_TABLES: Final = (
 #: the snapshot starts.
 CHECK_TABLES: Final[Mapping[str, tuple[str, ...]]] = {
     "a": _REPLAY_TABLES,
-    "b": ("assigned_route_steps", "part_movements", "quantity_flow_lineage", "quantity_flows"),
+    "b": (
+        "assigned_route_steps",
+        "history_archived_flows",
+        "part_movements",
+        "quantity_flow_lineage",
+        "quantity_flows",
+    ),
     "c": _REPLAY_TABLES,
     "d": _REPLAY_TABLES,
     "e": _WORK_ORDER_TABLES,
     "f": _WORK_ORDER_TABLES,
-    "g": (),
+    "g": (
+        "history_archive_runs",
+        "history_archived_flows",
+        "part_movements",
+        "quantity_flow_lineage",
+    ),
     "h": GUARD_TABLES,
     "i": ("work_order_demands", "work_orders"),
     "j": (
@@ -154,13 +178,14 @@ CHECK_TABLES: Final[Mapping[str, tuple[str, ...]]] = {
 }
 
 #: Checks that run whatever the database's schema revision: (j) reads
-#: only identity columns stable across revisions; (g) reads nothing. (h)
-#: compares the database with the guard state of this code's head.
-_REVISION_INDEPENDENT: Final = frozenset({"g", "j"})
-_NOT_APPLICABLE: Final[Mapping[str, str]] = {
-    "g": "No Movement-history archival exists yet. This check starts with the archival purge.",
-}
+#: only identity columns stable across revisions. (h) compares the
+#: database with the guard state of this code's head.
+_REVISION_INDEPENDENT: Final = frozenset({"j"})
+_NOT_APPLICABLE: Final[Mapping[str, str]] = {}
 _REPLAY_CHECKS: Final = frozenset({"a", "c", "d"})
+#: The run states whose records may be purged (design §9.2 (g)), when their
+#: purge started: a run that failed while purging keeps what it purged.
+_PURGED_RUN_STATES: Final = ("PURGING", "COMPLETED", "COMPLETED_WITH_SKIPS", "FAILED")
 
 RUN_ERROR_MESSAGES: Final[Mapping[str, str]] = {
     "configuration_invalid": (
@@ -441,9 +466,22 @@ class _Context:
         self._released: dict[int, int] | None = None
         self._allocated: dict[int, int] | None = None
         self._completed: dict[int, datetime.datetime | None] | None = None
+        self._archived: dict[int, str] | None = None
 
     def rows(self, sql: str, **params: object) -> list[Any]:
         return list(self.session.execute(text(sql), params))
+
+    def archived(self) -> dict[int, str]:
+        """The recorded status of every flow whose history was purged."""
+        if self._archived is None:
+            self._archived = {
+                int(row.flow_id): str(row.flow_status)
+                for row in self.rows(
+                    "SELECT flow_id, flow_status FROM history_archived_flows"
+                    " WHERE purged_at IS NOT NULL"
+                )
+            }
+        return self._archived
 
     def scalar_int(self, sql: str, **params: object) -> int:
         return int(self.session.execute(text(sql), params).scalar_one())
@@ -818,6 +856,7 @@ def _run_checks(
         "d": _check_d,
         "e": _check_e,
         "f": _check_f,
+        "g": _check_g,
         "h": _check_h,
         "i": _check_i,
         "j": _check_j,
@@ -966,9 +1005,16 @@ def _check_a(context: _Context) -> _Outcome:
     latest = context.latest_types()
     consumed = context.consumed()
     positions = context.positions()
+    archived = context.archived()
     findings: list[Finding] = []
     for flow in flows.values():
-        expected, mismatch = _expected_status(flow, latest, consumed)
+        expected: str | None
+        mismatch: Finding | None
+        if flow.id in archived:
+            # Its history was purged: the record holds the status it had.
+            expected, mismatch = archived[flow.id], None
+        else:
+            expected, mismatch = _expected_status(flow, latest, consumed)
         if mismatch is not None:
             findings.append(mismatch)
         elif expected != flow.status:
@@ -1035,7 +1081,10 @@ def _check_a(context: _Context) -> _Outcome:
                     {},
                 )
             )
-    return _Outcome({"flows": len(flows), "active_flows": len(positions)}, findings)
+    return _Outcome(
+        {"flows": len(flows), "active_flows": len(positions), "purged_flows": len(archived)},
+        findings,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1045,9 +1094,13 @@ def _check_a(context: _Context) -> _Outcome:
 
 def _check_b(context: _Context) -> _Outcome:
     findings: list[Finding] = []
+    # A flow whose history was purged keeps no Movement on purpose: its
+    # record stands in for them, and (g) checks the purge.
     for row in context.rows(
         "SELECT f.id, f.part_number FROM quantity_flows f WHERE NOT EXISTS"
         " (SELECT 1 FROM part_movements m WHERE m.quantity_flow_id = f.id)"
+        " AND NOT EXISTS (SELECT 1 FROM history_archived_flows r"
+        " WHERE r.flow_id = f.id AND r.purged_at IS NOT NULL)"
     ):
         findings.append(
             Finding("FLOW_WITHOUT_MOVEMENT", "QuantityFlow", int(row.id), row.part_number, 1, 0, {})
@@ -1253,13 +1306,15 @@ def _check_b(context: _Context) -> _Outcome:
     counts = context.rows(
         "SELECT (SELECT count(*) FROM quantity_flows) AS flows,"
         " (SELECT count(*) FROM part_movements) AS movements,"
-        " (SELECT count(*) FROM quantity_flow_lineage) AS edges"
+        " (SELECT count(*) FROM quantity_flow_lineage) AS edges,"
+        " (SELECT count(*) FROM history_archived_flows WHERE purged_at IS NOT NULL) AS purged"
     )[0]
     return _Outcome(
         {
             "flows": int(counts.flows),
             "movements": int(counts.movements),
             "lineage_edges": int(counts.edges),
+            "purged_flows": int(counts.purged),
         },
         findings,
     )
@@ -1299,6 +1354,18 @@ def _check_c(context: _Context) -> _Outcome:
         values = terms[row.part_number]
         for name in ("received", "added", "added_reversed", "scrapped", "stocked"):
             values[name] = int(getattr(row, name))
+    # Archived history: the purged records keep each flow's released, net
+    # added (never reversed any more), stocked and scrapped quantity.
+    for row in context.rows(
+        "SELECT part_number, coalesce(sum(received_quantity), 0) AS received,"
+        " coalesce(sum(adjusted_quantity), 0) AS added,"
+        " coalesce(sum(scrapped_quantity), 0) AS scrapped,"
+        " coalesce(sum(stocked_quantity), 0) AS stocked"
+        " FROM history_archived_flows WHERE purged_at IS NOT NULL GROUP BY part_number"
+    ):
+        values = terms[row.part_number]
+        for name in ("received", "added", "scrapped", "stocked"):
+            values[name] += int(getattr(row, name))
     for flow_id in positions:
         flow = flows.get(flow_id)
         if flow is not None:
@@ -1460,6 +1527,41 @@ def _check_e(context: _Context) -> _Outcome:
                     {**detail, "work_order_demand_id": int(row.demand_id)},
                 )
             )
+    # Archived history: a purged record keeps the release evidence of its
+    # flow's RECEIVED Movement; the same three findings name the record.
+    for row in context.rows(
+        "SELECT r.flow_id, r.run_id, r.part_number, r.received_quantity, r.received_demand_id,"
+        " d.id AS demand_id, d.part_number AS demand_part_number"
+        " FROM history_archived_flows r LEFT JOIN work_order_demands d"
+        " ON d.id = r.received_demand_id WHERE r.purged_at IS NOT NULL"
+        " AND r.received_quantity IS NOT NULL AND (d.id IS NULL OR d.part_number <> r.part_number)"
+    ):
+        detail = {
+            "quantity_flow_id": int(row.flow_id),
+            "quantity": int(row.received_quantity),
+            "archival_run_id": int(row.run_id),
+        }
+        record_expected: object = None
+        record_actual: object = None
+        if row.received_demand_id is None:
+            code = "RELEASE_WITHOUT_DEMAND"
+        elif row.demand_id is None:
+            code, record_actual = "RELEASE_DEMAND_MISSING", int(row.received_demand_id)
+        else:
+            code = "RELEASE_PN_MISMATCH"
+            record_expected, record_actual = row.demand_part_number, row.part_number
+            detail["work_order_demand_id"] = int(row.demand_id)
+        findings.append(
+            Finding(
+                code,
+                "HistoryArchivedFlow",
+                int(row.flow_id),
+                row.part_number,
+                record_expected,
+                record_actual,
+                detail,
+            )
+        )
     for demand in demands.values():
         if released.get(demand.id, 0) > demand.requested_quantity:
             findings.append(
@@ -1530,11 +1632,16 @@ def _check_e(context: _Context) -> _Outcome:
         "SELECT count(*) FROM part_movements WHERE movement_type = :received",
         received=MovementType.RECEIVED,
     )
+    archived_releases = context.scalar_int(
+        "SELECT count(*) FROM history_archived_flows"
+        " WHERE purged_at IS NOT NULL AND received_quantity IS NOT NULL"
+    )
     return _Outcome(
         {
             "work_orders": len(orders),
             "demands": len(demands),
             "release_movements": release_movements,
+            "archived_releases": archived_releases,
         },
         findings,
     )
@@ -1660,9 +1767,13 @@ def _check_f(context: _Context) -> _Outcome:
         " FROM work_order_allocations a WHERE a.reverses_allocation_id IS NULL"
         " AND NOT EXISTS (SELECT 1 FROM work_order_allocations r"
         " WHERE r.reverses_allocation_id = a.id) GROUP BY a.part_number),"
-        " stocked AS (SELECT m.part_number, sum(m.quantity) AS quantity FROM part_movements m"
+        " stocked AS (SELECT s.part_number, sum(s.quantity) AS quantity FROM ("
+        " SELECT m.part_number, m.quantity FROM part_movements m"
         " WHERE m.movement_type = :stocked AND NOT EXISTS (SELECT 1 FROM part_movements r"
-        " WHERE r.reverses_movement_id = m.id) GROUP BY m.part_number)"
+        " WHERE r.reverses_movement_id = m.id)"
+        " UNION ALL SELECT h.part_number, h.stocked_quantity FROM history_archived_flows h"
+        " WHERE h.purged_at IS NOT NULL AND h.stocked_quantity IS NOT NULL"
+        ") s GROUP BY s.part_number)"
         " SELECT allocated.part_number, allocated.quantity AS allocated,"
         " coalesce(stocked.quantity, 0) AS stocked"
         " FROM allocated LEFT JOIN stocked ON stocked.part_number = allocated.part_number"
@@ -1734,6 +1845,132 @@ def _check_f(context: _Context) -> _Outcome:
     return _Outcome(
         {"demands": len(demands), "work_orders": len(orders), "allocation_rows": allocation_rows},
         findings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# (g) Retained Movements reference no purged row (the archival purge)
+# ---------------------------------------------------------------------------
+
+
+def _check_g(context: _Context) -> _Outcome:
+    """The purge of archived history left whole components and their records."""
+    findings: list[Finding] = []
+    for row in context.rows(
+        "SELECT r.run_id, r.flow_id, r.part_number, count(m.id) AS movements"
+        " FROM history_archived_flows r JOIN part_movements m ON m.quantity_flow_id = r.flow_id"
+        " WHERE r.purged_at IS NOT NULL GROUP BY r.run_id, r.flow_id, r.part_number"
+    ):
+        findings.append(
+            Finding(
+                "PURGED_FLOW_HAS_MOVEMENTS",
+                "QuantityFlow",
+                int(row.flow_id),
+                row.part_number,
+                0,
+                int(row.movements),
+                {"archival_run_id": int(row.run_id)},
+            )
+        )
+    for row in context.rows(
+        "SELECT l.id, l.parent_flow_id, l.child_flow_id, l.device_event_id,"
+        " coalesce(p.part_number, c.part_number) AS part_number,"
+        " (p.flow_id IS NOT NULL) AS parent_purged"
+        " FROM quantity_flow_lineage l"
+        " LEFT JOIN history_archived_flows p"
+        " ON p.flow_id = l.parent_flow_id AND p.purged_at IS NOT NULL"
+        " LEFT JOIN history_archived_flows c"
+        " ON c.flow_id = l.child_flow_id AND c.purged_at IS NOT NULL"
+        " WHERE (p.flow_id IS NULL) <> (c.flow_id IS NULL)"
+    ):
+        findings.append(
+            Finding(
+                "LINEAGE_CROSSES_ARCHIVE",
+                "QuantityFlowLineage",
+                int(row.id),
+                row.part_number,
+                None,
+                int(row.parent_flow_id) if row.parent_purged else int(row.child_flow_id),
+                {
+                    "parent_flow_id": int(row.parent_flow_id),
+                    "child_flow_id": int(row.child_flow_id),
+                    "device_event_id": str(row.device_event_id),
+                },
+            )
+        )
+    for row in context.rows(
+        "SELECT r.run_id, r.flow_id, r.part_number, h.state FROM history_archived_flows r"
+        " JOIN history_archive_runs h ON h.id = r.run_id"
+        " WHERE r.purged_at IS NOT NULL"
+        " AND (h.purge_started_at IS NULL OR h.state <> ALL(:states))",
+        states=list(_PURGED_RUN_STATES),
+    ):
+        findings.append(
+            Finding(
+                "PURGED_RECORD_RUN_STATE",
+                "HistoryArchivedFlow",
+                f"{int(row.run_id)}/{int(row.flow_id)}",
+                row.part_number,
+                list(_PURGED_RUN_STATES),
+                row.state,
+                {"archival_run_id": int(row.run_id), "quantity_flow_id": int(row.flow_id)},
+            )
+        )
+    for row in context.rows(
+        "SELECT r.run_id, r.flow_id, r.part_number, h.result FROM history_archived_flows r"
+        " JOIN history_archive_runs h ON h.id = r.run_id"
+        " WHERE h.result IN ('PURGED', 'NOTHING_PURGED')"
+        " AND r.purged_at IS NULL AND r.skipped_at IS NULL"
+    ):
+        findings.append(
+            Finding(
+                "RECORD_NOT_PURGED",
+                "HistoryArchivedFlow",
+                f"{int(row.run_id)}/{int(row.flow_id)}",
+                row.part_number,
+                "purged or skipped",
+                None,
+                {"archival_run_id": int(row.run_id), "result": row.result},
+            )
+        )
+    for row in context.rows(
+        "SELECT h.id, h.purged_components, h.purged_flows, h.purged_movements,"
+        " count(DISTINCT r.component_id) AS components, count(r.flow_id) AS flows,"
+        " coalesce(sum(r.movement_count), 0) AS movements"
+        " FROM history_archive_runs h LEFT JOIN history_archived_flows r"
+        " ON r.run_id = h.id AND r.purged_at IS NOT NULL"
+        " WHERE h.purge_started_at IS NOT NULL"
+        " GROUP BY h.id, h.purged_components, h.purged_flows, h.purged_movements"
+        " HAVING (h.purged_components, h.purged_flows, h.purged_movements)"
+        " <> (count(DISTINCT r.component_id), count(r.flow_id),"
+        " coalesce(sum(r.movement_count), 0))"
+    ):
+        findings.append(
+            Finding(
+                "PURGED_COUNT_MISMATCH",
+                "HistoryArchiveRun",
+                int(row.id),
+                None,
+                {
+                    "components": int(row.components),
+                    "flows": int(row.flows),
+                    "movements": int(row.movements),
+                },
+                {
+                    "components": int(row.purged_components),
+                    "flows": int(row.purged_flows),
+                    "movements": int(row.purged_movements),
+                },
+                {},
+            )
+        )
+    counts = context.rows(
+        "SELECT (SELECT count(*) FROM history_archived_flows WHERE purged_at IS NOT NULL)"
+        " AS purged, (SELECT count(*) FROM history_archive_runs"
+        " WHERE purge_started_at IS NOT NULL) AS runs"
+    )[0]
+    return _Outcome(
+        {"purged_records": int(counts.purged), "purge_runs": int(counts.runs)}, findings
     )
 
 

@@ -266,7 +266,8 @@ the first one that fails; the steps below show what it does.
 
 The database starts empty, in the new volume `partflow-production_postgres_data`. To start from an existing backup
 instead, for example when moving PartFlow from another host, follow the runbook §6 (New-instance restore) in place
-of step 3.
+of step 3, and create the history archive task (§11.8) only after you have checked the runs in Administration →
+History archival & purge: a restored run in `PURGING` resumes its purge at the task's first start.
 
 ## 8. Start PartFlow and check it on the NAS
 
@@ -450,7 +451,8 @@ Email**, select **Enable email notifications**, enter the mail server (SMTP) set
    ```
 
 The task runs every hour, and **Administration → Backups** in PartFlow decides how often it takes a backup (initially
-every hour) and how many it keeps (initially 48 hourly, 30 daily and 52 weekly backups). A run with no backup due ends
+every hour) and how many it keeps (initially 48 hourly, 30 daily and 52 weekly backups, and the newest 3 pre-purge
+backups that the history archive task of §11.8 takes). A run with no backup due ends
 without writing anything. With a backup every hour, at most one hour of work can be lost. Start releases a few minutes
 after the full hour: a running backup stops a release before it changes anything (start the release again once the
 backup has finished), and a backup that starts during a release is refused (you receive its failure email; the next
@@ -466,8 +468,10 @@ A backup that stays on the NAS is lost with the NAS. Copy the backup folder else
 1. Install **Hyper Backup** from Package Center, open it and create a **Data backup task**.
 2. Choose a destination outside this NAS: another NAS, Synology C2 Storage or an S3-compatible service.
 3. As the source, select the folders `docker/partflow/backups` and `docker/partflow/archive` (the archive folder of
-   §11.8; select it once it exists). The archives are in no database backup, so this copy is their only copy outside
-   the NAS unless you set a copy folder (§11.8).
+   §11.8; select it once it exists). Once a run has purged its history from the database, its archive is the only
+   copy of that history apart from the pre-purge backups that are still kept, so this copy is the archive's only copy
+   outside the NAS unless you set a copy folder (§11.8). The backup folder also holds those pre-purge backups: this task
+   covers them like every backup.
 4. Enable **client-side encryption**. Keep the password and the key file outside the NAS: without them, the copies
    cannot be read.
 5. Schedule it daily at `03:30`, between two backups. Set the version rotation as you decide, enable the weekly
@@ -553,10 +557,11 @@ and edit the rules of the active profile:
 
 ### 11.8 History archive task
 
-PartFlow can move old Movement history into archive files (History archival & purge in Administration; the runbook
-§11). **The current build step only exports and copies archives and never deletes anything.** The history archive job
-needs an archive folder on the NAS, optionally a copy folder on another device, and a task that starts it every 5
-minutes. Do this before the first run is requested in Administration.
+PartFlow can move old Movement history into archive files and then delete it from the database (History archival &
+purge in Administration; the runbook §11). **A run deletes history:** once its archive is copied off the NAS, the job
+takes a pre-purge backup and purges the archived Movements from the database. The history archive job needs an archive
+folder on the NAS, optionally a copy folder on another device, and a task that starts it every 5 minutes. Do this
+before the first run is requested in Administration.
 
 1. **Create the archive folder**, owned by `root` (the account that runs the task) and readable by `root` only:
 
@@ -580,8 +585,9 @@ minutes. Do this before the first run is requested in Administration.
 
 3. **Optional: a copy folder on another device.** Without it, every archival run waits until you confirm in
    Administration that its archive was copied off the NAS (the Hyper Backup task of §11.3 does that copy; the runbook
-   §11 explains the confirmation). With it, each run copies its archive there, checks the copy and completes by
-   itself. The folder must be on **another device**, mounted on the NAS, writable by `root`:
+   §11 explains the confirmation). With it, each run copies its archive there, checks the copy, and goes on by itself
+   with the pre-purge backup and the purge. The folder must be on **another device**, mounted on the NAS, writable by
+   `root`:
    - a USB disk: DSM mounts it under `/volumeUSB1/usbshare`; create a folder on it, for example
      `mkdir -p /volumeUSB1/usbshare/partflow-archive-copy`;
    - or a shared folder of another server: in **File Station → Tools → Mount Remote Folder → CIFS Shared Folder**,
@@ -611,12 +617,18 @@ minutes. Do this before the first run is requested in Administration.
      ```
 
    Most starts end within seconds. Once an hour, at the first start at or after the **Start minute** set in
-   Administration → History archival & purge (20 initially, away from the hourly backup at minute 0), the task does
-   the hourly work: it exports, verifies and copies a requested run. The very first start only records the current
-   hour, so the first hourly work comes at the next Start minute. A refusal or a failure sends one email for its hour.
+   Administration → History archival & purge (20 initially), the task does the hourly work: it exports, verifies and
+   copies a requested run, takes its pre-purge backup in the backup folder, purges the archived Movement history from
+   the database and runs the reconciliation after it. The very first start only records the current hour, so the
+   first hourly work comes at the next Start minute. A refusal or a failure sends one email for its hour; exit code 4
+   is an incident (the reconciliation after a purge did not end clean: the runbook §8), and until it is closed every
+   hourly start refuses with exit code 1 and works on no run. Keep the Start minute away from minute 0: the pre-purge
+   backup waits for the hourly backup while that one runs (up to 60 minutes), and a release is refused while the task
+   works.
 
 5. **Test it.** Select the task and click **Run**. Then check that the job can reach its folder and the database,
-   which prints the hourly work's lines and ends with a line that starts with `ARCHIVE`:
+   which prints the hourly work's lines and ends with a line that starts with `ARCHIVE` (`ARCHIVE none - -` while no
+   run is requested: then nothing is exported or deleted):
 
    ```sh
    deploy/production/pf archive
@@ -627,13 +639,21 @@ minutes. Do this before the first run is requested in Administration.
 
 6. Add the archive folder to the Hyper Backup task (§11.3, step 3), if you have not done so yet.
 
+**Before any restore of the database** (a rollback, a restore after an incident, a move to a new NAS: the runbook §6
+and §8), untick **Enabled** for this task, and tick it again only after you have checked the runs in Administration →
+History archival & purge. A restored backup that holds a run in `PURGING` (for example the hourly backup taken while a
+purge ran) resumes that purge at the task's next start, unless the task is disabled or the incident record of the
+runbook §8 exists. To undo a purge, restore that run's pre-purge backup: the run is `RUNNING` in it, the next start
+fails it, and nothing is purged again.
+
 ## 12. Installing a new release
 
 Every later release is installed with `deploy/production/release.sh`. It takes a verified backup, builds the new
 images without touching the running ones, migrates the database, switches PartFlow to the new release and checks it.
 Choose a time when no Work Order import runs, a few minutes after the full hour, once the hourly backup has finished
 and well before the Start minute of the history archive task: a release is refused while that task does its hourly
-work (start it again once the work has finished), and the task refuses while a release runs.
+work (start it again once the work has finished), and the task refuses while a release runs. A run's purge, and a
+first large run, can keep the task busy for long.
 
 ```sh
 cd /volume1/docker/partflow/repo
@@ -653,7 +673,7 @@ deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --appr
 - `.env.production` is not tracked by git, so it stays in place; `release.sh` writes the new tag into it at the switch.
   The scheduled tasks need no change, because they run in the same folder.
 - Keep the previous release's images (never `docker image prune -a`) until you are sure you will not roll back
-  (runbook §6).
+  (runbook §6). Before a rollback that restores a backup, disable the history archive task (§11.8).
 
 ## 13. Capacity and resource limits
 
@@ -679,15 +699,19 @@ the local backups. A backup needs free space of twice the newest backup plus 1 G
 drill needs five times the backup plus 1 GiB on the Docker storage. The `check.sh` disk checks fail below 15 % free
 space: `disk_data` for the database volume, `disk_backup` for the backup folder and `disk_docker` for the Docker
 storage (images and container logs) and `disk_archive` for the archive folder (§11.8). The archive folder grows with
-every archival run; nothing removes archives automatically. `/root/partflow-monitoring/growth.tsv` records the database
-size once a day.
+every archival run; nothing removes archives automatically. The backup folder also holds the pre-purge backups of
+History archival & purge (the newest 3 by default, one dump each). A purge frees space inside the database for new
+Movements, so the database stops growing, but its files get smaller only with `VACUUM FULL` (the runbook §11).
+`/root/partflow-monitoring/growth.tsv` records the database size once a day.
 
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §11.8: the archive folder, the optional copy folder and the 5-minute history archive task, which exports and copies archives and never deletes anything; §4, §11.3, §11.5, §12 and §13 for the archive folder. |
-| 2026-11-16 | uncommitted | §7, §12: `deploy/production/pf install` and `pf update` run these steps. |
+| 2026-11-18 | uncommitted | §7, §11.8 and §12: disable the history archive task before any restore and check the runs before enabling it, because a restored `PURGING` run resumes its purge. |
+| 2026-11-18 | uncommitted | §11.8: a run purges its archived Movement history after the off-host copy and a pre-purge backup, then reconciles, and an incident stops the task's work until it is closed; the Start minute away from the hourly backup; §11.2, §11.3, §12 and §13: the pre-purge backups in the backup folder and in Hyper Backup, the archive as the only copy after a purge, a long purge before a release, and `VACUUM FULL`. |
+| 2026-11-17 | `2f12d33` | §11.8: the archive folder, the optional copy folder and the 5-minute history archive task, which exports and copies archives and never deletes anything; §4, §11.3, §11.5, §12 and §13 for the archive folder. |
+| 2026-11-16 | `5708664` | §7, §12: `deploy/production/pf install` and `pf update` run these steps. |
 | 2026-11-16 | `c1f042b` | §1, §11.2: the backup task runs every hour with `--kind scheduled`, and Administration → Backups sets the interval and how many backups are kept; §11.3, §11.5, §12: times around the hourly backup. |
 | 2026-11-12 | `de4d99f` | §12: a Scan Station or Production Board reloads after a 10-second countdown in the notice instead of after a minute, and every other page once idle for 1 minute instead of 2. |
 | 2026-11-12 | `77a2dfb` | §12: pages open during a release now reload themselves (a Scan Station or Production Board after about a minute, every other page once idle for 2 minutes with nothing unsaved). |

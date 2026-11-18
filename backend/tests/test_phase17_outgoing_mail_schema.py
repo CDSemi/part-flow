@@ -8,8 +8,8 @@ IMPLEMENTATION_ROADMAP Phase 17 item 8):
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_history_archive_schema.py`` with
-  ``0040_phase16_history_archive``;
+  ``tests/test_history_purge_schema.py`` with
+  ``0041_phase16_history_purge``;
 - the migration's literals equal the model constants and the section id;
 - a fresh install stores no address, no mail server (port 587, STARTTLS)
   and no mail server password, and the CHECKs refuse every value outside

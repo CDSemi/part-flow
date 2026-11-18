@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import {
+  getBackupPolicy,
   getPasswordRulesPolicy,
   getRememberMePolicy,
+  getRetentionPolicy,
   getSignInPolicy,
   getTwoStepPolicy,
+  updateBackupPolicy,
   updatePasswordRulesPolicy,
   updateRememberMePolicy,
+  updateRetentionPolicy,
   updateSignInPolicy,
   updateTwoStepPolicy,
 } from './policies';
@@ -191,5 +195,82 @@ test('Remember me maps the three settings and sends only the provided ones', asy
     path: '/api/policies/remember-me',
     method: 'PUT',
     body: { remember_me_days: 90 },
+  });
+});
+
+const RETENTION_WIRE = {
+  retention_period_months: 24,
+  shortest_retention_months: 12,
+  archive_start_minute: 20,
+  archive_preview_seconds: 90,
+  archive_max_wait_days: 7,
+  archive_purge_batch_movements: 50000,
+  archive_purge_batch_part_numbers: 20,
+  updated_at: '2026-11-18T08:00:00Z',
+};
+
+test('the History archival & purge settings map the purge batch limits and send only the provided ones', async () => {
+  answer(RETENTION_WIRE);
+  expect(await getRetentionPolicy()).toEqual({
+    retentionPeriodMonths: 24,
+    shortestRetentionMonths: 12,
+    startMinute: 20,
+    previewSeconds: 90,
+    maxWaitDays: 7,
+    purgeBatchMovements: 50000,
+    purgeBatchPartNumbers: 20,
+    updatedAt: '2026-11-18T08:00:00Z',
+  });
+  await updateRetentionPolicy({ purgeBatchMovements: 1000 });
+  expect(lastRequest()).toEqual({
+    path: '/api/policies/data-retention',
+    method: 'PUT',
+    body: { archive_purge_batch_movements: 1000 },
+  });
+  await updateRetentionPolicy({ purgeBatchPartNumbers: 5, startMinute: 45 });
+  expect(lastRequest().body).toEqual({
+    archive_start_minute: 45,
+    archive_purge_batch_part_numbers: 5,
+  });
+  // A setting the server left out is refused with its wire name.
+  answer({ ...RETENTION_WIRE, archive_purge_batch_part_numbers: undefined });
+  await expect(getRetentionPolicy()).rejects.toThrow(
+    'The server answered without the History archival & purge setting archive_purge_batch_part_numbers.',
+  );
+});
+
+test('the backup policy maps the pre-purge backups kept and replaces all five fields', async () => {
+  answer({
+    backup_interval_hours: 1,
+    backup_keep_hourly: 48,
+    backup_keep_daily: 30,
+    backup_keep_weekly: 52,
+    backup_keep_pre_purge: 3,
+    updated_at: '2026-11-18T08:00:00Z',
+  });
+  expect(await getBackupPolicy()).toEqual({
+    intervalHours: 1,
+    keepHourly: 48,
+    keepDaily: 30,
+    keepWeekly: 52,
+    keepPrePurge: 3,
+  });
+  await updateBackupPolicy({
+    intervalHours: 6,
+    keepHourly: 0,
+    keepDaily: 14,
+    keepWeekly: 1,
+    keepPrePurge: 10,
+  });
+  expect(lastRequest()).toEqual({
+    path: '/api/policies/backups',
+    method: 'PUT',
+    body: {
+      backup_interval_hours: 6,
+      backup_keep_hourly: 0,
+      backup_keep_daily: 14,
+      backup_keep_weekly: 1,
+      backup_keep_pre_purge: 10,
+    },
   });
 });

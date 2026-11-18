@@ -1,14 +1,17 @@
 // History archival runs API (Administration → History archival & purge;
-// Phase 16, archival design B step 1).
+// Phase 16, archival design B steps 1 and 2).
 //
 // What a run would archive at a cutoff (the preview), the runs newest
 // first, requesting a run (the request is the approval: the server
 // recomputes and stores the preview), cancelling a run, and confirming
 // the off-host copy of a run waiting for it. The settings of the section
-// are `/api/policies/data-retention` (`api/policies.ts`). In step 1 a run
-// exports the history to archive files and deletes nothing: a completed
-// run's result is `EXPORT_ONLY`. The server owns every rule (the cutoff,
-// the one open run, the states); this module only maps the wire shape.
+// are `/api/policies/data-retention` (`api/policies.ts`). A run exports
+// the history to archive files, copies them off the server, takes a
+// pre-purge backup and then purges the archived Movements (`PURGING`),
+// ending `COMPLETED` or `COMPLETED_WITH_SKIPS` with the result `PURGED`
+// or `NOTHING_PURGED`; runs that step 1 finished keep `EXPORT_ONLY`. The
+// server owns every rule (the cutoff, the one open run, the states); this
+// module only maps the wire shape.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -88,19 +91,34 @@ export async function previewArchive(
   };
 }
 
-/** The run states of step 1. */
+/** The run states of steps 1 and 2 (`PURGING` is open, like `APPROVED`,
+ * `RUNNING` and `WAITING_FOR_COPY`; the others are final). */
 export type ArchiveRunState =
   | 'APPROVED'
   | 'RUNNING'
   | 'WAITING_FOR_COPY'
+  | 'PURGING'
   | 'COMPLETED'
+  | 'COMPLETED_WITH_SKIPS'
   | 'NOTHING_ELIGIBLE'
   | 'CANCELLED'
   | 'FAILED';
 
+/** The results of a completed run: `PURGED` (at least one component
+ * purged), `NOTHING_PURGED` (every component skipped), `EXPORT_ONLY`
+ * (runs that step 1 finished). */
+export type ArchiveRunResult = 'EXPORT_ONLY' | 'PURGED' | 'NOTHING_PURGED';
+
 export interface ArchiveRunUser {
   userId: number;
   displayName: string;
+}
+
+/** The counts of whole components, flows and Movements a purge deleted. */
+export interface ArchivePurgedCounts {
+  components: number;
+  flows: number;
+  movements: number;
 }
 
 export interface ArchiveRun {
@@ -128,14 +146,28 @@ export interface ArchiveRun {
   archiveBytes: number | null;
   manifestSha256: string | null;
   verifiedAt: string | null;
-  /** Null until the verification finished. */
+  /** Null until the verification finished; the components the
+   * verification and the purge skipped (they changed after the export),
+   * together. */
   skipped: { components: number; flows: number } | null;
   copiedAt: string | null;
   copyConfirmedAt: string | null;
   copyConfirmedBy: ArchiveRunUser | null;
   cancelledBy: ArchiveRunUser | null;
+  /** The pre-purge backup the host job took before the purge; null until
+   * the purge started. */
+  prePurgeBackup: { name: string; dumpStartedAt: string } | null;
+  purgeStartedAt: string | null;
+  /** What the purge deleted so far (raised per batch); null until the
+   * purge started. */
+  purged: ArchivePurgedCounts | null;
+  /** The purge receipt beside the archive folder and its SHA-256; null
+   * until it was written. */
+  receiptName: string | null;
+  receiptSha256: string | null;
   finishedAt: string | null;
-  /** `EXPORT_ONLY` exactly when the run is `COMPLETED`. */
+  /** An `ArchiveRunResult`, set exactly when the run is `COMPLETED` or
+   * `COMPLETED_WITH_SKIPS`. */
   result: string | null;
   failureReason: string | null;
 }
@@ -172,6 +204,11 @@ interface ArchiveRunWire {
   copy_confirmed_at: string | null;
   copy_confirmed_by: UserWire | null;
   cancelled_by: UserWire | null;
+  pre_purge_backup: { name: string; dump_started_at: string } | null;
+  purge_started_at: string | null;
+  purged: ArchivePurgedCounts | null;
+  receipt_name: string | null;
+  receipt_sha256: string | null;
   finished_at: string | null;
   result: string | null;
   failure_reason: string | null;
@@ -216,6 +253,24 @@ function toRun(wire: ArchiveRunWire): ArchiveRun {
     copyConfirmedAt: wire.copy_confirmed_at,
     copyConfirmedBy: toUser(wire.copy_confirmed_by),
     cancelledBy: toUser(wire.cancelled_by),
+    prePurgeBackup:
+      wire.pre_purge_backup === null
+        ? null
+        : {
+            name: wire.pre_purge_backup.name,
+            dumpStartedAt: wire.pre_purge_backup.dump_started_at,
+          },
+    purgeStartedAt: wire.purge_started_at,
+    purged:
+      wire.purged === null
+        ? null
+        : {
+            components: wire.purged.components,
+            flows: wire.purged.flows,
+            movements: wire.purged.movements,
+          },
+    receiptName: wire.receipt_name,
+    receiptSha256: wire.receipt_sha256,
     finishedAt: wire.finished_at,
     result: wire.result,
     failureReason: wire.failure_reason,

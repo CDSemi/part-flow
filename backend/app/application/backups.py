@@ -22,8 +22,16 @@ interval and retention of Administration → Backups come as arguments.
   not-before instant, or is at most N minutes old.
 - ``rotate_backups`` (``backup-rotate``): of the verified scheduled backups
   (and the daily backups of earlier releases), keeps the newest of each of
-  the newest N hours, days and ISO weeks (UTC) that hold one; never touches
-  pre-release, manual, unknown or invalid entries.
+  the newest N hours, days and ISO weeks (UTC) that hold one; with
+  ``keep_pre_purge``, also keeps the newest N verified ``pre-purge``
+  backups and deletes the older ones; never touches pre-release, manual,
+  unknown or invalid entries.
+
+The kinds: ``scheduled`` (the host's hourly task), ``daily`` (the scheduled
+kind of earlier releases), ``manual``, ``pre-release`` (labelled with the
+target release tag) and ``pre-purge`` (history archival design B §7.4:
+taken by ``deploy/production/archive.sh`` before the purge of an archival
+run, labelled with the run's archive name ``run-<id>-<YYYYMMDDTHHMMSSZ>``).
 - ``check_due`` (``backup-due``): whether the host's hourly task takes a
   scheduled backup now — none was published yet, or the newest started at
   least the interval ago (less a ten-minute tolerance for the task's own
@@ -68,10 +76,13 @@ SUMMED_FILES: Final = (MANIFEST_FILE, DUMP_FILE, LIST_FILE)
 REQUIRED_FILES: Final = (DUMP_FILE, LIST_FILE, MANIFEST_FILE, SUMS_FILE)
 
 NAME_PATTERN: Final = re.compile(
-    r"^(?P<stamp>[0-9]{8}T[0-9]{6}Z)-(?P<kind>scheduled|daily|manual|pre-release)"
+    r"^(?P<stamp>[0-9]{8}T[0-9]{6}Z)-(?P<kind>scheduled|daily|manual|pre-release|pre-purge)"
     r"(?:-(?P<label>[A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$"
 )
 RELEASE_TAG_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+#: The label of a ``pre-purge`` backup: the archive name of its archival run
+#: (``app.application.history_archive_job.NAME_PATTERN``).
+PRE_PURGE_LABEL_PATTERN: Final = re.compile(r"run-[0-9]+-[0-9]{8}T[0-9]{6}Z")
 REVISION_PATTERN: Final = re.compile(r"[A-Za-z0-9_]{1,32}")
 COMMIT_PATTERN: Final = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_PATTERN: Final = re.compile(r"sha256:[0-9a-f]{64}")
@@ -87,14 +98,17 @@ _MAX_ALEMBIC_ROW_LENGTH: Final = 64
 _PARTIAL_MAX_AGE: Final = datetime.timedelta(hours=24)
 _FUTURE_TOLERANCE: Final = datetime.timedelta(minutes=2)
 
-BackupKind = Literal["scheduled", "daily", "manual", "pre-release"]
+BackupKind = Literal["scheduled", "daily", "manual", "pre-release", "pre-purge"]
 #: Every backup kind a name or manifest may carry. ``scheduled`` is the
 #: host's hourly task (Phase 16, Administration → Backups); ``daily`` is the
 #: scheduled kind of earlier releases, still read, verified, restored and
-#: rotated, never written again.
-BACKUP_KINDS: Final = ("scheduled", "daily", "manual", "pre-release")
+#: rotated, never written again; ``pre-purge`` is the backup before the
+#: purge of a history archival run (design B step 2).
+BACKUP_KINDS: Final = ("scheduled", "daily", "manual", "pre-release", "pre-purge")
 #: The kinds the retention of the scheduled backups applies to.
 ROTATED_KINDS: Final = ("scheduled", "daily")
+#: The kinds that carry a label (required), and the label each must match.
+LABELLED_KINDS: Final = {"pre-release": RELEASE_TAG_PATTERN, "pre-purge": PRE_PURGE_LABEL_PATTERN}
 CheckStatus = Literal["pass", "fail", "not_run", "skipped"]
 CHECK_IDS: Final = (
     "directory",
@@ -123,26 +137,35 @@ class BackupName:
 def parse_name(value: str) -> BackupName | None:
     """The parsed backup name, or None when ``value`` is not one.
 
-    ``label`` is required for ``pre-release`` and forbidden otherwise.
+    ``label`` is required for ``pre-release`` (a release tag) and
+    ``pre-purge`` (an archive name ``run-<id>-<YYYYMMDDTHHMMSSZ>``) and
+    forbidden otherwise.
     """
     match = NAME_PATTERN.fullmatch(value)
     if match is None:
         return None
     kind = match.group("kind")
     label = match.group("label")
-    if (kind == "pre-release") != (label is not None):
+    label_pattern = LABELLED_KINDS.get(kind)
+    if label_pattern is None:
+        if label is not None:
+            return None
+    elif label is None or label_pattern.fullmatch(label) is None:
         return None
     try:
         stamp = datetime.datetime.strptime(match.group("stamp"), "%Y%m%dT%H%M%SZ")
     except ValueError:
         return None
+    moment = stamp.replace(tzinfo=datetime.UTC)
     if kind == "scheduled":
-        return BackupName(value, stamp.replace(tzinfo=datetime.UTC), "scheduled", None)
+        return BackupName(value, moment, "scheduled", None)
     if kind == "daily":
-        return BackupName(value, stamp.replace(tzinfo=datetime.UTC), "daily", None)
+        return BackupName(value, moment, "daily", None)
     if kind == "manual":
-        return BackupName(value, stamp.replace(tzinfo=datetime.UTC), "manual", None)
-    return BackupName(value, stamp.replace(tzinfo=datetime.UTC), "pre-release", label)
+        return BackupName(value, moment, "manual", None)
+    if kind == "pre-purge":
+        return BackupName(value, moment, "pre-purge", label)
+    return BackupName(value, moment, "pre-release", label)
 
 
 def backup_text(value: str) -> str:
@@ -1165,7 +1188,7 @@ def check_freshness(
 
 ROTATE_MESSAGES: Final = {
     "backup_invalid": (
-        "Scheduled backups {names} failed verification; they were not counted or deleted."
+        "Backups {names} failed verification; they were not counted or deleted."
         " Review and remove them by hand (OPERATIONS_RUNBOOK §9)."
     ),
     "delete_failed": (
@@ -1182,8 +1205,12 @@ class RotateReport:
     keep_hourly: int
     keep_daily: int
     keep_weekly: int
+    #: The newest verified pre-purge backups kept; None leaves them all alone.
+    keep_pre_purge: int | None = None
     kept: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    kept_pre_purge: list[str] = field(default_factory=list)
+    deleted_pre_purge: list[str] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     invalid: list[dict[str, str]] = field(default_factory=list)
     partial_removed: list[str] = field(default_factory=list)
@@ -1260,16 +1287,15 @@ def _stale_partials(partial_root: Path, now: datetime.datetime) -> list[str]:
     return stale
 
 
-def _rotate(backup_dir: Path, report: RotateReport, now: datetime.datetime) -> None:
+def _verified_of(
+    backup_dir: Path, report: RotateReport, kinds: tuple[str, ...]
+) -> dict[str, datetime.datetime]:
+    """The verified backups of ``kinds`` by name (their stamps); the others are reported."""
     verified: dict[str, datetime.datetime] = {}
     for entry in backup_files.entry_names(backup_dir):
         parsed = parse_name(entry)
         path = backup_dir / entry
-        if (
-            parsed is None
-            or parsed.kind not in ROTATED_KINDS
-            or not backup_files.is_real_directory(path)
-        ):
+        if parsed is None or parsed.kind not in kinds or not backup_files.is_real_directory(path):
             continue
         identity = _manifest_identity(path)
         if identity is None:
@@ -1290,28 +1316,46 @@ def _rotate(backup_dir: Path, report: RotateReport, now: datetime.datetime) -> N
             reason = _reason(cause) if isinstance(cause, OSError) else "unknown"
             failure = (running, f"cannot be read ({reason})")
         report.invalid.append({"name": entry, "check": failure[0], "detail": failure[1]})
+    return verified
 
+
+def newest_kept(stamps: dict[str, datetime.datetime], count: int) -> set[str]:
+    """The ``count`` newest names by stamp (the name breaking ties)."""
+    return set(sorted(stamps, key=lambda name: (stamps[name], name), reverse=True)[:count])
+
+
+def _rotate(backup_dir: Path, report: RotateReport, now: datetime.datetime) -> None:
+    verified = _verified_of(backup_dir, report, ROTATED_KINDS)
     keep = select_keep(verified, report.keep_hourly, report.keep_daily, report.keep_weekly)
     report.kept = sorted(keep)
     to_delete = sorted(set(verified) - keep)
+    pre_purge_delete: list[str] = []
+    if report.keep_pre_purge is not None:
+        pre_purge = _verified_of(backup_dir, report, ("pre-purge",))
+        kept_pre_purge = newest_kept(pre_purge, report.keep_pre_purge)
+        report.kept_pre_purge = sorted(kept_pre_purge)
+        pre_purge_delete = sorted(set(pre_purge) - kept_pre_purge)
     partial_root = backup_dir / PARTIAL_DIR
     stale = _stale_partials(partial_root, now)
     if report.dry_run:
         report.deleted = to_delete
+        report.deleted_pre_purge = pre_purge_delete
         report.partial_removed = stale
         return
 
     failures: list[tuple[str, str]] = []
-    if to_delete:
+    if to_delete or pre_purge_delete:
         backup_files.make_private_directory(partial_root)
-    for name in to_delete:
+    for name, deleted in [(name, report.deleted) for name in to_delete] + [
+        (name, report.deleted_pre_purge) for name in pre_purge_delete
+    ]:
         doomed = partial_root / f"{name}{DELETE_SUFFIX}"
         try:
             backup_files.move_directory(backup_dir / name, doomed)
         except OSError as exc:
             failures.append((name, _reason(exc)))
             continue
-        report.deleted.append(name)
+        deleted.append(name)
         try:
             backup_files.remove_tree(doomed)
         except OSError as exc:
@@ -1336,12 +1380,23 @@ def rotate_backups(
     keep_hourly: int = 0,
     keep_daily: int,
     keep_weekly: int,
+    keep_pre_purge: int | None = None,
     dry_run: bool = False,
     now: datetime.datetime | None = None,
 ) -> RotateReport:
-    """``backup-rotate``: apply the retention of the scheduled backups; always a report."""
+    """``backup-rotate``: apply the retention of the scheduled backups; always a report.
+
+    With ``keep_pre_purge`` (Administration → Backups, the pre-purge
+    backups kept) the newest that many verified ``pre-purge`` backups stay
+    and the older ones are deleted; without it no pre-purge backup is
+    touched. The two retentions never look at each other's kinds.
+    """
     report = RotateReport(
-        dry_run=dry_run, keep_hourly=keep_hourly, keep_daily=keep_daily, keep_weekly=keep_weekly
+        dry_run=dry_run,
+        keep_hourly=keep_hourly,
+        keep_daily=keep_daily,
+        keep_weekly=keep_weekly,
+        keep_pre_purge=keep_pre_purge,
     )
     try:
         _rotate(backup_dir, report, now or _now())
@@ -1352,7 +1407,7 @@ def rotate_backups(
     except Exception as exc:
         report.error = BackupError("internal_error", ROTATE_MESSAGES["internal_error"], exc)
         return report
-    for listed in (report.deleted, report.partial_removed):
+    for listed in (report.deleted, report.deleted_pre_purge, report.partial_removed):
         listed.sort()
     report.skipped.sort(key=lambda item: item["name"])
     report.invalid.sort(key=lambda item: item["name"])
@@ -1375,8 +1430,11 @@ def rotate_document(report: RotateReport) -> dict[str, object]:
         "keep_hourly": report.keep_hourly,
         "keep_daily": report.keep_daily,
         "keep_weekly": report.keep_weekly,
+        "keep_pre_purge": report.keep_pre_purge,
         "kept": list(report.kept),
         "deleted": list(report.deleted),
+        "kept_pre_purge": list(report.kept_pre_purge),
+        "deleted_pre_purge": list(report.deleted_pre_purge),
         "skipped": [dict(item) for item in report.skipped],
         "invalid": [dict(item) for item in report.invalid],
         "partial_removed": list(report.partial_removed),
@@ -1391,6 +1449,11 @@ def rotate_summary(report: RotateReport) -> str:
     summary = (
         f"backup-rotate: kept {len(report.kept)} scheduled backups, deleted {len(report.deleted)}"
     )
+    if report.keep_pre_purge is not None:
+        summary += (
+            f"; kept {len(report.kept_pre_purge)} pre-purge backups,"
+            f" deleted {len(report.deleted_pre_purge)}"
+        )
     if report.invalid:
         summary += f", {len(report.invalid)} failed verification and were kept for review"
     if report.dry_run:

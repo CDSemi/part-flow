@@ -1,7 +1,7 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `01ce427` cộng các thay đổi
-> chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `2f12d33` cộng các thay đổi
+> chưa commit ngày 2026-11-18. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
 Runbook này gồm các thủ tục vận hành PartFlow production sau khi đã cài đặt: kiểm tra tình trạng, sao lưu và thử
@@ -27,7 +27,8 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Tìm xem một bản phát hành trước đây đã làm gì | §1 |
 | Dùng lệnh ngắn `pf` để cài đặt, cập nhật, sao lưu, khôi phục hoặc xem trạng thái | Trước khi chạy bất kỳ lệnh nào |
 | Xóa các Work Order và Part Number chỉ được nhập để thử nghiệm | §10 |
-| Hiểu job lưu trữ lịch sử, kiểm tra hoặc xác nhận một lần lưu trữ, xử lý một lần lưu trữ thất bại, hoặc kiểm tra một bản lưu trữ | §11 |
+| Hiểu job lưu trữ lịch sử, bản sao lưu trước purge và việc purge của nó, kiểm tra hoặc xác nhận một lần lưu trữ, xử lý một lần lưu trữ thất bại, kiểm tra một bản lưu trữ, hoặc lấy lại dung lượng đĩa sau một lần purge | §11 |
+| Xử lý một phát hiện của đối soát sau một lần purge lịch sử Movement (`archive.sh` thoát với mã 4) | §8 (Phát hiện của đối soát sau một lần purge) |
 
 ## Trước khi chạy bất kỳ lệnh nào
 
@@ -60,7 +61,7 @@ nó.
 | `pf restore <NAME> --approved-by <owner>` | Khôi phục vào instance mới (new-instance restore) của §6 vào một database trống, với sự phê duyệt của chủ sở hữu được ghi vào `restore.json` trước khi `backend` khởi động. |
 | `pf status [--url https://<partflow-host>]` | Các container, `/api/health` và tóm tắt của `status` (§2); với `--url`, `check.sh --no-state`. |
 | `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | Bản xem trước việc xóa các Work Order và Part Number chỉ nhập để thử nghiệm; với `--confirm`, một bản sao lưu thủ công đã kiểm tra rồi việc xóa trong một transaction (§10). |
-| `pf archive` | Chạy ngay phần việc hằng giờ của job lưu trữ lịch sử, tức `archive.sh` không có `--scheduled` (§11). Nó chỉ xuất và sao chép bản lưu trữ, không bao giờ xóa gì. |
+| `pf archive` | Chạy ngay phần việc hằng giờ của job lưu trữ lịch sử, tức `archive.sh` không có `--scheduled` (§11): nó xuất, kiểm tra và sao chép một lần lưu trữ đã được yêu cầu, tạo bản sao lưu trước purge của lần đó và **purge** (xóa hẳn) lịch sử Movement đã lưu trữ khỏi database, rồi chạy đối soát. |
 
 Quy ước: tác vụ chạy một lần (one-shot job) đọc hoặc ghi thư mục sao lưu chạy với `--user "$(id -u):$(id -g)"`, vì
 thư mục đó có mode 0700. `<partflow-host>` là tên miền truy cập (host name) mà mọi người gõ trên trình duyệt,
@@ -81,8 +82,9 @@ kiểm tra những gì.
 | `<UTC>-restore-test-<NAME>/` | `restore-test.sh` | `evidence.json`, kết quả của lần diễn tập (§4) |
 | thư mục của bản phát hành bị hoàn tác | bạn, khi quay lui theo đường 3 (path 3) (§6) | `rollback.json`, `rollback-reconcile.json` |
 | `<UTC>-restore-<NAME>/` | bạn, khi khôi phục sang bản cài mới (§6) | `restore.json` |
-| `archive/<UTC>/` | `archive.sh`, chỉ cho một lần làm việc hằng giờ đã làm gì đó hoặc thất bại (§11) | một báo cáo JSON và một log cho mỗi bước (`recover`, `next`, `export`, `verify`, `copy`, `status`), và `messages.log` |
+| `archive/<UTC>/` | `archive.sh`, chỉ cho một lần làm việc hằng giờ đã làm gì đó hoặc thất bại (§11) | một báo cáo JSON và một log cho mỗi bước (`recover`; `next`, rồi `next-2`, `next-3` và tiếp theo; `export`, `verify`, `copy`, `purge`, `status`); `backup.out` và `backup.log` của bản sao lưu trước purge; `reconcile.json` và `reconcile.log`, đối soát sau một lần purge; và `messages.log` |
 | `archive/hourly-slot` | `archive.sh --scheduled` (§11) | dấu mốc hằng giờ: phút của lần làm việc hằng giờ gần nhất đã được thử |
+| `archive/reconcile-after-purge` | `archive.sh` (§11) | bản ghi sự cố của một lần đối soát sau purge chưa kết thúc sạch: lần lưu trữ, kết quả, các kiểm tra thất bại và đường dẫn của báo cáo. Khi nó còn tồn tại, `archive.sh` không làm việc với lần lưu trữ nào; bạn xóa nó khi đóng sự cố (§8, Phát hiện của đối soát sau một lần purge) |
 
 `record.json` chứa bản phát hành (tag, commit, tag trước đó, image ID), các revision của database trước và sau, người
 vận hành và người phê duyệt (approver), thời điểm, bản sao lưu trước phát hành và kết quả kiểm tra nó, kết quả
@@ -141,13 +143,14 @@ Nó in một dòng cho mỗi kiểm tra, `PASS|FAIL|SKIP <id> <reason>`, theo th
 | `disk_archive` | thư mục lưu trữ (archive, `PARTFLOW_ARCHIVE_DIR`) còn trống dưới 15 %; `SKIP` khi việc lưu trữ chưa được thiết lập (giá trị đang trống) |
 | `database` | báo cáo `status` không chạy được, không trả lời trong 120 s, hoặc báo lỗi database |
 | `schema` | `status` báo schema chưa sẵn sàng |
-| `backup_age` | không tìm thấy bản sao lưu đã công bố, không đọc được thư mục sao lưu, hoặc bản sao lưu mới nhất thuộc bất kỳ loại nào hoàn tất cách đây lâu hơn khoảng thời gian sao lưu theo lịch của Administration → Backups cộng 2 giờ (ban đầu là 3 giờ; `--max-backup-age-hours` đặt giới hạn khác) |
-| `archival_proposal` | `history-archive status` chỉ đọc báo một phát hiện, được nêu tên trong dòng: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable` hoặc `copy_dir_unusable` (§11); `SKIP` khi việc lưu trữ chưa được thiết lập |
+| `backup_age` | không tìm thấy bản sao lưu đã công bố, không đọc được thư mục sao lưu, hoặc bản sao lưu mới nhất thuộc bất kỳ loại nào (kể cả bản sao lưu trước purge) hoàn tất cách đây lâu hơn khoảng thời gian sao lưu theo lịch của Administration → Backups cộng 2 giờ (ban đầu là 3 giờ; `--max-backup-age-hours` đặt giới hạn khác) |
+| `archival_proposal` | `history-archive status` chỉ đọc báo một phát hiện, được nêu tên trong dòng: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable`, `copy_dir_unusable` hoặc `receipt_not_copied` (§11); hoặc đối soát sau một lần purge chưa kết thúc sạch, được nêu đầu tiên là `reconcile_after_purge` (§8, Phát hiện của đối soát sau một lần purge); `SKIP` khi việc lưu trữ chưa được thiết lập |
 
 - Các dòng `database`, `schema` và `backup_age` đến từ một lần chạy `status` chỉ đọc, còn `archival_proposal` đến từ
-  một lần chạy `history-archive status` chỉ đọc trong dịch vụ `maintenance` (§11). Khi một bản phát hành đang giữ khóa
-  của nó, hoặc `release.sh` đang giữ khóa sao lưu, bốn dòng này là `SKIP`. Khi khóa như vậy cũ hơn 4 giờ, lần chạy báo
-  `FAIL database` và nêu tên khóa, vì một `release.sh` bị kill sẽ để lại khóa (§3, Khóa sao lưu và khóa phát hành).
+  một lần chạy `history-archive status` chỉ đọc trong dịch vụ `maintenance` (§11) và từ bản ghi sự cố
+  `<records-dir>/archive/reconcile-after-purge` của `archive.sh`, mà `check.sh` chỉ đọc. Khi một bản phát hành đang giữ
+  khóa của nó, hoặc `release.sh` đang giữ khóa sao lưu, bốn dòng này là `SKIP`. Khi khóa như vậy cũ hơn 4 giờ, lần chạy
+  báo `FAIL database` và nêu tên khóa, vì một `release.sh` bị kill sẽ để lại khóa (§3, Khóa sao lưu và khóa phát hành).
 - Mã thoát (exit code): 0 không có gì để báo, 1 có ít nhất một `FAIL`, 2 không chạy được kiểm tra; cả 1 lẫn 2 đều
   kích hoạt thông báo lỗi của trình lập lịch. Một tập thất bại không đổi chỉ được báo lại sau 6 giờ
   (`--renotify-hours`); khi đó đầu ra ghi `already reported`.
@@ -222,17 +225,20 @@ là lý do để cấp thêm quyền. Chạy `reconcile --check h` (§7) trướ
 ### Bản sao lưu là gì (What a backup is)
 
 `deploy/production/backup.sh` tạo bản sao lưu logic của database PartFlow trong khi `db` đang chạy. Nó chạy từ thư mục
-gốc của một thư mục mã nguồn bản phát hành: của bản phát hành đang chạy với sao lưu theo lịch và thủ công, của bản
-phát hành mới khi `release.sh` gọi nó. Một bản sao lưu là một thư mục `<backup-dir>/<NAME>/`:
+gốc của một thư mục mã nguồn bản phát hành: của bản phát hành đang chạy với sao lưu theo lịch, thủ công và trước purge,
+của bản phát hành mới khi `release.sh` gọi nó. Một bản sao lưu là một thư mục `<backup-dir>/<NAME>/`:
 
 ```text
-NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-scheduled
-                                         and 20261008T140000Z-pre-release-v1.0.0-rc.2
+NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-scheduled,
+                                         20261008T140000Z-pre-release-v1.0.0-rc.2
+                                         and 20271110T050102Z-pre-purge-run-3-20271110T042000Z
 ```
 
-- `kind` là `scheduled` (tác vụ sao lưu chạy mỗi giờ), `manual` (làm bằng tay, kèm lý do) hoặc `pre-release` (do
-  `release.sh` tạo, với tag phát hành đích làm `label`). `daily` là loại sao lưu theo lịch của các bản phát hành trước:
-  các bản sao lưu đó vẫn được kiểm tra, khôi phục và xoay vòng như bản sao lưu theo lịch.
+- `kind` là `scheduled` (tác vụ sao lưu chạy mỗi giờ), `manual` (làm bằng tay, kèm lý do), `pre-release` (do
+  `release.sh` tạo, với tag phát hành đích làm `label`) hoặc `pre-purge` (do `archive.sh` tạo ngay trước khi purge một
+  lần lưu trữ, với tên bản lưu trữ `run-<id>-<giờ UTC>` của lần đó làm `label`, §11). `daily` là loại sao lưu theo lịch
+  của các bản phát hành trước: các bản sao lưu đó vẫn được kiểm tra, khôi phục và xoay vòng như bản sao lưu theo lịch.
+  Mọi loại đều được kiểm tra và khôi phục theo cùng một cách.
 - Thư mục chứa đúng bốn tệp: `partflow.dump` (database, được dump bên trong `db` bằng
   `pg_dump --format=custom --no-owner --no-privileges`), `partflow.dump.list` (mục lục của nó), `manifest.json` (khi
   nào, ở đâu và từ bản phát hành nào và revision database nào bản sao lưu được tạo, phiên bản PostgreSQL, các
@@ -255,33 +261,37 @@ NAME = <UTC stamp>-<kind>[-<label>]      for example 20261008T020000Z-scheduled
 deploy/production/backup.sh --kind manual --operator "<your name>" --reason "<why>"
 ```
 
-Khi thành công, đầu ra chuẩn (standard output) đúng một dòng, `BACKUP <NAME> <absolute path>`; các dòng tiến trình như
-`backup: dump ok (1234 ms)` đi ra lỗi chuẩn (standard error). Tác vụ sao lưu chạy
-`deploy/production/backup.sh --kind scheduled --operator scheduler` mỗi giờ
-([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.2); mục Sao lưu theo lịch (Scheduled backups), bên dưới, giải thích
-nó. `release.sh` tự tạo bản sao lưu trước phát hành; dạng thủ công
+Khi thành công, đầu ra chuẩn (standard output) đúng một dòng, `BACKUP <NAME> <absolute path>`; một bản sao lưu trước
+purge thêm giá trị thứ ba, thời điểm bản dump của nó bắt đầu (`BACKUP <NAME> <absolute path> <YYYY-MM-DDTHH:MM:SSZ>`,
+đọc từ báo cáo kiểm tra của nó), mà bước purge ghi lại. Các dòng tiến trình như `backup: dump ok (1234 ms)` đi ra lỗi
+chuẩn (standard error). Tác vụ sao lưu chạy `deploy/production/backup.sh --kind scheduled --operator scheduler` mỗi
+giờ ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.2); mục Sao lưu theo lịch (Scheduled backups), bên dưới, giải
+thích nó. `release.sh` tự tạo bản sao lưu trước phát hành; dạng thủ công
 của nó, cho một lần phát hành bằng tay, là
 `deploy/production/backup.sh --kind pre-release --label <target tag> --tools-release <target tag> --operator "<your name>"`.
+`archive.sh` tự tạo bản sao lưu trước purge (§11, Bản sao lưu trước purge).
 
 | Tùy chọn | Ý nghĩa |
 | --- | --- |
-| `--kind scheduled\|manual\|pre-release`, `--operator NAME` | Bắt buộc. `--kind daily`, `--keep-daily` và `--keep-weekly` của các bản phát hành trước bị từ chối kèm lệnh cần dùng thay thế. |
+| `--kind scheduled\|manual\|pre-release\|pre-purge`, `--operator NAME` | Bắt buộc. `--kind daily`, `--keep-daily` và `--keep-weekly` của các bản phát hành trước bị từ chối kèm lệnh cần dùng thay thế. |
 | `--reason TEXT` | Bắt buộc với `manual`. |
-| `--label TAG` | Tag phát hành đích: bắt buộc với `pre-release`, bị từ chối với loại khác. |
+| `--label TAG` | Tag phát hành đích với `pre-release`; tên bản lưu trữ của lần lưu trữ, `run-<id>-<giờ UTC>`, với `pre-purge`. Bắt buộc với hai loại này, bị từ chối với loại khác. |
 | `--tools-release TAG` | Bản phát hành có image `backup-tools` ghi và kiểm tra manifest (mặc định: `PARTFLOW_RELEASE`). |
-| `--no-rotate` | Chỉ với `scheduled`: giữ mọi bản sao lưu theo lịch trong lần chạy này. |
+| `--no-rotate` | Chỉ với `scheduled`: giữ mọi bản sao lưu theo lịch và trước purge trong lần chạy này. |
 | `--reserve-mib N` | Dung lượng trống giữ lại ngoài hai lần dump mới nhất (mặc định 1024). |
+| `--lock-wait-minutes N` | Khi một bản sao lưu khác đang giữ khóa sao lưu, chờ nó tối đa N phút, kiểm tra lại mỗi 15 giây (0 đến 1440; mặc định 0, bị từ chối ngay). Một khóa cũ (stale) bị từ chối ngay. `archive.sh` truyền vào đây tùy chọn `--backup-wait-minutes` của chính nó (mặc định 60). |
 
 Giá trị văn bản dài 1 đến 500 ký tự, không có ký tự điều khiển, `"` hoặc `\`. Trước khi ghi, `backup.sh` yêu cầu dung
-lượng trống bằng hai lần dump mới nhất (hoặc kích thước database khi chưa có dump nào) cộng với phần dự phòng.
+lượng trống bằng hai lần dump mới nhất thuộc bất kỳ loại nào (hoặc kích thước database khi chưa có dump nào) cộng với
+phần dự phòng.
 
 | Mã thoát | Ý nghĩa | Cần làm gì |
 | --- | --- | --- |
 | 0 | Hoàn tất và đã kiểm tra, hoặc (`scheduled`) chưa có bản sao lưu nào đến hạn: khi đó đầu ra chuẩn là `NOT_DUE <NAME>`, bản sao lưu theo lịch mới nhất. | Không cần làm gì. |
-| 1 | Bị từ chối trước khi ghi: `backup_running`, `backup_lock_stale`, `insufficient_space` hoặc `name_exists`. | Đọc lý do; chưa có gì được ghi. |
+| 1 | Bị từ chối trước khi ghi: `backup_running` (kể cả khi bản kia vẫn chạy sau `--lock-wait-minutes`), `backup_lock_stale`, `insufficient_space` hoặc `name_exists`. | Đọc lý do; chưa có gì được ghi. |
 | 2 | Không chạy được: tùy chọn, công cụ, cấu hình, `db` không chạy, không tạo được khóa sao lưu, hoặc (`scheduled`) không đọc được chính sách sao lưu từ database. | Sửa nguyên nhân và chạy lại. |
-| 3 | Thất bại: không có bản sao lưu nào được công bố, hoặc bản được công bố không qua kiểm tra. | Không bao giờ dùng bản sao lưu mà thông báo nêu tên; xóa nó sau khi xem xét. |
-| 4 | Bản sao lưu đã hoàn tất và được kiểm tra, nhưng việc xoay vòng (rotation) thất bại hoặc phát hiện một bản sao lưu theo lịch không qua kiểm tra. | Đọc báo cáo xoay vòng trên lỗi chuẩn (Retention, bên dưới). |
+| 3 | Thất bại: không có bản sao lưu nào được công bố, bản được công bố không qua kiểm tra, hoặc (`pre-purge`) báo cáo kiểm tra của nó không nêu thời điểm bắt đầu dump. | Không bao giờ dùng bản sao lưu mà thông báo nêu tên; xóa nó sau khi xem xét. |
+| 4 | Bản sao lưu đã hoàn tất và được kiểm tra, nhưng việc xoay vòng (rotation) thất bại hoặc phát hiện một bản sao lưu không qua kiểm tra. | Đọc báo cáo xoay vòng trên lỗi chuẩn (Retention, bên dưới). |
 
 ### Kiểm tra một bản sao lưu (Verifying a backup)
 
@@ -301,7 +311,7 @@ khác.
 
 Tác vụ sao lưu chạy `backup.sh --kind scheduled` mỗi giờ ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.2,
 [`VPS.vi.md`](./VPS.vi.md) §8). **Administration → Backups** trong PartFlow đặt tần suất tạo bản sao lưu và số bản sao
-lưu theo lịch được giữ; một thay đổi có hiệu lực từ lần chạy kế tiếp của tác vụ. Mỗi lần chạy:
+lưu theo lịch và trước purge được giữ; một thay đổi có hiệu lực từ lần chạy kế tiếp của tác vụ. Mỗi lần chạy:
 
 1. lấy khóa sao lưu, rồi đọc chính sách sao lưu từ database (`python -m app.cli backup-policy` trong một container
    `backend` dùng một lần, với role ứng dụng); khi không đọc được chính sách, nó thoát với 2;
@@ -316,29 +326,36 @@ lưu theo lịch được giữ; một thay đổi có hiệu lực từ lần c
 | Hourly backups kept | 48 | 0 đến 720 |
 | Daily backups kept | 30 | 1 đến 3650 |
 | Weekly backups kept | 52 | 0 đến 520 |
+| Pre-purge backups kept | 3 | 1 đến 100 |
 
-Việc thay đổi các giá trị này cần permission Configure system settings, và mọi thay đổi đều được audit.
+Việc thay đổi các giá trị này cần permission Configure system settings, và mọi thay đổi đều được audit. Khi không đọc
+được chính sách, hoặc chính sách thiếu một trong các giá trị này, lần chạy thoát với 2 và không ghi gì.
 
 ### Giữ lại, bản sao ngoài máy chủ và cảnh báo (Retention, the off-host copy and alerts)
 
-Một bản sao lưu theo lịch kết thúc bằng việc xoay vòng các bản sao lưu theo lịch, với các giá trị của Administration →
-Backups. Để xem trước mà không xóa gì (ở đây với các giá trị ban đầu):
+Một bản sao lưu theo lịch kết thúc bằng việc xoay vòng các bản sao lưu theo lịch và trước purge, với các giá trị của
+Administration → Backups. Để xem trước mà không xóa gì (ở đây với các giá trị ban đầu):
 
 ```sh
-$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-hourly 48 --keep-daily 30 --keep-weekly 52 --dry-run
+$PF --profile ops run --rm -T --user "$(id -u):$(id -g)" backup-tools backup-rotate --keep-hourly 48 --keep-daily 30 --keep-weekly 52 --keep-pre-purge 3 --dry-run
 ```
 
 - Nó giữ bản sao lưu theo lịch đã kiểm tra mới nhất của mỗi giờ trong `--keep-hourly` giờ, mỗi ngày trong
   `--keep-daily` ngày và mỗi tuần lịch trong `--keep-weekly` tuần lịch mới nhất có một bản (giờ, ngày và tuần ISO theo
   UTC; các khoảng chồng lên nhau), nên bản sao lưu theo lịch mới nhất luôn được giữ. Các bản sao lưu hằng ngày của các
   bản phát hành trước được tính là bản sao lưu theo lịch.
-- Nó kiểm tra mọi ứng viên trước. Một bản sao lưu theo lịch không qua kiểm tra không được tính và **không bao giờ bị
+- Trong các bản sao lưu trước purge đã kiểm tra, nó giữ `--keep-pre-purge` bản mới nhất và xóa các bản cũ hơn; hai
+  chính sách giữ lại không bao giờ tính bản sao lưu của nhau. Một bản sao lưu trước purge không bao giờ bị xoay vòng
+  bởi chính lần chạy của nó. Với một image từ trước khi có purge, mà chính sách sao lưu không có giá trị cho bản sao
+  lưu trước purge, việc xoay vòng để nguyên mọi bản sao lưu trước purge.
+- Nó kiểm tra mọi ứng viên trước. Một bản sao lưu không qua kiểm tra không được tính và **không bao giờ bị
   xóa**: `backup.sh` thoát với 4 và bạn xem xét nó (§9).
 - **Bản sao lưu pre-release và manual không bao giờ bị xoay vòng**: bạn xóa chúng sau khi xem xét (§9). Không công cụ
   nào từng xoay vòng hay xóa một thư mục lưu trữ.
 - Phần còn sót trong `.partial/` cũ hơn 24 giờ bị xóa.
 - Với các giá trị ban đầu, thư mục sao lưu chứa tối đa 130 bản sao lưu theo lịch (48 + 30 + 52, ít hơn khi các khoảng
-  chồng lên nhau). Hãy dự trù dung lượng cho chừng ấy bản dump, cộng các bản sao lưu pre-release và manual.
+  chồng lên nhau) và 3 bản sao lưu trước purge. Hãy dự trù dung lượng cho chừng ấy bản dump, cộng các bản sao lưu
+  pre-release và manual.
 
 Công cụ sao lưu của nền tảng mã hóa thư mục sao lưu và sao chép nó ra ngoài máy chủ, không bao giờ là bản sao tự
 làm: Hyper Backup với mã hóa phía máy khách trên NAS ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.3), restic
@@ -357,7 +374,11 @@ lưu thủ công.
 Các bản sao lưu không bao giờ chạy cùng lúc. Thư mục `<backup-dir>/.backup.lock` là khóa; tệp `owner` của nó chứa
 `host`, `pid`, `started_at`, `by` (`backup.sh` hoặc `release.sh`) và `name` của bản sao lưu hoặc `release`. Lần chạy
 thứ hai bị từ chối, không bao giờ xếp hàng: `backup_running` nghĩa là một bản sao lưu, hoặc một lần phát hành đang
-giữ khóa, đang diễn ra, nên hãy chờ. `release.sh` giữ khóa từ lúc tạm dừng ghi (hoặc từ bản sao lưu của nó) cho đến
+giữ khóa, đang diễn ra, nên hãy chờ. Ngoại lệ duy nhất là bản sao lưu trước purge của `archive.sh`, bản này chờ khóa
+(`--lock-wait-minutes`, §11); khi đó không lần phát hành nào có thể giữ khóa, vì `release.sh` từ chối khởi động khi
+`archive.sh` đang làm việc. Một bản sao lưu theo lịch bắt đầu trong lúc bản sao lưu trước purge đang chạy bị từ chối
+như trong lúc phát hành (một email báo lỗi; lần chạy kế tiếp sao lưu như bình thường). `release.sh` giữ khóa từ lúc
+tạm dừng ghi (hoặc từ bản sao lưu của nó) cho đến
 khi `backend` mới chạy. **Hãy bắt đầu một lần phát hành ngay sau một bản sao lưu theo lịch:** một bản sao lưu đang
 chạy sẽ chặn lần phát hành trước khi tạm dừng ghi mà chưa thay đổi gì (hãy bắt đầu lại khi bản sao lưu đã xong), và một
 bản sao lưu theo lịch bắt đầu trong lúc phát hành sẽ bị từ chối (mã thoát 1, kèm email báo lỗi của nó; lần phát hành tự
@@ -705,12 +726,27 @@ log của nó: hãy giữ lại các lỗi gần đây trước bằng
    lẫn bản sao lưu trước phát hành, giữ PartFlow ở trạng thái chặn ghi, và để chủ sở hữu quyết định giữa sửa tiến
    (forward fix) hoặc một kế hoạch khôi phục dữ liệu có kiểm toán.
 
+**Việc khôi phục và job lưu trữ lịch sử (Restores and the history archive job).** Trước khi khôi phục một bản sao lưu
+vào production (đường 3, việc khôi phục sang bản cài mới bên dưới, hoặc §8 Phát hiện của đối soát sau một lần purge),
+hãy tắt tác vụ lưu trữ lịch sử trong trình lập lịch của máy chủ (trên NAS: bỏ chọn **Enabled** trong Task Scheduler),
+và chỉ bật lại sau khi bạn đã kiểm tra các lần lưu trữ trong Administration → History archival & purge. Một database đã
+khôi phục giữ mỗi lần lưu trữ ở trạng thái của nó lúc dump của bản sao lưu bắt đầu:
+
+- Một lần lưu trữ ở `RUNNING` sẽ bị lần khởi động kế tiếp của job chuyển sang thất bại, và không có gì bị purge lại.
+  Vì vậy một lần purge được hoàn tác bằng cách khôi phục bản sao lưu trước purge của lần lưu trữ đó (§8, Phát hiện
+  của đối soát sau một lần purge), không bao giờ bằng một bản sao lưu muộn hơn.
+- Một lần lưu trữ ở `PURGING` được tiếp tục purge ở lần khởi động kế tiếp, trừ khi tác vụ bị tắt hoặc bản ghi sự cố
+  `<records-dir>/archive/reconcile-after-purge` còn tồn tại (§8). Một bản sao lưu giữ một lần lưu trữ ở `PURGING` khi
+  nó được tạo trong lúc purge (bản sao lưu mỗi giờ chạy khi một lần purge dài đang làm việc) hoặc khi một lần purge
+  đã dừng đang chờ được tiếp tục.
+
 ### Thủ tục path 3
 
 Đường 3 chỉ áp dụng khi hồ sơ phát hành cho thấy `writes_reopened_at: null` (lần phát hành dừng ở trạng thái tạm
 dừng ghi) hoặc chủ sở hữu ghi nhận rằng không có lần ghi sản xuất nào sau migration; nếu không thì đó là đường 4. Việc
 khôi phục vào production cần **sự phê duyệt của chủ sở hữu, được ghi vào `rollback.json` trước khi `backend` khởi
-động** trên database đã khôi phục; không có nó, thủ tục dừng sau `reconcile`, với PartFlow ở trạng thái chặn ghi.
+động** trên database đã khôi phục; không có nó, thủ tục dừng sau `reconcile`, với PartFlow ở trạng thái chặn ghi. Hãy
+tắt tác vụ lưu trữ lịch sử trước bước A (Việc khôi phục và job lưu trữ lịch sử, ở trên).
 
 Các giá trị của `.env.production` do Compose đọc và không có sẵn trong shell, nên mọi giá trị dưới đây được đặt tường
 minh. **Mỗi khối là một script: lưu nó vào thư mục hồ sơ phát hành và chạy bằng `sh -eu <file>`, không bao giờ dán
@@ -847,6 +883,10 @@ volume database **mới và rỗng**, rồi khôi phục một bản sao lưu v�
 10. Tiếp tục với bước HTTPS của hướng dẫn nền tảng (NAS: §9). Bỏ qua thiết lập lần đầu (first-run setup): database đã
     khôi phục đã có sẵn các Administrator. Các thiết bị Scan Station tiếp tục hoạt động khi tên miền truy cập giữ
     nguyên; với tên miền truy cập mới, hãy đăng ký lại chúng.
+11. Chỉ tạo (hoặc bật) tác vụ lưu trữ lịch sử (NAS: [`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8) sau khi bạn đã
+    kiểm tra các lần lưu trữ trong Administration → History archival & purge: một lần lưu trữ mà bản sao lưu giữ ở
+    `PURGING` sẽ được tiếp tục purge ở lần khởi động đầu tiên của tác vụ (Việc khôi phục và job lưu trữ lịch sử, ở
+    trên).
 
 Ghi lại khoảng dữ liệu bị mất: các lần ghi sau `dump_started_at` của bản sao lưu không có trong database đã khôi phục.
 
@@ -905,20 +945,21 @@ Dạng dùng khi phát triển nằm trong [`README.vi.md`](../../README.vi.md) 
 
 | Kiểm tra | Nó xác minh gì |
 | --- | --- |
-| (a) Current positions replay from Movement history | Các vị trí hiện tại bằng kết quả phát lại lịch sử Movement chưa bị đảo ngược. |
-| (b) Quantity Flow history and conservation | Mọi flow đang hoạt động hoặc đã đóng đều có lịch sử bảo toàn hợp lệ, cộng các quy tắc liên dòng của [`SLICE1_DATA_MODEL.vi.md`](../SLICE1_DATA_MODEL.vi.md) §17 trừ quy tắc dòng kiểm toán (audit-row). |
-| (c) Per-PN quantity balance | Số lượng đưa vào theo từng PN bằng các kết cục đang hoạt động, đã nhập kho, đã loại bỏ và đã đảo ngược của nó. |
+| (a) Current positions replay from Movement history | Các vị trí hiện tại bằng kết quả phát lại lịch sử Movement chưa bị đảo ngược; một flow có lịch sử đã bị một lần lưu trữ purge lấy trạng thái mong đợi từ bản ghi chuyển tiếp (carry-forward record) của nó (§11). |
+| (b) Quantity Flow history and conservation | Mọi flow đang hoạt động hoặc đã đóng đều có lịch sử bảo toàn hợp lệ, cộng các quy tắc liên dòng của [`SLICE1_DATA_MODEL.vi.md`](../SLICE1_DATA_MODEL.vi.md) §17 trừ quy tắc dòng kiểm toán (audit-row); một flow có lịch sử đã bị purge được kiểm tra qua bản ghi chuyển tiếp của nó. |
+| (c) Per-PN quantity balance | Số lượng đưa vào theo từng PN bằng các kết cục đang hoạt động, đã nhập kho, đã loại bỏ và đã đảo ngược của nó, kể cả các bản ghi chuyển tiếp của những flow đã bị purge. |
 | (d) Machine assigned quantities | Số lượng gán cho mỗi Machine bằng các flow trên đó. |
-| (e) Release evidence and Work Order status | `released_quantity` của mỗi demand suy ra từ bằng chứng `RECEIVED` của nó. |
-| (f) Allocations and Work Order completion | `allocated_quantity` của mỗi demand và `completed_at` của mỗi Work Order suy ra từ các phân bổ đang hoạt động; một phân bổ được cho phép vượt quá demand (`exceeds_demand`) không phải là phát hiện. |
-| (g) Retained Movements reference no purged row | Không Movement nào được giữ lại trỏ đến một dòng đã bị xóa hẳn (purged). |
-| (h) Append-only guards and database-role privileges intact | Các trigger và hàm bảo vệ có mặt, được bật và không đổi; `partflow_app` và `partflow_maintenance` giữ đúng các quyền (grants) của chúng (không `UPDATE`, `DELETE` hay `TRUNCATE` trên lịch sử chỉ-ghi-thêm), giữ các thuộc tính an toàn và không là thành viên của role nào; `PUBLIC` và các đặc quyền mặc định không chứa gì; và `session_replication_role` không phải `replica`. Nó không thấy được thay đổi của một superuser đã tắt một trigger rồi khôi phục lại sau đó (một giới hạn được chấp nhận). |
+| (e) Release evidence and Work Order status | `released_quantity` của mỗi demand suy ra từ bằng chứng `RECEIVED` của nó và từ các bản ghi chuyển tiếp của những flow đã bị purge. |
+| (f) Allocations and Work Order completion | `allocated_quantity` của mỗi demand và `completed_at` của mỗi Work Order suy ra từ các phân bổ đang hoạt động, và không PN nào được phân bổ vượt quá số lượng đã nhập kho của nó, kể cả số lượng đã nhập kho của những flow đã bị purge; một phân bổ được cho phép vượt quá demand (`exceeds_demand`) không phải là phát hiện. |
+| (g) Retained Movements reference no purged row | Việc purge của lưu trữ lịch sử Movement để lại các thành phần flow trọn vẹn: không flow nào có bản ghi đã purge còn Movement, không cạnh lineage nào nối một flow đã purge với một flow được giữ lại, mọi bản ghi đã purge thuộc về một lần lưu trữ đã bắt đầu purge, mọi bản ghi của một lần purge đã kết thúc đều đã được purge hoặc bỏ qua, và các số đếm purge của mỗi lần lưu trữ bằng số bản ghi đã purge của nó. |
+| (h) Append-only guards and database-role privileges intact | Các trigger và hàm bảo vệ có mặt, được bật và không đổi, kể cả row guard `trg_part_movements_guard_delete` của việc purge; `partflow_app` và `partflow_maintenance` giữ đúng các quyền (grants) của chúng (`partflow_app` không có `UPDATE`, `DELETE` hay `TRUNCATE` trên lịch sử chỉ-ghi-thêm; `partflow_maintenance` chỉ có `DELETE` trên `part_movements`, mà row guard giới hạn vào các dòng đã lưu trữ của một lần lưu trữ ở `PURGING`), giữ các thuộc tính an toàn và không là thành viên của role nào; `PUBLIC` và các đặc quyền mặc định không chứa gì; và `session_replication_role` không phải `replica`. Nó không thấy được thay đổi của một superuser đã tắt một trigger rồi khôi phục lại sau đó (một giới hạn được chấp nhận). |
 | (i) Hot list entries are active demand | Truy vấn Hot list của [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §5 không trả dòng nào. |
 | (j) Canonical identity under the running interpreter and database | PN chuẩn hóa, badge Worker không phân biệt hoa thường, quy tắc tiền tố Asset Tag và mọi ràng buộc dạng chuẩn đều đúng theo quy tắc sắp xếp của database đang chạy, phiên bản collation không đổi, và không khóa định danh nào bị trùng. |
 
-Kiểm tra (g) báo `not_applicable` cho đến khi có việc lưu trữ lịch sử Movement, và kiểm tra (h) báo `not_applicable`
-chỉ trên database không có các role của PartFlow (phát triển, kiểm thử, staging); cả hai đều trung lập đối với mã
-thoát. Trong production, thiếu một role là một phát hiện.
+Kiểm tra (h) báo `not_applicable` chỉ trên database không có các role của PartFlow (phát triển, kiểm thử, staging);
+điều này trung lập đối với mã thoát. Trong production, thiếu một role là một phát hiện. Ngay sau mỗi lần purge,
+`archive.sh` tự chạy đối soát đầy đủ (§11); một phát hiện khi đó là một sự cố (§8, Phát hiện của đối soát sau một lần
+purge).
 
 ### Sửa các phát hiện của kiểm tra (h) (Repairing check (h) findings)
 
@@ -996,6 +1037,10 @@ chúng vào ticket hay email. Không công cụ nào xóa chúng; hãy xóa bằ
 | `check.sh`: `FAIL backup_age` | Sao lưu theo lịch không chạy hoặc thất bại: kiểm tra tác vụ và email của nó, rồi chạy sao lưu thủ công (§3). |
 | `check.sh`: `FAIL disk_...` | Áp lực về database hoặc dung lượng lưu trữ, bên dưới. |
 | `check.sh`: `FAIL archival_proposal`, hoặc email báo lỗi của tác vụ lưu trữ | §11: dòng kiểm tra và email nêu tên phát hiện hoặc bước. |
+| `archive.sh` thoát với mã 4, hoặc từ chối với mã thoát 1 vì bản ghi sự cố tồn tại; hoặc `check.sh`: `FAIL archival_proposal reconcile_after_purge` | Đối soát sau một lần purge chưa kết thúc sạch: một sự cố, và job lưu trữ không làm việc với lần lưu trữ nào cho đến khi sự cố được đóng (Phát hiện của đối soát sau một lần purge, bên dưới). |
+| `archive.sh`: bản sao lưu trước purge thất bại | Không có gì bị xóa; lần khởi động hằng giờ kế tiếp chuyển lần lưu trữ sang `FAILED`. Sửa nguyên nhân (một bản sao lưu giữ khóa sao lưu lâu hơn `--backup-wait-minutes`, một khóa sao lưu cũ (§3), thư mục sao lưu thiếu dung lượng, một lỗi dump), rồi yêu cầu một lần lưu trữ mới (§11, Bản sao lưu trước purge). |
+| `archive.sh`: một lần lưu trữ `FAILED while purging` | Chỉ các thành phần flow trọn vẹn đã bị xóa, và biên nhận purge liệt kê chúng; đối soát đã chạy sau đó. Yêu cầu một lần lưu trữ mới cho phần còn lại (§11, Một lần lưu trữ thất bại). |
+| `archive.sh` thoát với mã 2: "the purge of run N stopped", lần lưu trữ ở lại `PURGING` | Một lỗi database tạm thời (mất kết nối, deadlock, hết thời gian chờ, máy chủ database tắt); lô đang chạy đã được rollback. Khi database trả lời trở lại, lần khởi động kế tiếp tiếp tục purge và đối soát khi nó kết thúc. Nếu nó cứ dừng lại, hãy kiểm tra database (§2). |
 | `check.sh` hoặc `release.sh`: một khóa cũ hơn 4 giờ, một bản phát hành khác đang giữ khóa, hoặc `backup_lock_stale` | Một lần chạy bị kill để lại khóa của nó: §3, Khóa sao lưu và khóa phát hành. |
 | `backup_running` | Một bản sao lưu, hoặc một lần phát hành đang giữ khóa sao lưu, đang chạy: chờ rồi chạy lại. |
 | Email của tác vụ theo lịch ghi `HOME is not set` | Thêm `HOME=/root` ở đầu phần script trong lệnh của tác vụ ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.5). |
@@ -1140,6 +1185,95 @@ lấy từ `$PF logs backend | grep "Setup token" | tail -n 1`).
   $PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -c BEGIN -c "SET LOCAL ROLE partflow_app" -c "UPDATE part_movements SET id = id WHERE false" -c ROLLBACK'
   ```
 
+### Phát hiện của đối soát sau một lần purge (Reconcile finding after a purge)
+
+Ngay sau mỗi lần purge lịch sử Movement, `archive.sh` chạy đối soát đầy đủ (§11). Khi nó không kết thúc sạch (một phát
+hiện, một lỗi, hoặc không có báo cáo hoàn chỉnh), `archive.sh` thoát với mã 4, việc này gửi email báo lỗi, và ghi bản
+ghi sự cố `<records-dir>/archive/reconcile-after-purge`: lần lưu trữ, kết quả, các kiểm tra thất bại và đường dẫn của
+báo cáo. Khi đó `check.sh` báo `FAIL archival_proposal reconcile_after_purge` cho đến khi bản ghi bị xóa. Khi bản ghi
+còn tồn tại, job dừng ở trạng thái an toàn (fail closed): mỗi lần khởi động chỉ chạy `recover` và `status`, không làm
+việc với lần lưu trữ nào (không export, kiểm tra, sao chép, bản sao lưu trước purge hay purge, kể cả việc tiếp tục purge
+một lần lưu trữ bị bỏ lại ở `PURGING`) và thoát với mã 1, nên tác vụ lưu trữ lịch sử gửi một email báo lỗi mỗi giờ cho
+đến khi sự cố được đóng. Việc purge có thể đã làm hỏng lịch sử hoặc số lượng, nên hãy xử lý nó như một sự cố:
+
+1. **Ngừng yêu cầu lần lưu trữ.** Bản thân job không làm việc với lần lưu trữ nào khi bản ghi còn tồn tại. Báo mọi
+   người có quyền **Run history archival and purge** không yêu cầu lần lưu trữ nào, và hủy một lần đã được yêu cầu
+   trong lúc đó (Cancel trong Administration → History archival & purge, làm được khi lần lưu trữ ở `APPROVED` hoặc
+   `WAITING_FOR_COPY`). Để dừng các email báo lỗi mỗi giờ, hãy tắt tác vụ lưu trữ lịch sử trong trình lập lịch của
+   máy chủ (trên NAS: bỏ chọn **Enabled** trong Task Scheduler). Giữ bản sao lưu trước purge, thư mục lưu trữ và biên
+   nhận purge: chúng là bằng chứng và là đường quay lại.
+2. **Khi đối soát không chạy được hoặc kết thúc bằng lỗi**, hãy chạy lại nó bằng tay (§7, Chạy đối soát). Khi nó sạch,
+   lần purge được xác nhận: đóng sự cố (bước 5). Khi nó có phát hiện, đi tiếp.
+3. **So sánh các phát hiện với biên nhận.** Báo cáo `<records-dir>/archive/<UTC>/reconcile.json` (đường dẫn của nó nằm
+   trong bản ghi sự cố và trong email) nêu kiểm tra, thực thể và Part Number của mỗi phát hiện. Biên nhận purge
+   `<archive-dir>/<archive name>.purged.json` liệt kê mọi thành phần của lần lưu trữ với kết cục (`PURGED`, `SKIPPED`
+   hoặc `RETAINED`), các Part Number, các flow và số Movement của nó. Các lệnh sau liệt kê các Part Number của những
+   thành phần đã purge và của các phát hiện (không bao giờ đính kèm một báo cáo vào ticket hay email: phát hiện của
+   kiểm tra (j) có thể chứa giá trị badge của Worker):
+
+   ```sh
+   jq -r '.components[] | select(.outcome == "PURGED") | .part_numbers[]' "<archive-dir>/<archive name>.purged.json" | sort -u
+   jq -r '.checks[] | select(.status != "pass") | .id + " " + .title' "<report>"
+   jq -r '.checks[].findings[] | .part_number // empty' "<report>" | sort -u
+   ```
+
+   Hãy so sánh thêm với lần đối soát theo lịch gần nhất trước lần purge (`~/partflow-monitoring/reconcile/`). Một phát
+   hiện đã có từ trước, trên một Part Number mà biên nhận không liệt kê là `PURGED`, không đến từ lần purge: đó là một
+   sự cố đã có (§7, Quy tắc vận hành). Một phát hiện mới trên một Part Number đã purge, hoặc bất kỳ phát hiện nào của
+   kiểm tra (g), chỉ về lần purge.
+4. **Chủ sở hữu quyết định: sửa tiến (fix forward), hay khôi phục bản sao lưu trước purge.**
+   - Sửa tiến giữ mọi thay đổi đã thực hiện kể từ lần purge. Không bao giờ sửa lịch sử hoặc các tổng đã lưu bằng tay
+     (§7, Quy tắc vận hành); chủ sở hữu quyết định từng lần sửa.
+   - Khôi phục bản sao lưu trước purge mang các dòng đã purge trở lại, nhưng **bỏ mất mọi thay đổi được ghi nhận kể từ
+     khi bản dump của nó bắt đầu** (`dump_started_at` trong `manifest.json` của bản sao lưu, cũng là
+     `pre_purge_backup.dump_started_at` trong biên nhận), vì production vẫn tiếp tục trong và sau lần purge. Chỉ chọn
+     cách này khi các phát hiện cho thấy lần purge đã làm hỏng lịch sử hoặc số lượng mà không thể sửa tiến, và chủ sở
+     hữu chấp nhận mất mát đó; hãy ghi lại quyết định và khoảng thời gian bị mất.
+
+   **Bản sao lưu nào (Which backup).** Hãy khôi phục bản sao lưu trước purge mà biên nhận nêu tên, không bao giờ một
+   bản sao lưu muộn hơn, và tắt tác vụ lưu trữ lịch sử trước nếu bước 1 chưa làm (§6, Việc khôi phục và job lưu trữ
+   lịch sử). Một bản sao lưu muộn hơn, như bản sao lưu mỗi giờ được tạo trong lúc purge chạy, giữ lần lưu trữ ở
+   `PURGING`, và job tiếp tục purge đó ở lần khởi động đầu tiên sau khi bản ghi sự cố bị xóa và tác vụ được bật. Bản sao
+   lưu trước purge giữ lần lưu trữ ở `RUNNING`: lần khởi động kế tiếp chuyển nó sang thất bại, và không có gì bị purge
+   lại.
+
+   **Cách khôi phục.** Làm theo Thủ tục path 3 (§6) với các thay đổi sau. Thay cho guard bản ghi phát hành của bước A,
+   hãy dừng ghi (`$PF stop backend`, và kiểm tra rằng `$PF ps --status running -q backend` không in gì), rồi kiểm tra
+   bản sao lưu bằng `(cd "<backup-dir>/<NAME>" && sha256sum -c SHA256SUMS)` và
+   `$PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" backup-tools backup-verify "<NAME>"`, trong đó
+   `<NAME>` là bản sao lưu trước purge mà biên nhận nêu tên. Chạy B1 với `BPATH=<backup-dir>/<NAME>`, và B2 với `REC` là
+   một thư mục sự cố mới mà bạn tạo trước (`mkdir <records-dir>/<UTC>-restore-<NAME>`); ghi sự phê duyệt của chủ sở hữu
+   vào `restore.json` ở đó (các trường của `rollback.json`) trước B3; chạy B3 với `PREV` là bản phát hành đang chạy,
+   tức tag trong `.env.production`: bản phát hành không đổi, và thư mục mã nguồn giữ nguyên. Database đã bị purge giữ
+   nguyên tên và nội dung để phân tích.
+
+   **Sau khi khôi phục**, database giữ lần lưu trữ ở `RUNNING`, như lúc bản sao lưu được tạo. Hãy chạy
+   `deploy/production/pf archive` một lần: bước `recover` của nó chuyển lần lưu trữ sang `FAILED` ("…also after a
+   restore of its pre-purge backup). Nothing was deleted; request a new run."), nên nó không bao giờ bị purge lại; một
+   lần lưu trữ thất bại là kết thúc, và chỉ một yêu cầu mới mới khởi động một lần lưu trữ mới, với export, bản sao và
+   bản sao lưu trước purge của riêng nó. `archive.sh` thoát với mã 3 cho lần lưu trữ đó và nói "Nothing was deleted in
+   this database", điều đúng với database đã khôi phục: nó lại có mọi Movement đã bị purge. Vì bản ghi sự cố vẫn còn,
+   lần khởi động đó không làm việc với lần lưu trữ nào khác. `check.sh` báo `last_run_failed` cho lần lưu trữ đó cho
+   đến khi một lần lưu trữ sau kết thúc.
+
+   **Những gì vẫn báo về lần purge.** Thư mục lưu trữ `<archive-dir>/<archive name>/`, biên nhận
+   `<archive name>.purged.json` của nó (trạng thái `COMPLETED` hoặc `COMPLETED_WITH_SKIPS`, kết quả `PURGED`) và các
+   bản sao của chúng trong thư mục sao chép được giữ làm bằng chứng: hãy để nguyên chúng. `recover` và `status` chỉ đọc
+   biên nhận của những lần lưu trữ đã ghi một SHA-256 biên nhận, và lần lưu trữ đã khôi phục không có, nên không gì báo
+   rằng biên nhận này nay mô tả database mà việc khôi phục đã thay thế: hãy ghi điều đó lại trong thư mục sự cố, cạnh
+   `restore.json`. Một lần lưu trữ sau sẽ lưu trữ lại cùng lịch sử đó vào một thư mục mới. Số thứ tự lần lưu trữ có thể
+   lặp lại sau một lần khôi phục; thời gian trong tên thư mục phân biệt các thư mục.
+5. **Đóng sự cố.** Khi quyết định của chủ sở hữu đã được thực hiện và đối soát (§7) sạch, hãy kiểm tra các lần lưu
+   trữ trong Administration → History archival & purge (một lần lưu trữ ở `PURGING` được tiếp tục purge ở lần khởi
+   động kế tiếp), xóa bản ghi sự cố, và chỉ khi đó mới bật lại tác vụ nếu bạn đã tắt nó:
+
+   ```sh
+   rm ~/partflow-deployments/archive/reconcile-after-purge
+   ```
+
+   Chỉ việc xóa bản ghi mới đóng sự cố: lần khởi động kế tiếp làm việc với các lần lưu trữ trở lại, ví dụ tiếp tục
+   purge một lần lưu trữ bị bỏ lại ở `PURGING`. Các báo cáo vẫn nằm trong thư mục hồ sơ của chúng.
+
 ### Áp lực về database hoặc dung lượng lưu trữ (Database or storage pressure)
 
 - Chặn các lần ghi mới trước khi đĩa đầy (tạm dừng ghi, §5), và giữ lại log cùng số liệu.
@@ -1150,9 +1284,10 @@ lấy từ `$PF logs backend | grep "Setup token" | tail -n 1`).
 - Quy tắc về dung lượng: một bản sao lưu cần dung lượng trống gấp hai lần dump mới nhất cộng phần dự phòng trong thư
   mục sao lưu; một lần khôi phục theo đường 3 cần kích thước database cộng hai lần dump cộng 1 GiB trên volume
   database (§6); một khóa sao lưu cũ chặn sao lưu và phát hành cho đến khi nó được xóa (§3).
-- Mở rộng dung lượng lưu trữ. Job lưu trữ lịch sử hiện nay chỉ xuất lịch sử Movement ra các bản lưu trữ và không xóa
-  gì (§11), nên nó không giải phóng dung lượng database; việc xóa hẳn (purge) đã được lên kế hoạch
-  ([`../IMPLEMENTATION_ROADMAP.vi.md`](../IMPLEMENTATION_ROADMAP.vi.md), Phase 16).
+- Mở rộng dung lượng lưu trữ. History archival & purge (§11) xóa lịch sử Movement cũ khỏi database, nhưng việc đó chỉ
+  giải phóng các dòng bên trong bảng cho Movement mới, nên database ngừng lớn lên mà các tệp của nó không nhỏ đi; dung
+  lượng đĩa chỉ được trả lại bằng `VACUUM FULL part_movements`, lệnh này cần dung lượng trống lớn bằng bảng (§11, Lấy
+  lại dung lượng đĩa sau một lần purge). Mỗi lần purge cũng thêm một bản sao lưu trước purge vào thư mục sao lưu.
 - Chạy đối soát trước khi mở lại việc ghi.
 
 ### Máy chủ hỏng (Host failure)
@@ -1173,17 +1308,19 @@ phục chấp nhận được; các giá trị ở đây là ví dụ làm việ
 | Khi nào | Tác vụ |
 | --- | --- |
 | Mỗi 15 phút (tự động) | `check.sh`: tình trạng, các lần khởi động lại, đĩa, chứng chỉ, tuổi bản sao lưu, lỗi backend và trạng thái lưu trữ (§2). Một thất bại không đổi được nhắc lại mỗi 6 giờ. |
-| Mỗi 5 phút (tự động) | `archive.sh --scheduled`: mỗi giờ một lần, vào Start minute của Administration → History archival & purge, job lưu trữ lịch sử xử lý một lần lưu trữ đã được yêu cầu (§11). |
-| Hằng ngày | Sao lưu theo lịch (mỗi giờ) và đối soát theo lịch lúc 04:00 tự chạy. Đọc mọi email báo lỗi, kể cả của bản sao ngoài máy chủ; mã thoát 4 của một bản sao lưu bao gồm cả trường hợp một bản sao lưu theo lịch không qua kiểm tra. |
+| Mỗi 5 phút (tự động) | `archive.sh --scheduled`: mỗi giờ một lần, vào Start minute của Administration → History archival & purge, job lưu trữ lịch sử xử lý một lần lưu trữ đã được yêu cầu: export, kiểm tra, bản sao ngoài máy chủ, bản sao lưu trước purge, purge và đối soát sau đó (§11). |
+| Hằng ngày | Sao lưu theo lịch (mỗi giờ) và đối soát theo lịch lúc 04:00 tự chạy. Đọc mọi email báo lỗi, kể cả của bản sao ngoài máy chủ; mã thoát 4 của một bản sao lưu bao gồm cả trường hợp một bản sao lưu theo lịch hoặc trước purge không qua kiểm tra, và mã thoát 4 của job lưu trữ lịch sử là một sự cố (§8). |
 | Hằng tuần | Xem xét mức tăng của database (`~/partflow-monitoring/growth.tsv`) và `docker stats --no-stream`. Xem xét các lần đăng nhập thất bại và quyền bị từ chối: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` và `refusal.code` phân biệt đăng nhập bị từ chối hoặc bị khóa, từ chối quyền, `station_device_required`, `station_device_mismatch` và `csrf_rejected`). Kiểm tra các bản cập nhật bảo mật đang chờ của máy chủ. |
-| Hằng tháng | Xác nhận bản sao ngoài máy chủ của mọi lần lưu trữ đang chờ việc đó (§11). Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
+| Hằng tháng | Xác nhận bản sao ngoài máy chủ của mọi lần lưu trữ đang chờ việc đó (§11). Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch hoặc trước purge mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
 | Hằng quý, và sau một thay đổi schema lớn | Diễn tập khôi phục (§4); so sánh các thời gian `restore_to_ready` và `total` của nó với thời gian nhà máy có thể làm việc mà không có PartFlow. |
 | Trước khi đổi image PostgreSQL hoặc glibc của máy chủ | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Trước mỗi lần phát hành | Xem xét các migration, quyết định quay lui và các kiểm tra (§5); `release.sh` tạo bản sao lưu. |
 
 **Xóa các bản sao lưu và báo cáo cũ.** Không công cụ nào xóa bản sao lưu pre-release, bản sao lưu manual, bản sao lưu
-theo lịch không qua kiểm tra, hay báo cáo đối soát. Sau khi xem xét, xóa từng cái theo tên; không bao giờ xóa bản sao
-lưu theo lịch đã kiểm tra mới nhất hoặc bất cứ thứ gì trong thư mục lưu trữ:
+theo lịch hoặc trước purge không qua kiểm tra, hay báo cáo đối soát; việc xoay vòng tự giữ các bản sao lưu trước purge
+mới nhất (§3). Sau khi xem xét, xóa từng cái theo tên; không bao giờ xóa bản sao lưu theo lịch đã kiểm tra mới nhất,
+bản sao lưu trước purge của một sự cố đang mở (§8, Phát hiện của đối soát sau một lần purge) hoặc bất cứ thứ gì trong
+thư mục lưu trữ:
 
 ```sh
 rm -r "<backup-dir>/<NAME>"
@@ -1210,8 +1347,10 @@ nó, §2).
 
   Sau đó kiểm tra health (§2). Lệnh `up -d backend` thông thường không nhận mật khẩu mới, vì container không được
   tạo lại, và chạy `db-roles` trong khi `backend` đang phục vụ làm các kết nối mới của nó thất bại. Với
-  `partflow_maintenance_password`, thay tệp đó và chỉ chạy lệnh `db-roles`, tránh thời điểm Start minute của job lưu
-  trữ lịch sử: chỉ job một lần (one-shot) đó dùng role này (§11), nên không cần tạm dừng ghi.
+  `partflow_maintenance_password`, thay tệp đó và chỉ chạy lệnh `db-roles` khi job lưu trữ lịch sử không làm việc
+  (không có `~/partflow-deployments/.archive.lock`), tránh thời điểm Start minute của nó: chỉ job một lần (one-shot) đó
+  dùng role này (§11), nên không cần tạm dừng ghi. Một lần purge không còn kết nối được tới database thì ở lại
+  `PURGING`, và lần khởi động kế tiếp tiếp tục nó.
 - **Mật khẩu chủ sở hữu** (`postgres_password`): đổi trong database trước, rồi thay tệp. Không cần khởi động lại,
   vì chỉ `migrate` và `db-roles` chạy một lần đọc nó.
 
@@ -1231,8 +1370,10 @@ nó, §2).
 ## 10. Xóa vĩnh viễn dữ liệu thử nghiệm
 
 Lịch sử production chỉ được ghi thêm (append-only): bản thân PartFlow không bao giờ xóa một Work Order đã có lịch sử
-sản xuất, một Movement hay một allocation ([`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md), Administrative Archival
-and Purge). Lệnh `pf delete-permanently` là ngoại lệ duy nhất, và chỉ dành cho một trường hợp: các Work Order và Part
+sản xuất hay một allocation, và chỉ xóa Movement qua việc purge của History archival & purge, việc này xóa lịch sử
+Movement đã lưu trữ khi bản lưu trữ của nó đã được sao chép ra ngoài máy chủ và một bản sao lưu trước purge đã được tạo
+(§11; [`../PROJECT_PROFILE.md`](../PROJECT_PROFILE.md), Administrative Archival and Purge). Lệnh
+`pf delete-permanently` là ngoại lệ còn lại, và chỉ dành cho một trường hợp: các Work Order và Part
 Number mà chủ sở hữu đã nhập **chỉ để thử nghiệm** trên production. Lệnh xóa chúng như thể chúng chưa từng được nhập
 và giữ lại một dòng audit cho mỗi Work Order và mỗi Part Number đã xóa. Đây là công cụ tạm thời: chức năng xóa ngay
 trong PartFlow, dành cho Super User, sẽ được thiết kế sau cùng với việc lưu trữ và dọn lịch sử (history archival and
@@ -1299,6 +1440,7 @@ Lệnh từ chối, không xóa gì và nêu tên từng liên kết khi dữ li
 | `stock_needed` | Số lượng đã nhập kho của các flow cần xóa vẫn cần cho các allocation của các Work Order còn lại. | Đảo ngược (reverse) các allocation đó trong PartFlow trước, hoặc xóa luôn các Work Order đó. |
 | `allocation_command_shared`, `allocation_reversal_link` | Một allocation, hoặc lần đảo ngược của nó, cũng liên quan đến một demand line còn lại. | Xóa Work Order đó trong cùng lệnh, hoặc giữ dữ liệu. |
 | `movement_command_shared`, `movement_reversal_link`, `route_snapshot_shared`, `movement_references_deleted_data` | Một lệnh sản xuất, một lần Undo, một bản sao Assigned Route hoặc bản ghi của một Movement cũng liên quan đến một flow còn lại. | Xóa Work Order của flow đó trong cùng lệnh, hoặc giữ dữ liệu. |
+| `archived_history` | Lịch sử của một flow cần xóa đã được một lần lưu trữ lưu trữ (§11), và có thể đã bị purge: lệnh này không bao giờ xóa lịch sử đã lưu trữ. | Giữ dữ liệu. |
 | `owner_role_required` | Lệnh không chạy bằng database role chủ sở hữu. | Chạy nó qua `pf` hoặc service `db-roles`. |
 
 ### Mã thoát
@@ -1311,12 +1453,15 @@ Lệnh từ chối, không xóa gì và nêu tên từng liên kết khi dữ li
 
 ## 11. Lưu trữ lịch sử (History archival)
 
-PartFlow chuyển lịch sử Movement cũ ra khỏi database vào các tệp lưu trữ: đó là History archival & purge
-([`../PROJECT_PROFILE.vi.md`](../PROJECT_PROFILE.vi.md), Administrative Archival and Purge). **Bước xây dựng hiện tại
-chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì:** mỗi lần lưu trữ (run) kết thúc ở `COMPLETED` với kết quả
-`EXPORT_ONLY` (chỉ xuất), hoặc ở `NOTHING_ELIGIBLE`, `CANCELLED` hay `FAILED`, và lịch sử Movement vẫn ở trong
-database. Việc xóa hẳn (purge), bản sao lưu trước đó, các yêu cầu xóa và xem, và các lần lưu trữ tự động là những bước
-xây dựng sau.
+PartFlow chuyển lịch sử Movement cũ ra khỏi database vào các tệp lưu trữ rồi xóa nó khỏi database: đó là History
+archival & purge ([`../PROJECT_PROFILE.vi.md`](../PROJECT_PROFILE.vi.md), Administrative Archival and Purge). Một lần
+lưu trữ (run) xuất lịch sử Movement của các flow đã đóng cũ hơn mốc cắt (cutoff) của nó vào một thư mục lưu trữ, kiểm
+tra bản lưu trữ, sao chép nó ra ngoài máy chủ, tạo một bản sao lưu database trước purge, rồi **purge** (xóa hẳn): nó
+xóa các Movement đã lưu trữ khỏi database và giữ một bản ghi chuyển tiếp (carry-forward record) cho mỗi flow đã lưu
+trữ, để mọi số lượng, trạng thái và kiểm tra vẫn chính xác. Sau khi purge, lịch sử đó nằm trong thư mục lưu trữ và bản
+sao ngoài máy chủ của nó (và trong các bản sao lưu trước purge còn được giữ), không còn trong database; các lệnh có lịch
+sử đã được lưu trữ không thể hoàn tác (Undo) được nữa. Các lần lưu trữ tự động, các yêu cầu xóa và xem, và các nhóm tùy
+chọn là những bước xây dựng sau.
 
 Một người dùng có quyền **Run history archival and purge** đặt thời hạn lưu giữ và các thiết lập khác, xem bản xem
 trước và yêu cầu một lần lưu trữ trong **Administration → History archival & purge**; yêu cầu chính là sự phê duyệt.
@@ -1333,21 +1478,55 @@ hằng giờ đầu tiên đến vào Start minute kế tiếp. `deploy/producti
 giờ nào.
 
 Phần việc hằng giờ chạy các bước sau trong dịch vụ một lần (one-shot) `maintenance`, dịch vụ này kết nối bằng role
-database bảo trì (`partflow_maintenance`, được đọc lịch sử và ghi các bản ghi lưu trữ nhưng không bao giờ xóa) và là
-dịch vụ duy nhất mount thư mục lưu trữ:
+database bảo trì (`partflow_maintenance`, được đọc lịch sử, ghi các bản ghi lưu trữ và chỉ được xóa Movement qua việc
+purge: row guard `trg_part_movements_guard_delete` chỉ cho phép đúng các dòng đã lưu trữ của một lần lưu trữ ở
+`PURGING`) và là dịch vụ duy nhất mount thư mục lưu trữ:
 
-1. `recover`: một lần lưu trữ bị bỏ lại ở `RUNNING` bởi một job đã dừng (khởi động lại, mất điện) trở thành `FAILED`,
-   và các thư mục dở dang của những lần đã kết thúc được xóa khỏi `.partial/`.
-2. `next`: lần lưu trữ cần xử lý, nếu có.
-3. Với một lần đã được phê duyệt: `export` ghi bản lưu trữ vào `<archive-dir>/.partial/`, `verify` đọc lại mọi tệp,
-   so sánh với database và công bố thư mục `<archive-dir>/run-<id>-<giờ UTC>/`, và `copy` sao chép nó sang thư mục
-   sao chép ngoài máy chủ và kiểm tra bản sao (Bản sao ngoài máy chủ, bên dưới). Khi không có gì đủ điều kiện, lần lưu
-   trữ kết thúc ở `NOTHING_ELIGIBLE` sau bước export.
-4. Với một lần đang chờ bản sao: chạy lại `copy`, bước này hoàn tất lần lưu trữ khi bản sao đã được tạo hoặc xác nhận.
+1. `recover`: một lần lưu trữ bị bỏ lại ở `RUNNING` bởi một job đã dừng (khởi động lại, mất điện), hoặc có bản sao
+   lưu trước purge thất bại, trở thành `FAILED`; các thư mục và tệp biên nhận dở dang của những lần đã kết thúc được
+   xóa khỏi `.partial/`; và một biên nhận purge còn thiếu trong thư mục sao chép được sao chép lại vào đó. Một lần lưu
+   trữ bị bỏ lại ở `PURGING` không bị đụng đến: việc purge của nó được tiếp tục bên dưới. Khi `recover` không kết thúc
+   với mã thoát 0, không lần lưu trữ nào được xử lý trong lần khởi động đó (chỉ `status` chạy). Cũng vậy khi bản ghi sự
+   cố `<records-dir>/archive/reconcile-after-purge` còn tồn tại (§8, Phát hiện của đối soát sau một lần purge): lần
+   khởi động khi đó chỉ chạy `recover` và `status`, không làm việc với lần lưu trữ nào, kể cả việc tiếp tục purge một
+   lần lưu trữ bị bỏ lại ở `PURGING`, và thoát với mã 1 (mã 3 khi `recover` đã chuyển một lần lưu trữ sang thất bại).
+2. `next`, lặp lại sau mỗi bước: lần lưu trữ cần xử lý và bước kế tiếp của nó. Mọi bước của một lần lưu trữ có thể
+   diễn ra trong một lần khởi động.
+3. Bước mà `next` nêu:
+   - `export` ghi bản lưu trữ vào `<archive-dir>/.partial/`. Khi không có gì đủ điều kiện, lần lưu trữ kết thúc ở
+     `NOTHING_ELIGIBLE`.
+   - `verify` đọc lại mọi tệp, so sánh với database và công bố thư mục `<archive-dir>/run-<id>-<giờ UTC>/`. Một thành
+     phần đã thay đổi kể từ lúc export bị bỏ qua và ở lại trong database; khi mọi thành phần đều đã thay đổi, lần lưu
+     trữ kết thúc ở `COMPLETED_WITH_SKIPS` với kết quả `NOTHING_PURGED`, không cần bản sao hay bản sao lưu.
+   - `copy` sao chép bản lưu trữ sang thư mục sao chép ngoài máy chủ và kiểm tra bản sao, hoặc chấp nhận một xác nhận
+     bản sao; nếu không có cả hai, lần lưu trữ chờ ở `WAITING_FOR_COPY` (Bản sao ngoài máy chủ, bên dưới).
+   - `backup`: bản sao lưu trước purge (bên dưới). `next` chỉ giao bước này sau khi kiểm tra rằng User đã yêu cầu lần
+     lưu trữ vẫn đang hoạt động và vẫn giữ Run history archival and purge; nếu không, lần lưu trữ trở thành `FAILED` và
+     không có gì bị xóa.
+   - `purge` với bản sao lưu đó: lần lưu trữ trở thành `PURGING`, và các Movement đã lưu trữ của nó bị xóa theo từng lô
+     gồm các thành phần flow trọn vẹn, tối đa **Movements per purge batch** và **Part Numbers per purge batch** của
+     Administration (ban đầu 50,000 và 20). Mỗi lô là một transaction dưới các khóa của các Part Number của nó; một
+     thành phần đã thay đổi kể từ lúc export bị bỏ qua và ở lại. Biên nhận purge
+     `<archive-dir>/<archive name>.purged.json` được ghi (và được sao chép sang thư mục sao chép), và lần lưu trữ kết
+     thúc ở `COMPLETED` (kết quả `PURGED`) hoặc `COMPLETED_WITH_SKIPS`. Một lỗi database tạm thời trong lúc purge (mất
+     kết nối, deadlock, lỗi serialization, hết thời gian chờ khóa hoặc câu lệnh, máy chủ database tắt) rollback lô đang
+     chạy và để lần lưu trữ ở lại `PURGING`; lệnh purge thoát với mã 2. Một lần lưu trữ bị một lần khởi động trước bỏ
+     lại ở `PURGING` (do một lỗi như vậy, hoặc do khởi động lại) được tiếp tục chỉ bằng `purge`, không cần bản sao lưu
+     mới: chỉ các thành phần trọn vẹn từng bị xóa. Mọi thất bại khác trong lúc purge (số bị xóa khác với các bản ghi,
+     guard từ chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ) chuyển lần lưu trữ sang `FAILED`, kèm biên
+     nhận của nó (Một lần lưu trữ thất bại, bên dưới).
+4. Sau một lần purge đã kết thúc, hoặc đã thất bại khi lần lưu trữ ở `PURGING`: đối soát đầy đủ (§7), trong một
+   container `backend` dùng một lần với role database của ứng dụng. Khi nó không kết thúc sạch, đó là một sự cố (§8,
+   Phát hiện của đối soát sau một lần purge). Một lần purge thoát với mã 2 không được đối soát trong lần khởi động đó:
+   lần khởi động kế tiếp tiếp tục nó và đối soát khi nó kết thúc. Một lần khởi động không bao giờ bắt đầu thêm một lần
+   lưu trữ khác sau một lần purge.
 5. `status`: lần lưu trữ đang mở, lần đã kết thúc gần nhất và dung lượng trống, cho việc giám sát.
 
-Một lần lưu trữ lớn đầu tiên có thể kéo dài; các lần khởi động sau khi đó sẽ chờ. Start minute thay đổi có hiệu lực từ
-phần việc hằng giờ kế tiếp.
+Production vẫn tiếp tục trong một lần lưu trữ: bước export đọc một snapshot database, và mỗi lô purge chỉ giữ các khóa
+của các Part Number của nó trong transaction của chính nó. Một lần lưu trữ lớn đầu tiên có thể kéo dài; các lần khởi
+động sau khi đó sẽ chờ. Start minute thay đổi có hiệu lực từ phần việc hằng giờ kế tiếp. **Hãy chọn Start minute**
+tránh xa bản sao lưu hằng giờ ở phút 0, vì bản sao lưu trước purge chờ một bản sao lưu đang chạy, và tránh xa các thời
+điểm bạn cài bản phát hành: một bản phát hành bị từ chối khi job đang làm việc, và một lần purge có thể kéo dài.
 
 **Mã thoát của `archive.sh`.** Email báo lỗi của tác vụ trên máy chủ là cảnh báo. Khi thành công, nó in một dòng:
 `NOT_DUE`, `DEFERRED archive_running` (lần khởi động trước vẫn đang làm phần việc hằng giờ của nó), hoặc
@@ -1356,28 +1535,31 @@ phần việc hằng giờ kế tiếp.
 | Mã thoát | Ý nghĩa | Cần làm gì |
 | --- | --- | --- |
 | 0 | Xong, hoặc không có gì đến hạn. | Không cần gì. |
-| 1 | Bị từ chối, không có gì thay đổi: một bản phát hành đang chạy, một `archive.sh` khác giữ khóa lưu trữ, hoặc một lệnh history-archive khác đang chạy. | Không cần gì: lần khởi động của giờ sau sẽ thử lại. Nếu bị từ chối lặp lại: Các khóa, bên dưới. |
-| 2 | Không thể chạy: cấu hình, Docker hoặc database, hoặc một bước có kết quả không xác định. | Đọc email; sửa nguyên nhân. Một lần lưu trữ bị bỏ lại ở `RUNNING` sẽ được bước `recover` của lần khởi động sau chuyển sang thất bại. |
+| 1 | Bị từ chối, không có gì thay đổi: một bản phát hành đang chạy, một `archive.sh` khác giữ khóa lưu trữ, một lệnh history-archive khác đang chạy, hoặc bản ghi sự cố của một lần đối soát sau purge còn tồn tại. | Không cần gì: lần khởi động của giờ sau sẽ thử lại. Nếu bị từ chối lặp lại: Các khóa, bên dưới; bản ghi sự cố: §8, Phát hiện của đối soát sau một lần purge. |
+| 2 | Không thể chạy: cấu hình, Docker hoặc database, hoặc một bước có kết quả không xác định; hoặc bản sao lưu trước purge thất bại; hoặc một lần purge dừng vì một lỗi database tạm thời (lần lưu trữ ở lại `PURGING`). | Đọc email; sửa nguyên nhân. Một lần lưu trữ bị bỏ lại ở `RUNNING` sẽ được bước `recover` của lần khởi động sau chuyển sang thất bại (khi đó hãy yêu cầu một lần lưu trữ mới); một lần lưu trữ bị bỏ lại ở `PURGING` được lần khởi động sau tiếp tục, và lần đó đối soát khi việc purge kết thúc. |
 | 3 | Một lần lưu trữ thất bại: nó hiện là `FAILED`. | Một lần lưu trữ thất bại, bên dưới. |
+| 4 | Đối soát sau một lần purge phát hiện sai lệch, kết thúc bằng lỗi hoặc không chạy được. | Một sự cố: §8, Phát hiện của đối soát sau một lần purge. Cho đến khi bản ghi của nó bị xóa, mọi lần khởi động đều từ chối làm việc với lần lưu trữ (mã thoát 1). |
 
-Một lần khởi động theo lịch chỉ báo một lần từ chối hoặc thất bại một lần cho giờ của nó, không bao giờ ở mỗi lần khởi
-động 5 phút. Báo cáo của một lần làm việc hằng giờ đã làm gì đó hoặc thất bại nằm trong `<records-dir>/archive/<UTC>/`
-(§1).
+`archive.sh --help` liệt kê các tùy chọn của nó; `--backup-wait-minutes N` (0 đến 1440, mặc định 60) là thời gian bản
+sao lưu trước purge chờ một bản sao lưu khác. Một lần khởi động theo lịch chỉ báo một lần từ chối hoặc thất bại một lần
+cho giờ của nó, không bao giờ ở mỗi lần khởi động 5 phút. Báo cáo của một lần làm việc hằng giờ đã làm gì đó hoặc thất
+bại nằm trong `<records-dir>/archive/<UTC>/` (§1).
 
 **Các khóa (Locks).** `archive.sh` giữ `<records-dir>/.archive.lock` (tệp `owner` của nó ghi máy chủ, mã tiến trình
-(pid), thời điểm bắt đầu, `archive.sh`, mã lần khởi động (boot id) của kernel và thời điểm bắt đầu của tiến trình
-theo cách kernel đếm) chỉ trong phần việc hằng giờ, không bao giờ khi một lần lưu trữ chỉ đang chờ
-xác nhận bản sao và không bao giờ cho một lần khởi động chỉ kiểm tra giờ. Nó từ chối khi một bản phát hành đang chạy
+(pid), thời điểm bắt đầu, `archive.sh`, mã lần khởi động (boot id) của kernel và thời điểm bắt đầu của tiến trình theo
+cách kernel đếm) chỉ trong phần việc hằng giờ, không bao giờ khi một lần lưu trữ chỉ đang chờ xác nhận bản sao và không
+bao giờ cho một lần khởi động chỉ kiểm tra giờ. Nó giữ khóa trong suốt phần việc hằng giờ: kể cả thời gian chờ khóa sao
+lưu, bản sao lưu trước purge, việc purge và đối soát sau đó. Nó từ chối khi một bản phát hành đang chạy
 (`<records-dir>/.release.lock`), và `release.sh` từ chối, không thay đổi gì, khi khóa lưu trữ đang bị giữ: hãy chạy lại
 bản phát hành vài phút sau. Tốt nhất hãy bắt đầu bản phát hành vài phút sau đầu giờ và trước Start minute khá lâu. Khi
-chủ của khóa vẫn đang chạy, một lần khởi động theo lịch kết thúc bằng `DEFERRED archive_running` (mã thoát 0) và một
-lần khởi động thủ công (`pf archive`) bị từ chối. Một khóa mà chủ của nó chắc chắn không còn tồn tại được `archive.sh` kế tiếp tự động xóa: cùng máy chủ, không có
-container `maintenance` nào đang chạy, và hoặc pid của nó đã mất, hoặc máy chủ đã khởi động lại từ đó (boot id khác),
-hoặc pid đó nay thuộc về một tiến trình khác (thời điểm bắt đầu khác). `release.sh` bỏ qua một khóa như vậy theo cùng
-quy tắc. Trước đó khóa được đổi tên, để trong hai lần khởi động chỉ một lần đi tiếp. Một tệp owner không có boot id và
-thời điểm bắt đầu (do một `archive.sh` cũ hơn ghi), hoặc một máy chủ không có `/proc`, chỉ được xét theo pid. Khi một
-lần từ chối nói rằng khóa không thể kiểm tra, hoặc khi các lần khởi động theo lịch cứ in `DEFERRED` dù không có job
-lưu trữ nào chạy, hãy kiểm tra và xóa nó bằng tay:
+chủ của khóa vẫn đang chạy, một lần khởi động theo lịch kết thúc bằng `DEFERRED archive_running` (mã thoát 0) và một lần
+khởi động thủ công (`pf archive`) bị từ chối. Một khóa mà chủ của nó chắc chắn không còn tồn tại được `archive.sh` kế
+tiếp tự động xóa: cùng máy chủ, không có container `maintenance` nào đang chạy, và hoặc pid của nó đã mất, hoặc máy chủ
+đã khởi động lại từ đó (boot id khác), hoặc pid đó nay thuộc về một tiến trình khác (thời điểm bắt đầu khác).
+`release.sh` bỏ qua một khóa như vậy theo cùng quy tắc. Trước đó khóa được đổi tên, để trong hai lần khởi động chỉ một
+lần đi tiếp. Một tệp owner không có boot id và thời điểm bắt đầu (do một `archive.sh` cũ hơn ghi), hoặc một máy chủ
+không có `/proc`, chỉ được xét theo pid. Khi một lần từ chối nói rằng khóa không thể kiểm tra, hoặc khi các lần khởi
+động theo lịch cứ in `DEFERRED` dù không có job lưu trữ nào chạy, hãy kiểm tra và xóa nó bằng tay:
 
 ```sh
 cat ~/partflow-deployments/.archive.lock/owner
@@ -1390,11 +1572,15 @@ rm -r ~/partflow-deployments/.archive.lock
 
 - **Administration → History archival & purge** liệt kê mọi lần lưu trữ với trạng thái, các số đếm và, khi đã xuất,
   tên bản lưu trữ và SHA-256 của manifest.
-- `check.sh` in dòng `archival_proposal` (§2): `PASS` với lần đang mở, lần đã kết thúc gần nhất và dung lượng trống,
-  hoặc `FAIL` nêu tên từng phát hiện: `copy_confirmation_overdue` (một lần lưu trữ đã chờ xác nhận bản sao lâu hơn
-  thiết lập **Report a waiting run after**), `last_run_failed` (lần đã kết thúc gần nhất là `FAILED`), `archive_dir_unusable` (thư mục lưu trữ không tồn
-  tại hoặc không ghi được) hoặc `copy_dir_unusable` (thư mục sao chép đã được đặt nhưng chưa mount, không tồn tại, không
-  ghi được hoặc nằm trên chính hệ thống tệp của thư mục lưu trữ).
+- `check.sh` in dòng `archival_proposal` (§2): `PASS` với lần đang mở (một lần ở `PURGING` kèm những gì nó đã purge
+  tới lúc đó), lần đã kết thúc gần nhất (kết quả của nó, những gì nó đã purge và đã bỏ qua) và dung lượng trống, hoặc
+  `FAIL` nêu tên từng phát hiện: `copy_confirmation_overdue` (một lần lưu trữ đã chờ xác nhận bản sao lâu hơn thiết lập
+  **Report a waiting run after**), `last_run_failed` (lần đã kết thúc gần nhất là `FAILED`), `archive_dir_unusable`
+  (thư mục lưu trữ không tồn tại hoặc không ghi được), `copy_dir_unusable` (thư mục sao chép đã được đặt nhưng chưa
+  mount, không tồn tại, không ghi được hoặc nằm trên chính hệ thống tệp của thư mục lưu trữ) hoặc `receipt_not_copied`
+  (biên nhận purge của một lần lưu trữ mà job đã sao chép ra ngoài máy chủ bị thiếu hoặc khác trong thư mục sao chép;
+  lần khởi động kế tiếp sao chép lại nó). Sự cố của một lần đối soát sau purge đứng đầu, là `reconcile_after_purge`
+  (§8).
 - Báo cáo đầy đủ, chỉ đọc:
 
   ```sh
@@ -1404,21 +1590,79 @@ rm -r ~/partflow-deployments/.archive.lock
 | Trạng thái | Ý nghĩa |
 | --- | --- |
 | `APPROVED` | Đã được yêu cầu trong Administration; phần việc hằng giờ kế tiếp sẽ xuất nó. Vẫn có thể hủy. |
-| `RUNNING` | Job đang xuất, kiểm tra hoặc sao chép nó. Không thể hủy. |
+| `RUNNING` | Job đang xuất, kiểm tra hoặc sao chép nó, hoặc tạo bản sao lưu trước purge của nó. Không thể hủy. |
 | `WAITING_FOR_COPY` | Đã kiểm tra và công bố; đang chờ bản sao ngoài máy chủ hoặc một xác nhận. Có thể hủy. |
-| `COMPLETED` | Đã sao chép ra ngoài máy chủ, hoặc bản sao đã được xác nhận. Kết quả là `EXPORT_ONLY`: không có gì bị xóa. |
+| `PURGING` | Job đang xóa các Movement đã lưu trữ của nó, từng lô một. Không thể hủy; một lần purge đã dừng (khởi động lại, hoặc một lỗi database tạm thời như mất kết nối hay deadlock) được lần khởi động kế tiếp tiếp tục. |
+| `COMPLETED` | Đã sao chép ra ngoài máy chủ và đã purge: kết quả là `PURGED`. Một lần lưu trữ kết thúc trước khi có việc purge có kết quả `EXPORT_ONLY` (đã xuất, không có gì bị xóa). |
+| `COMPLETED_WITH_SKIPS` | Đã kết thúc, nhưng một số thành phần đã thay đổi sau khi export và ở lại trong database; biên nhận liệt kê chúng. Kết quả là `PURGED`, hoặc `NOTHING_PURGED` khi mọi thành phần đều bị bỏ qua. `check.sh` cho qua và nêu các phần bỏ qua. |
 | `NOTHING_ELIGIBLE` | Không có gì đủ điều kiện tại mốc cắt (cutoff) của nó khi bước export bắt đầu. |
 | `CANCELLED` | Đã bị hủy trong Administration. Thư mục lưu trữ đã công bố vẫn được giữ. |
-| `FAILED` | Một kiểm tra thất bại; lý do được hiển thị. Không có gì bị xóa. |
+| `FAILED` | Một kiểm tra thất bại; lý do được hiển thị. Không có gì bị xóa, trừ khi lần lưu trữ thất bại khi đang `PURGING` (số bị xóa khác với các bản ghi của nó, guard từ chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ; một lỗi database tạm thời thì để nó ở lại `PURGING`): khi đó nó giữ các thành phần trọn vẹn đã purge, và biên nhận của nó liệt kê chúng. |
+
+### Bản sao lưu trước purge (The pre-purge backup)
+
+Ngay trước một lần purge, `archive.sh` tạo một bản sao lưu loại `pre-purge`:
+`deploy/production/backup.sh --kind pre-purge --label <archive name> --operator archive.sh` (§3), có tên
+`<UTC stamp>-pre-purge-<archive name>`. Nó được công bố và kiểm tra như mọi bản sao lưu, và bước purge ghi lại tên của
+nó và thời điểm bản dump của nó bắt đầu. Khôi phục nó sẽ mang lại phần lịch sử mà lần purge đã xóa (§8, Phát hiện của
+đối soát sau một lần purge).
+
+- Khi một bản sao lưu khác đang giữ khóa sao lưu (bản sao lưu hằng giờ, một bản thủ công), bản sao lưu trước purge chờ
+  nó, kiểm tra lại mỗi 15 giây, tối đa `--backup-wait-minutes` của `archive.sh` (mặc định 60 phút; `0` bị từ chối
+  ngay). Một khóa sao lưu cũ (stale) bị từ chối ngay (§3, Khóa sao lưu và khóa phát hành).
+- Khi nó thất bại (một bản sao lưu giữ khóa lâu hơn, một khóa cũ, thiếu dung lượng, một lỗi dump), không có gì bị xóa:
+  lần lưu trữ ở lại `RUNNING`, lần khởi động hằng giờ kế tiếp chuyển nó sang `FAILED` (`recover`), và phải yêu cầu một
+  lần lưu trữ mới trong Administration. `archive.sh` thoát với mã 2. Đây là chủ ý: một database được khôi phục từ một
+  bản sao lưu trước purge cũng giữ lần lưu trữ của nó ở `RUNNING`, và `recover` phải chuyển nó sang thất bại để nó
+  không bao giờ bị purge lại.
+- Các bản sao lưu trước purge chiếm dung lượng trong thư mục sao lưu, mỗi bản một bản dump. Việc xoay vòng các bản sao
+  lưu theo lịch giữ **Pre-purge backups kept** bản mới nhất của Administration → Backups (ban đầu là 3, từ 1 đến 100) và
+  xóa các bản cũ hơn (§3, Giữ lại).
+- Bản sao ngoài máy chủ của thư mục sao lưu (Hyper Backup trên NAS) phải bao gồm chúng như mọi bản sao lưu.
+- Khi một lần lưu trữ đã được purge, thư mục lưu trữ của nó và bản sao ngoài máy chủ của bản lưu trữ là những bản duy
+  nhất của phần lịch sử đó, ngoài các bản sao lưu trước purge còn được giữ: hãy giữ cả hai bản cẩn thận như các bản sao
+  lưu.
+
+### Lấy lại dung lượng đĩa sau một lần purge (Returning disk space after a purge, optional)
+
+Một lần purge giải phóng các dòng của những Movement đã xóa bên trong bảng: vacuum tự động của PostgreSQL cho các
+Movement mới dùng lại chỗ đó, nên database ngừng lớn lên, nhưng các tệp của nó trên đĩa không nhỏ đi. Chỉ
+`VACUUM FULL part_movements` trả dung lượng lại cho đĩa. Lệnh này ghi một bản sao mới của bảng và các index của nó,
+**khóa độc quyền bảng trong khi chạy** (mọi trang, mọi lần quét và mọi lệnh đọc hoặc ghi Movement đều phải chờ), và cần
+dung lượng trống trên volume database lớn bằng bảng cùng các index của nó. Chỉ chạy nó khi cần dung lượng đĩa, khi ứng
+dụng đã dừng và sau một bản sao lưu:
+
+1. Chọn một lúc vắng. Kiểm tra rằng job lưu trữ lịch sử không làm việc (không có
+   `~/partflow-deployments/.archive.lock`), và tắt tác vụ của nó cho đến khi xong.
+2. So sánh kích thước của bảng cùng các index (lệnh thứ nhất, theo KiB) với dung lượng trống của volume database (cột
+   `Available` của lệnh thứ hai, theo KiB); dung lượng trống phải lớn hơn:
+
+   ```sh
+   $PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT pg_total_relation_size('"'"'part_movements'"'"') / 1024"'
+   $PF exec -T db df -Pk /var/lib/postgresql/data
+   ```
+
+3. Dừng ứng dụng, tức là tạm dừng ghi (§5): `$PF stop backend`.
+4. Tạo một bản sao lưu:
+   `deploy/production/backup.sh --kind manual --operator "<your name>" --reason "before VACUUM FULL"`.
+5. Chạy nó; việc này có thể kéo dài với một bảng lớn:
+
+   ```sh
+   $PF exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "VACUUM (FULL, VERBOSE, ANALYZE) part_movements"'
+   ```
+
+6. Khởi động lại ứng dụng (`$PF up -d backend`), kiểm tra health (§2) và chạy đối soát (§7). Bật lại tác vụ lưu trữ lịch
+   sử.
 
 ### Bản sao ngoài máy chủ và việc xác nhận (The off-host copy and its confirmation)
 
 Một bản lưu trữ chỉ nằm trên máy chủ sẽ mất cùng máy chủ, nên mỗi lần lưu trữ sao chép bản lưu trữ của nó ra ngoài
-máy chủ trước khi hoàn tất. Có hai cách:
+máy chủ trước khi bị purge. Có hai cách:
 
 - **Có thư mục sao chép** (`PARTFLOW_ARCHIVE_COPY_DIR`, [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md) §3.1): một thư mục
   trên **thiết bị khác**, như một thư mục chia sẻ qua mạng hoặc một ổ USB được mount trên máy chủ. Job sao chép bản
-  lưu trữ vào đó, đọc lại bản sao, kiểm tra mọi SHA-256 và hoàn tất lần lưu trữ mà không cần người. `archive.sh` chỉ
+  lưu trữ vào đó, đọc lại bản sao, kiểm tra mọi SHA-256 và tiếp tục với bản sao lưu trước purge và việc purge mà không
+  cần người; sau khi purge, nó cũng sao chép biên nhận purge tới đó và kiểm tra nó. `archive.sh` chỉ
   mount thư mục sao chép khi nó tồn tại, ghi được, và nằm trên một hệ thống tệp không phải của thư mục lưu trữ và không
   phải hệ thống tệp gốc `/` của máy chủ. Nó kiểm tra lại điều này trước mỗi bước, nên một ổ đĩa hoặc thư mục chia sẻ
   bị mất kết nối trong một lần export dài được phát hiện trước bước copy, và việc mount không bao giờ tạo ra một thư mục
@@ -1433,7 +1677,9 @@ máy chủ trước khi hoàn tất. Có hai cách:
   3. Trong Administration → History archival & purge, so sánh SHA-256 của manifest hiển thị cho lần lưu trữ với của bản
      sao (`sha256sum manifest.json`), rồi chọn **Confirm copy…** trên lần lưu trữ đó, đánh dấu
      **The archive folder is copied off the server** và chọn **Confirm copy**.
-  4. Phần việc hằng giờ kế tiếp hoàn tất lần lưu trữ (`COMPLETED`).
+  4. Phần việc hằng giờ kế tiếp tiếp tục lần lưu trữ: bản sao lưu trước purge và việc purge. Job không sao chép biên
+     nhận purge cho lần lưu trữ như vậy: biên nhận nằm cạnh thư mục lưu trữ, nên lần chạy kế tiếp của tác vụ Hyper
+     Backup sao chép nó ra ngoài máy chủ cùng thư mục.
 
 Một lần lưu trữ chờ xác nhận lâu hơn thiết lập **Report a waiting run after** trong Administration (ban đầu là
 7 ngày) khiến `check.sh` báo
@@ -1442,20 +1688,28 @@ Một lần lưu trữ chờ xác nhận lâu hơn thiết lập **Report a wait
 ### Một lần lưu trữ thất bại (A failed run)
 
 Một lần lưu trữ trở thành `FAILED` khi một kiểm tra thất bại: ví dụ mốc cắt trở nên mới hơn thời hạn ngắn nhất được
-phép, số đếm vượt quá bản xem trước, các tệp khác với database, thư mục đã công bố bị thay đổi hoặc biến mất, hoặc job
-dừng khi lần lưu trữ đang `RUNNING`. Khi đó `archive.sh` thoát với mã 3 một lần, và `check.sh` báo `last_run_failed`
-cho đến khi một lần lưu trữ sau kết thúc.
+phép, số đếm vượt quá bản xem trước, các tệp khác với database, thư mục đã công bố bị thay đổi hoặc biến mất, User đã
+yêu cầu nó không còn hoạt động hoặc không còn giữ Run history archival and purge, hoặc job dừng khi lần lưu trữ đang
+`RUNNING` (kể cả sau một bản sao lưu trước purge thất bại). Khi đó `archive.sh` thoát với mã 3 một lần, và `check.sh`
+báo `last_run_failed` cho đến khi một lần lưu trữ sau kết thúc.
 
 1. Đọc lý do: trong Administration, trong email báo lỗi, hoặc trong `<records-dir>/archive/<UTC>/` (tệp `.json` và
    `.log` của bước đó).
-2. Sửa nguyên nhân, ví dụ giải phóng dung lượng trong thư mục lưu trữ, hoặc mount thư mục sao chép.
+2. Sửa nguyên nhân, ví dụ giải phóng dung lượng trong thư mục lưu trữ hoặc thư mục sao lưu, hoặc mount thư mục sao
+   chép.
 3. Yêu cầu một lần lưu trữ mới trong Administration. Một lần thất bại không bao giờ được tiếp tục; lần mới ghi một thư
    mục lưu trữ mới.
 
-Không có gì bị xóa. Một thư mục mà lần thất bại đã công bố vẫn giữ nguyên; giữ nó hoặc xóa nó sau khi xem xét.
-`recover` xóa các thư mục dở dang trong `.partial/` của những lần đã kết thúc và giữ mọi thư mục có tên không thuộc về
-lần lưu trữ nào; thư mục như vậy được nêu tên trong đầu ra: hãy xem xét và xóa nó bằng tay. Không bao giờ thay đổi hoặc
-xóa một thư mục đã công bố của một lần `COMPLETED`.
+Không có gì bị xóa, trừ khi lần lưu trữ thất bại khi đang `PURGING` (số bị xóa khác với các bản ghi của nó, guard từ
+chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ): khi đó nó giữ các thành phần trọn vẹn đã purge, biên nhận
+`<archive name>.purged.json` của nó (trạng thái `FAILED`) liệt kê chúng là `PURGED` và phần còn lại là `RETAINED` hoặc
+`SKIPPED`, và đối soát đã chạy sau nó như sau mọi lần purge. Một lần lưu trữ mới sẽ lưu trữ và purge phần còn lại. Một
+lỗi database tạm thời trong lúc purge không bao giờ làm lần lưu trữ thất bại: nó ở lại `PURGING`, và lần khởi động kế
+tiếp tiếp tục nó (Job lưu trữ làm gì, ở trên). Một thư mục mà lần thất bại đã công bố vẫn giữ nguyên; hãy giữ nó, và
+không bao giờ xóa thư mục hay biên nhận của một lần lưu trữ đã purge bất cứ thứ gì. `recover` xóa các thư mục và tệp
+biên nhận dở dang trong `.partial/` của những lần đã kết thúc và giữ mọi mục có tên không thuộc về lần lưu trữ nào; mục
+như vậy được nêu tên trong đầu ra: hãy xem xét và xóa nó bằng tay. Không bao giờ thay đổi hoặc xóa một thư mục đã công
+bố hay một biên nhận purge của một lần `COMPLETED` hoặc `COMPLETED_WITH_SKIPS`.
 
 ### Kiểm tra một bản lưu trữ (Checking an archive)
 
@@ -1472,6 +1726,15 @@ Mọi dòng phải kết thúc bằng `OK`. SHA-256 của `manifest.json` (`sha2
 Administration hiển thị. Các tệp đọc được bằng `zcat` và `jq`; `README.txt` mô tả chúng. Lịch sử đã lưu trữ không bao
 giờ được nhập trở lại các bảng đang dùng.
 
+Cạnh thư mục của mỗi lần lưu trữ đã purge là **biên nhận purge** (purge receipt) của nó
+`<archive-dir>/run-<id>-<giờ UTC>.purged.json` (mode 0600; cũng có trong thư mục sao chép với một lần lưu trữ mà job đã
+sao chép tới đó): một dòng JSON, đọc bằng `jq .`. Nó nêu lần lưu trữ, kết quả và bản sao lưu trước purge của lần đó,
+và liệt kê mọi thành phần với kết cục (`PURGED`, `SKIPPED` hoặc `RETAINED`), các Part Number, các flow và số Movement
+của nó. Administration hiển thị SHA-256 của nó, giá trị mà `sha256sum <archive name>.purged.json` cho ra.
+`sha256sum -c SHA256SUMS` chỉ kiểm tra thư mục lưu trữ: biên nhận nằm ngoài thư mục đó. Sau một lần purge, thư mục
+lưu trữ, biên nhận của nó và các bản sao ngoài máy chủ của chúng là những bản duy nhất của phần lịch sử đó ngoài các bản
+sao lưu: không bao giờ xóa chúng.
+
 ### Chuyển sang máy chủ mới (Moving to a new host)
 
 Thư mục lưu trữ thuộc về bản cài đặt: không bản sao lưu database nào chứa các bản lưu trữ. Khi PartFlow chuyển sang
@@ -1483,8 +1746,10 @@ chủ mới ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8), và xóa nó 
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | §11 và bảng `pf`: job lưu trữ lịch sử (`archive.sh`, `pf archive`), chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì; §1, §2, §6, §8 và §9 cho hồ sơ, các dòng kiểm tra, việc chuyển máy chủ, sự cố và lịch làm việc của nó. |
-| 2026-11-17 | uncommitted | Lệnh khôi phục từ chối mật khẩu vi phạm quy tắc mật khẩu, và các thiết lập đăng nhập chuyển sang Administration → Security. |
+| 2026-11-18 | uncommitted | §6 và §8: tắt tác vụ lưu trữ lịch sử trước mọi lần khôi phục, vì một lần lưu trữ `PURGING` được khôi phục sẽ tiếp tục purge; §8 và §11: một lỗi database tạm thời để lần purge ở lại `PURGING` cho lần khởi động kế tiếp, lần đó đối soát khi nó kết thúc. |
+| 2026-11-18 | uncommitted | §11: job lưu trữ lịch sử purge lịch sử Movement đã lưu trữ sau bản sao ngoài máy chủ và một bản sao lưu trước purge, rồi đối soát; các trạng thái `PURGING` và `COMPLETED_WITH_SKIPS`, các kết quả `PURGED` và `NOTHING_PURGED`, biên nhận purge, việc tiếp tục một lần purge, bản sao lưu trước purge và thời gian chờ của nó, và lấy lại dung lượng đĩa bằng `VACUUM FULL`; §8: sự cố của một phát hiện đối soát sau một lần purge, trong lúc đó job lưu trữ không làm việc với lần lưu trữ nào; §3: loại sao lưu `pre-purge`, việc xoay vòng nó và `--lock-wait-minutes`; §1, §2, §7, §9, §10 và bảng `pf` cho việc purge. |
+| 2026-11-17 | `2f12d33` | §11 và bảng `pf`: job lưu trữ lịch sử (`archive.sh`, `pf archive`), chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì; §1, §2, §6, §8 và §9 cho hồ sơ, các dòng kiểm tra, việc chuyển máy chủ, sự cố và lịch làm việc của nó. |
+| 2026-11-17 | `4539a2b` | Lệnh khôi phục từ chối mật khẩu vi phạm quy tắc mật khẩu, và các thiết lập đăng nhập chuyển sang Administration → Security. |
 | 2026-11-17 | `01ce427` | §10 và bảng `pf`: `pf delete-permanently` xóa các Work Order và Part Number chỉ nhập để thử nghiệm, sau một lần xem trước và một bản sao lưu đã kiểm tra. |
 | 2026-11-17 | `1fc96e1` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất một passkey, và một lần reset cũng xóa các passkey. |
 | 2026-11-17 | `aa6287d` | Các vấn đề thường gặp và Đăng nhập và tài khoản người dùng: mất app xác thực của xác thực hai bước, đăng xuất user ở mọi nơi, và khóa sau các mã sai. |

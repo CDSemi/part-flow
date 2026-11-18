@@ -3,24 +3,32 @@
 // The pure helpers behind the real Tracking view: the feed cadence and
 // page bounds, the status pill vocabulary, the location rows of the
 // `Current quantity by Area` section, the position line of a Quantity
-// Flow block, and the audit-facing description of one Movement history
-// entry. Everything here reads the fixed server data — derived time
-// values take the shared UI clock tick as an argument (§3.12).
+// Flow block, the audit-facing description of one Movement history
+// entry, and the archived history (Phase 16): the "History archived in
+// run N" line and its place among the Movements of a page. Everything
+// here reads the fixed server data — derived time values take the shared
+// UI clock tick as an argument (§3.12), and no archived quantity is ever
+// computed here.
 
 import type {
   LocationState,
+  TrackingArchivedHistory,
   TrackingDetail,
   TrackingFilters,
   TrackingFlow,
   TrackingLocation,
   TrackingMovement,
+  TrackingMovementPage,
   TrackingStatus,
 } from '../../api/tracking';
 import { DEFAULT_TRACKING_FILTERS } from '../../api/tracking';
 import {
   exceedsExpectedDuration,
   formatElapsedSince,
+  formatIsoDate,
+  formatTimeOfDay,
   formatTimestampShort,
+  todayIso,
 } from '../dates';
 
 /** Refresh period of the list and of an open detail — the monitoring
@@ -61,25 +69,28 @@ export interface DetailRevisions {
  * appended pages are read again — deliberately narrow per section, so
  * a refresh that changes none of them keeps the pages as they are:
  *
- * - Movement history: its row count — every write to the PN appends a
- *   Movement, and one dated below the boundary lands among the older
- *   pages without moving the first page.
- * - Scrap history: its row count and the net scrapped quantity — an
- *   undone scrap keeps its place in the history while the net figure
- *   changes and the row gains its REVERSED mark.
- * - Quantity Flows: the flow count, the Movement count and the route
- *   adjustment count — a flow's status, position and trace only ever
- *   change through a Movement of the PN, its route steps and route
- *   notes only through an AssignedRoute adjustment, and the flow that
- *   changed may sit on any page.
+ * - Movement history: its row count and its archived-entry count — every
+ *   write to the PN appends a Movement, and one dated below the boundary
+ *   lands among the older pages without moving the first page; an
+ *   archival purge replaces a flow's Movements with one archived entry.
+ * - Scrap history: its row count, its archived-entry count and the net
+ *   scrapped quantity — an undone scrap keeps its place in the history
+ *   while the net figure changes and the row gains its REVERSED mark.
+ * - Quantity Flows: the flow count, the Movement and archived-entry
+ *   counts and the route adjustment count — a flow's status, position
+ *   and trace only ever change through a Movement of the PN or a purge of
+ *   its history, its route steps and route notes only through an
+ *   AssignedRoute adjustment or a purge, and the flow that changed may
+ *   sit on any page.
  * - Allocation history: its row count — allocation rows are append-only,
  *   a reversal being a new row beside the one it takes back.
  */
 export function detailRevisions(detail: TrackingDetail): DetailRevisions {
+  const { movements, scrapHistory } = detail;
   return {
-    movements: `${detail.movements.total}`,
-    scrap: `${detail.scrapHistory.total}|${detail.scrappedQuantity}`,
-    flows: `${detail.flows.total}|${detail.movements.total}|${detail.routeAdjustmentTotal}`,
+    movements: `${movements.total}|${movements.archivedTotal}`,
+    scrap: `${scrapHistory.total}|${scrapHistory.archivedTotal}|${detail.scrappedQuantity}`,
+    flows: `${detail.flows.total}|${movements.total}|${movements.archivedTotal}|${detail.routeAdjustmentTotal}`,
     allocations: `${detail.allocations.total}`,
   };
 }
@@ -251,26 +262,32 @@ export function positionOverdue(flow: TrackingFlow, nowMs: number): boolean {
 
 /** The rendered steps of a flow's route line: the PLANNED snapshot, or
  * the actual trace of a FLOATING flow (its last arrival current while
- * the flow is active). */
+ * the flow is active). An archived flow's snapshot steps read `archived`:
+ * its progress is in the archive, neither done nor still to come. */
 export interface RouteStepView {
   key: string;
   label: string;
-  state: 'done' | 'cur' | 'future';
+  state: 'done' | 'cur' | 'future' | 'archived';
   repair: boolean;
   inherited: boolean;
 }
+
+const ROUTE_STEP_STATE: Record<
+  TrackingFlow['routeSteps'][number]['state'],
+  RouteStepView['state']
+> = {
+  DONE: 'done',
+  CURRENT: 'cur',
+  FUTURE: 'future',
+  ARCHIVED: 'archived',
+};
 
 export function routeSteps(flow: TrackingFlow): RouteStepView[] {
   if (flow.routeMode === 'PLANNED') {
     return flow.routeSteps.map((step) => ({
       key: `snap-${step.id}`,
       label: step.area.name,
-      state:
-        step.state === 'DONE'
-          ? 'done'
-          : step.state === 'CURRENT'
-            ? 'cur'
-            : 'future',
+      state: ROUTE_STEP_STATE[step.state] ?? 'future',
       repair: false,
       inherited: false,
     }));
@@ -439,5 +456,105 @@ export function describeMovement(movement: TrackingMovement): string {
   }
   if (movement.worker) parts.push(`W: ${movement.worker.name}`);
   if (movement.stationId) parts.push(movement.stationId);
+  return parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------
+// Archived history (Phase 16 — history archival step 2)
+// ---------------------------------------------------------------------------
+
+/** One row of the Movement history or the Scrap history: a retained
+ * Movement, or the archived history of one flow ("History archived in run
+ * N"), which stands where its newest archived Movement stood. */
+export type HistoryEntry =
+  | { kind: 'movement'; movement: TrackingMovement }
+  | { kind: 'archived'; archived: TrackingArchivedHistory };
+
+/** An ISO 8601 instant as a sortable pair: its whole second (epoch
+ * milliseconds) and the fraction of that second in nanoseconds — instants
+ * a microsecond apart keep their order, which `Date.parse` alone
+ * (milliseconds) would not. */
+function instantKey(iso: string): [number, number] {
+  const match = /^(.+T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$/.exec(iso);
+  if (match === null) return [Date.parse(iso), 0];
+  const [, whole, fraction = '', zone] = match;
+  return [
+    Date.parse(`${whole}${zone}`),
+    Number(fraction.slice(0, 9).padEnd(9, '0')),
+  ];
+}
+
+/** Newest first, as the server orders the history: the later time, then
+ * the higher id. */
+function newestFirst(
+  a: { at: string; id: number },
+  b: { at: string; id: number },
+): number {
+  const [aSecond, aFraction] = instantKey(a.at);
+  const [bSecond, bFraction] = instantKey(b.at);
+  return bSecond - aSecond || bFraction - aFraction || b.id - a.id;
+}
+
+/**
+ * The rows of one history page, newest first: its Movements and its
+ * archived entries interleaved by (time, id) — a Movement by
+ * `(occurredAt, id)`, an archived entry by `(lastOccurredAt,
+ * lastMovementId)`. The server chose the page from both kinds together,
+ * so consecutive pages concatenate without a gap or a duplicate.
+ */
+export function historyEntries(page: TrackingMovementPage): HistoryEntry[] {
+  const keyed: { entry: HistoryEntry; at: string; id: number }[] = [
+    ...page.movements.map((movement) => ({
+      entry: { kind: 'movement' as const, movement },
+      at: movement.occurredAt,
+      id: movement.id,
+    })),
+    ...page.archived.map((archived) => ({
+      entry: { kind: 'archived' as const, archived },
+      at: archived.lastOccurredAt,
+      id: archived.lastMovementId,
+    })),
+  ];
+  return keyed.sort(newestFirst).map(({ entry }) => entry);
+}
+
+/** The React key of a history row (a Movement id and an archived entry
+ * never share one). */
+export function historyEntryKey(entry: HistoryEntry): string {
+  return entry.kind === 'movement'
+    ? `m-${entry.movement.id}`
+    : `a-${entry.archived.runId}-${entry.archived.quantityFlowId}`;
+}
+
+/** The local date of an instant, with its year: `Jan 03, 2023`. */
+function localDate(iso: string): string {
+  return formatIsoDate(todayIso(Date.parse(iso)));
+}
+
+/** The time column of an archived entry, always with its year (`Nov 18,
+ * 2023 02:06`): archived history is older than the retention period, so
+ * the short `Nov 18 02:06` of the other rows would read as this year. */
+export function archivedTimestamp(iso: string): string {
+  return `${localDate(iso)} ${formatTimeOfDay(iso)}`;
+}
+
+/** `History archived in run 3 (Jan 03, 2023 – Nov 16, 2024, 12
+ * Movements)` — one date when the flow's history began and ended on the
+ * same day. The numbers are the server's record, never recomputed. */
+export function archivedHistoryText(entry: TrackingArchivedHistory): string {
+  const first = localDate(entry.firstOccurredAt);
+  const last = localDate(entry.lastOccurredAt);
+  const range = first === last ? first : `${first} – ${last}`;
+  const count = `${entry.movementCount.toLocaleString('en-US')} Movement${entry.movementCount === 1 ? '' : 's'}`;
+  return `History archived in run ${entry.runId} (${range}, ${count})`;
+}
+
+/** The description of an archived history row: the line, the flow and
+ * the archive's name. */
+export function describeArchivedHistory(
+  entry: TrackingArchivedHistory,
+): string {
+  const parts = [archivedHistoryText(entry), flowId(entry.quantityFlowId)];
+  if (entry.archiveName !== null) parts.push(entry.archiveName);
   return parts.join(' · ');
 }

@@ -14,45 +14,65 @@
 # A scheduled backup (`--kind scheduled`, the host task that runs every hour) first reads the backup policy of
 # Administration → Backups from the database (`app.cli backup-policy`, as the application role) and asks backup-tools
 # whether one is due (`backup-due`): when none is due it writes nothing and prints `NOT_DUE <newest scheduled backup>`.
+# Its rotation keeps the scheduled backups and the newest `keep_pre_purge` pre-purge backups of that policy; a policy
+# without `keep_pre_purge` (an image from before the purge) leaves every pre-purge backup alone.
 #
-# stdout: exactly one line on success, `BACKUP <NAME> <absolute path>`, or `NOT_DUE <NAME>` for a scheduled run with no
-# backup due. stderr: progress, every tool JSON document, errors. Exit status: 0 completed (or no scheduled backup was
-# due); 1 refused before writing (backup_running, backup_lock_stale, insufficient_space, name_exists); 2 could not run
+# A pre-purge backup (`--kind pre-purge --label <archive name>`, history archival design §7.4) is taken by archive.sh
+# before the purge of an archival run: it is published and verified like every backup, never rotates by itself, and its
+# BACKUP line adds the dump start from its backup-verify report, which the purge records. archive.sh passes
+# `--lock-wait-minutes N`, so that a backup that holds the backup lock is waited for instead of refusing at once.
+#
+# stdout: exactly one line on success, `BACKUP <NAME> <absolute path>` (pre-purge: `BACKUP <NAME> <absolute path>
+# <dump start, YYYY-MM-DDTHH:MM:SSZ>`), or `NOT_DUE <NAME>` for a scheduled run with no backup due. stderr: progress,
+# every tool JSON document, errors. Exit status: 0 completed (or no scheduled backup was due); 1 refused before writing
+# (backup_running, also after --lock-wait-minutes; backup_lock_stale, insufficient_space, name_exists); 2 could not run
 # (also: the backup policy could not be read); 3 failed (no backup published, or the published backup failed
-# verification); 4 completed, but the rotation failed or found a scheduled backup that fails verification.
+# verification); 4 completed, but the rotation failed or found a backup that fails verification.
 # The backup lock <PARTFLOW_BACKUP_DIR>/.backup.lock is never broken automatically (OPERATIONS_RUNBOOK §3).
 set -eu
 
 NAME_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+# The label of a pre-purge backup: the archive name of its archival run (backups.PRE_PURGE_LABEL_PATTERN).
+ARCHIVE_NAME_PATTERN='^run-[0-9]+-[0-9]{8}T[0-9]{6}Z$'
+UTC_PATTERN='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 REVISION_PATTERN='^[A-Za-z0-9_]{1,32}$'
+# --lock-wait-minutes: how often the backup lock is checked again while another backup holds it.
+LOCK_POLL_SECONDS=15
 # The values in the shell would override the env file for every Compose command: the script sets them per command only.
 unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR COMPOSE_PROJECT_NAME \
     COMPOSE_FILE COMPOSE_PROFILES
 
 usage() {
     cat <<'EOF'
-Usage: deploy/production/backup.sh --kind scheduled|manual|pre-release --operator NAME
-           [--reason TEXT] [--label TAG] [--tools-release TAG] [--env-file .env.production]
-           [--environment NAME] [--no-rotate] [--reserve-mib N]
+Usage: deploy/production/backup.sh --kind scheduled|manual|pre-release|pre-purge --operator NAME
+           [--reason TEXT] [--label TAG|ARCHIVE] [--tools-release TAG] [--env-file .env.production]
+           [--environment NAME] [--no-rotate] [--reserve-mib N] [--lock-wait-minutes N]
            [--lock-held-by-release RECORD_DIR] [--rehearsal --project NAME]
 
 Run from the repository root of a release checkout. Writes one backup directory <PARTFLOW_BACKUP_DIR>/<NAME>/
 (partflow.dump, partflow.dump.list, manifest.json, SHA256SUMS); NAME = <UTC stamp>-<kind>[-<label>].
-  --kind scheduled|manual|pre-release
+  --kind scheduled|manual|pre-release|pre-purge
                                    scheduled: the host task that runs every hour; Administration → Backups sets how
-                                   often a backup is due and how many scheduled backups are kept
-  --no-rotate                      scheduled only: keep every scheduled backup this run
-  --reason TEXT                    required for manual (default: scheduled backup / pre-release backup for TAG)
-  --label TAG                      the target release tag; required for pre-release, refused otherwise
+                                   often a backup is due and how many scheduled and pre-purge backups are kept;
+                                   pre-purge: taken by archive.sh before the purge of an archival run (it never
+                                   rotates; the scheduled rotation keeps the newest pre-purge backups)
+  --no-rotate                      scheduled only: keep every scheduled and pre-purge backup this run
+  --reason TEXT                    required for manual (default: scheduled backup / pre-release backup for TAG /
+                                   pre-purge backup for ARCHIVE)
+  --label TAG|ARCHIVE              pre-release: the target release tag; pre-purge: the archive name of the run,
+                                   run-<id>-<YYYYMMDDTHHMMSSZ>; required for these two kinds, refused otherwise
   --tools-release TAG              the image that writes and verifies the manifest (default: PARTFLOW_RELEASE)
   --reserve-mib N                  free space kept beyond 2 x the newest dump (default 1024)
+  --lock-wait-minutes N            while another backup holds the backup lock, wait up to N minutes for it, checking
+                                   every 15 s (0-1440, default 0: refused at once); a stale lock is refused at once
   --lock-held-by-release DIR       release.sh only: it holds the backup lock for its record directory DIR
   --rehearsal --project NAME       a throwaway Compose project (never partflow-production)
 Text values: 1-500 characters, no control characters, no " or \.
 Exit: 0 completed (or no scheduled backup was due), 1 refused (nothing written), 2 could not run, 3 failed (do not use
-      a backup it names), 4 completed but the rotation failed or found a scheduled backup that fails verification.
-stdout on success: BACKUP <NAME> <absolute path>, or NOT_DUE <NAME> when no scheduled backup was due
+      a backup it names), 4 completed but the rotation failed or found a backup that fails verification.
+stdout on success: BACKUP <NAME> <absolute path> (pre-purge: BACKUP <NAME> <absolute path> <dump start, UTC>), or
+NOT_DUE <NAME> when no scheduled backup was due
 EOF
 }
 
@@ -98,9 +118,11 @@ ENVIRONMENT=
 KEEP_HOURLY=
 KEEP_DAILY=
 KEEP_WEEKLY=
+KEEP_PRE_PURGE=
 INTERVAL_HOURS=
 NO_ROTATE=
 RESERVE_MIB=1024
+LOCK_WAIT_MINUTES=0
 HELD_BY=
 REHEARSAL=
 PROJECT=
@@ -121,7 +143,7 @@ while [ "$#" -gt 0 ]; do
         --keep-daily | --keep-weekly)
             usage_error "$option was replaced by Administration → Backups, which sets how many scheduled backups are kept (OPERATIONS_RUNBOOK §3)." ;;
         --kind | --operator | --reason | --label | --tools-release | --env-file | --environment | --reserve-mib | \
-            --lock-held-by-release | --project)
+            --lock-wait-minutes | --lock-held-by-release | --project)
             [ "$#" -ge 2 ] || usage_error "$option needs a value."
             value=$2
             shift 2
@@ -137,43 +159,52 @@ while [ "$#" -gt 0 ]; do
         --env-file) ENV_FILE=$value ;;
         --environment) ENVIRONMENT=$value ;;
         --reserve-mib) check_count "$option" "$value" 0 1048576; RESERVE_MIB=$value ;;
+        --lock-wait-minutes) check_count "$option" "$value" 0 1440; LOCK_WAIT_MINUTES=$value ;;
         --lock-held-by-release) check_text "$option" "$value"; HELD_BY=$value ;;
         --project) PROJECT=$value ;;
     esac
 done
 
 case "$KIND" in
-    scheduled | manual | pre-release) ;;
+    scheduled | manual | pre-release | pre-purge) ;;
     daily)
         usage_error "--kind daily was replaced by --kind scheduled: run deploy/production/backup.sh --kind scheduled --operator scheduler every hour; Administration → Backups sets how often a backup is due and how many are kept (OPERATIONS_RUNBOOK §3)." ;;
     '') usage_error "--kind is required." ;;
-    *) usage_error "--kind must be scheduled, manual or pre-release." ;;
+    *) usage_error "--kind must be scheduled, manual, pre-release or pre-purge." ;;
 esac
 [ -n "$OPERATOR" ] || usage_error "--operator is required."
-if [ -n "$LABEL" ]; then
-    printf '%s' "$LABEL" | grep -Eq "$RELEASE_PATTERN" \
-        || usage_error "--label must be a release tag of at most 64 letters, digits, '.', '_' or '-'."
-fi
 if [ -n "$TOOLS_RELEASE" ]; then
     printf '%s' "$TOOLS_RELEASE" | grep -Eq "$RELEASE_PATTERN" \
         || usage_error "--tools-release must be a release tag of at most 64 letters, digits, '.', '_' or '-'."
 fi
 case "$KIND" in
     scheduled)
-        [ -z "$LABEL" ] || usage_error "--label is only for --kind pre-release."
+        [ -z "$LABEL" ] || usage_error "--label is only for --kind pre-release and --kind pre-purge."
         [ -n "$REASON" ] || REASON="scheduled backup"
         ;;
     manual)
-        [ -z "$LABEL" ] || usage_error "--label is only for --kind pre-release."
+        [ -z "$LABEL" ] || usage_error "--label is only for --kind pre-release and --kind pre-purge."
         [ -n "$REASON" ] || usage_error "--kind manual needs --reason TEXT."
         ;;
     pre-release)
         [ -n "$LABEL" ] || usage_error "--kind pre-release needs --label TAG (the target release)."
+        printf '%s' "$LABEL" | grep -Eq "$RELEASE_PATTERN" \
+            || usage_error "--label must be a release tag of at most 64 letters, digits, '.', '_' or '-'."
         [ -n "$REASON" ] || REASON="pre-release backup for $LABEL"
+        ;;
+    pre-purge)
+        [ -n "$LABEL" ] \
+            || usage_error "--kind pre-purge needs --label ARCHIVE (the archive name of the archival run, run-<id>-<YYYYMMDDTHHMMSSZ>)."
+        { printf '%s' "$LABEL" | grep -Eq "$ARCHIVE_NAME_PATTERN" && printf '%s' "$LABEL" | grep -Eq "$RELEASE_PATTERN"; } \
+            || usage_error "--label must be the archive name of an archival run, run-<id>-<YYYYMMDDTHHMMSSZ>, for --kind pre-purge."
+        [ -n "$REASON" ] || REASON="pre-purge backup for $LABEL"
         ;;
 esac
 if [ "$KIND" != scheduled ] && [ -n "$NO_ROTATE" ]; then
     usage_error "--no-rotate is only for --kind scheduled."
+fi
+if [ -n "$HELD_BY" ] && [ "$LOCK_WAIT_MINUTES" -ne 0 ]; then
+    usage_error "--lock-wait-minutes is not for --lock-held-by-release: release.sh holds the backup lock itself."
 fi
 if [ -n "$REHEARSAL" ]; then
     [ -n "$PROJECT" ] || usage_error "--rehearsal needs --project NAME (a throwaway Compose project)."
@@ -239,6 +270,10 @@ json_field() {
 # json_number FILE KEY: a top-level whole-number value of an indented app.cli report (empty for null or absent).
 json_number() {
     sed -n 's/^  "'"$2"'": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# json_has FILE KEY: the report has the top-level KEY, whatever its value (null included).
+json_has() {
+    grep -q '^  "'"$2"'": ' "$1" 2>/dev/null
 }
 # pg_dump_sessions: the number of pg_dump sessions on the database server (empty when it cannot be read).
 pg_dump_sessions() {
@@ -309,8 +344,10 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal INT TERM
 
-# lock_busy: the lock exists; report backup_running or backup_lock_stale (never removes or changes it).
-lock_busy() {
+# lock_running: the lock exists. Returns 0 while its owner still runs (backup_running: LOCK_TEXT says who), 1 when it
+# was left by a run that no longer exists (backup_lock_stale: LOCK_TEXT says what to remove). Never removes or changes
+# the lock.
+lock_running() {
     owner=$LOCK_DIR/owner
     o_host=$(sed -n 's/^host=//p' "$owner" 2>/dev/null | head -n 1)
     o_pid=$(sed -n 's/^pid=//p' "$owner" 2>/dev/null | head -n 1)
@@ -332,17 +369,17 @@ lock_busy() {
     if [ -n "$running" ]; then
         detail=
         [ -z "$o_release" ] || detail=", release record $o_release"
-        echo "backup: refused — a backup is running (${o_by:-unknown} on ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail). Nothing was written." >&2
-    else
-        detail=
-        paths=
-        if [ -n "$o_name" ]; then
-            detail=", backup $o_name"
-            paths=" and $DIR/.partial/$o_name"
-        fi
-        echo "backup: refused — the backup lock of ${o_by:-unknown} (host ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail) was left by a run that no longer exists. Check OPERATIONS_RUNBOOK §3, then remove $DIR/.backup.lock$paths. Nothing was written." >&2
+        LOCK_TEXT="${o_by:-unknown} on ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail"
+        return 0
     fi
-    exit 1
+    detail=
+    paths=
+    if [ -n "$o_name" ]; then
+        detail=", backup $o_name"
+        paths=" and $DIR/.partial/$o_name"
+    fi
+    LOCK_TEXT="the backup lock of ${o_by:-unknown} (host ${o_host:-unknown}, pid ${o_pid:-unknown}, since ${o_started:-unknown}$detail) was left by a run that no longer exists. Check OPERATIONS_RUNBOOK §3, then remove $DIR/.backup.lock$paths."
+    return 1
 }
 
 if [ -n "$HELD_BY" ]; then
@@ -350,19 +387,48 @@ if [ -n "$HELD_BY" ]; then
         && grep -qxF "release=$HELD_BY" "$LOCK_DIR/owner"; }; then
         could_not_run "--lock-held-by-release $HELD_BY: the backup lock $LOCK_DIR is not held by that release run."
     fi
-elif lock_error=$(mkdir "$LOCK_DIR" 2>&1); then
-    LOCK_OWNED=1
-    {
-        echo "host=$(uname -n)"
-        echo "pid=$$"
-        echo "started_at=$(utc)"
-        echo "by=backup.sh"
-    } >"$LOCK_DIR/owner"
-elif [ -e "$LOCK_DIR" ]; then
-    lock_busy
 else
-    # Not busy: the lock cannot be created at all (no space or inodes left, a read-only file system, ...).
-    could_not_run "the backup lock $LOCK_DIR cannot be created ($(printf '%s' "$lock_error" | tr -d '\r' | tail -n 1))."
+    # Take the lock. While another backup holds it, refuse at once (backup_running), or with --lock-wait-minutes check
+    # it again every LOCK_POLL_SECONDS until it is free or the time is up; mkdir takes it the moment it is free, so no
+    # other backup can start in between. A stale lock is refused at once: waiting never frees it.
+    WAIT_DEADLINE=
+    WAIT_STARTED=
+    while :; do
+        if lock_error=$(mkdir "$LOCK_DIR" 2>&1); then
+            LOCK_OWNED=1
+            {
+                echo "host=$(uname -n)"
+                echo "pid=$$"
+                echo "started_at=$(utc)"
+                echo "by=backup.sh"
+            } >"$LOCK_DIR/owner"
+            [ -z "$WAIT_STARTED" ] \
+                || echo "backup: the backup lock was released after $(($(date +%s) - WAIT_STARTED)) s of waiting; continuing." >&2
+            break
+        fi
+        if [ ! -e "$LOCK_DIR" ]; then
+            # Not busy: the lock cannot be created at all (no space or inodes left, a read-only file system, ...).
+            could_not_run "the backup lock $LOCK_DIR cannot be created ($(printf '%s' "$lock_error" | tr -d '\r' | tail -n 1))."
+        fi
+        if ! lock_running; then
+            echo "backup: refused — $LOCK_TEXT Nothing was written." >&2
+            exit 1
+        fi
+        if [ "$LOCK_WAIT_MINUTES" -eq 0 ]; then
+            echo "backup: refused — a backup is running ($LOCK_TEXT). Nothing was written." >&2
+            exit 1
+        fi
+        now=$(date +%s)
+        if [ -z "$WAIT_DEADLINE" ]; then
+            WAIT_STARTED=$now
+            WAIT_DEADLINE=$((now + LOCK_WAIT_MINUTES * 60))
+            echo "backup: a backup is running ($LOCK_TEXT): waiting up to $LOCK_WAIT_MINUTES min for the backup lock, checking every $LOCK_POLL_SECONDS s." >&2
+        elif [ "$now" -ge "$WAIT_DEADLINE" ]; then
+            echo "backup: refused — a backup is running ($LOCK_TEXT), still after a wait of $LOCK_WAIT_MINUTES min. Nothing was written." >&2
+            exit 1
+        fi
+        sleep "$LOCK_POLL_SECONDS"
+    done
 fi
 WORK=$(mktemp -d)
 step_ok
@@ -380,10 +446,20 @@ if [ "$KIND" = scheduled ]; then
     KEEP_HOURLY=$(json_number "$WORK/policy.json" keep_hourly)
     KEEP_DAILY=$(json_number "$WORK/policy.json" keep_daily)
     KEEP_WEEKLY=$(json_number "$WORK/policy.json" keep_weekly)
+    KEEP_PRE_PURGE=$(json_number "$WORK/policy.json" keep_pre_purge)
+    # An image from before the purge of history archival prints no keep_pre_purge at all (it never took a pre-purge
+    # backup, and its backup-rotate has no --keep-pre-purge): the rotation then leaves pre-purge backups alone. A
+    # keep_pre_purge that is present must be a number, like the other values kept.
+    PRE_PURGE_IN_POLICY=
+    if json_has "$WORK/policy.json" keep_pre_purge; then
+        PRE_PURGE_IN_POLICY=1
+    fi
     if [ "$rc" -ne 0 ] || [ -z "$INTERVAL_HOURS" ] || [ -z "$KEEP_HOURLY" ] || [ -z "$KEEP_DAILY" ] \
-        || [ -z "$KEEP_WEEKLY" ]; then
+        || [ -z "$KEEP_WEEKLY" ] || { [ -n "$PRE_PURGE_IN_POLICY" ] && [ -z "$KEEP_PRE_PURGE" ]; }; then
         could_not_run "the backup policy of Administration → Backups could not be read from the database (backup-policy exit $rc; see above)."
     fi
+    [ -n "$PRE_PURGE_IN_POLICY" ] \
+        || echo "backup: the backup policy names no pre-purge backups kept (keep_pre_purge; an image from before the purge of history archival): the rotation leaves every pre-purge backup alone." >&2
     step_ok
 
     step_begin due
@@ -436,7 +512,7 @@ step_ok
 
 step_begin space
 newest=$(ls -1 "$DIR" 2>/dev/null \
-    | grep -E '^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$' \
+    | grep -E '^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release|pre-purge)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$' \
     | while read -r entry; do [ -f "$DIR/$entry/partflow.dump" ] && echo "$entry"; done \
     | sort | tail -n 1) || newest=
 if [ -n "$newest" ]; then
@@ -515,23 +591,35 @@ step_ok
 
 step_begin verify
 rc=0
-tools backup-verify "$NAME" >&2 || rc=$?
+tools backup-verify "$NAME" >"$WORK/verify.json" || rc=$?
+cat "$WORK/verify.json" >&2
 if [ "$rc" -ne 0 ]; then
     echo "backup: $NAME failed verification (backup-verify exit $rc). Do not use $NAME; remove it after review." >&2
     exit 3
 fi
+DUMP_STARTED=
+if [ "$KIND" = pre-purge ]; then
+    # The purge records the dump start of its pre-purge backup, as backup-verify read it from the manifest.
+    DUMP_STARTED=$(json_field "$WORK/verify.json" dump_started_at)
+    if ! printf '%s' "$DUMP_STARTED" | grep -Eq "$UTC_PATTERN"; then
+        echo "backup: $NAME is verified, but its backup-verify report names no dump start (dump_started_at), so no purge can use it. It stays as a pre-purge backup until the rotation of the scheduled backups removes it." >&2
+        exit 3
+    fi
+fi
 step_ok
 
 STATUS=0
+# A pre-purge run never rotates: the scheduled rotation keeps the newest pre-purge backups (Administration → Backups).
 if [ "$KIND" = scheduled ] && [ -z "$NO_ROTATE" ]; then
     step_begin rotate
     rc=0
-    tools backup-rotate --keep-hourly "$KEEP_HOURLY" --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" >&2 \
-        || rc=$?
+    set -- --keep-hourly "$KEEP_HOURLY" --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY"
+    [ -z "$KEEP_PRE_PURGE" ] || set -- "$@" --keep-pre-purge "$KEEP_PRE_PURGE"
+    tools backup-rotate "$@" >&2 || rc=$?
     case "$rc" in
         0) step_ok ;;
         1)
-            echo "backup: rotation found scheduled backups that fail verification (the names are in the backup-rotate report above); they were kept for review (OPERATIONS_RUNBOOK §9). $NAME itself is complete and verified." >&2
+            echo "backup: rotation found backups that fail verification (the names are in the backup-rotate report above); they were kept for review (OPERATIONS_RUNBOOK §9). $NAME itself is complete and verified." >&2
             STATUS=4
             ;;
         *)
@@ -542,5 +630,9 @@ if [ "$KIND" = scheduled ] && [ -z "$NO_ROTATE" ]; then
 fi
 
 STEP=done
-echo "BACKUP $NAME $DIR/$NAME"
+if [ "$KIND" = pre-purge ]; then
+    echo "BACKUP $NAME $DIR/$NAME $DUMP_STARTED"
+else
+    echo "BACKUP $NAME $DIR/$NAME"
+fi
 exit "$STATUS"

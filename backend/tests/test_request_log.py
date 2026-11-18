@@ -1135,7 +1135,19 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "run_id",
         "settings.retention_period_months",
     ],
-    "history_archive_job": ["SUMS_FILE", "file", "folder"],
+    # The purge's batch checks name only counts and component ids (step 2).
+    "history_archive_job": [
+        "' …' if len(passing) > 5 else ''",
+        "', '.join(str(c.component_id) for c in passing[:5])",
+        "SUMS_FILE",
+        "archived",
+        "deleted",
+        "file",
+        "folder",
+        "len(failing_flows)",
+        "len(passing_flows)",
+        "marked",
+    ],
     "hot_list": [
         "demand.allocated_quantity",
         "demand.part_number",
@@ -1201,7 +1213,7 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "table",
     ],
     # The stored retention period (history archival settings).
-    "policies": ["retention"],
+    "policies": ["BACKUP_KEEP_PRE_PURGE_MAX", "BACKUP_KEEP_PRE_PURGE_MIN", "retention"],
     "production_board": ["department_id", "names"],
     "production_release": [
         "allocated",

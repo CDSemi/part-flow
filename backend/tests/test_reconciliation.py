@@ -68,7 +68,16 @@ _PN_E = "PN-É"
 _PN_C = "PN-C"
 _PN_D = "PN-D"
 
-_ALL_RUN = ("a", "b", "c", "d", "e", "f", "i", "j")
+_ALL_RUN = ("a", "b", "c", "d", "e", "f", "g", "i", "j")
+#: Examined counts of archived history (history archival, Phase 16): zero in
+#: a database whose history was never purged.
+_ARCHIVAL_COUNTS = frozenset({"purged_flows", "archived_releases", "purged_records", "purge_runs"})
+
+
+def _examined_something(check: dict[str, Any]) -> bool:
+    return all(
+        count > 0 for name, count in check["examined"].items() if name not in _ARCHIVAL_COUNTS
+    )
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -728,8 +737,8 @@ def _assert_failing(result: Run, expected: dict[str, set[str]], *, exit_code: in
     for check_id in _ALL_RUN:
         if check_id not in expected:
             assert checks[check_id]["status"] == "pass", checks[check_id]
-            assert all(count > 0 for count in checks[check_id]["examined"].values()), check_id
-    assert checks["g"]["status"] == "not_applicable"
+            if check_id != "g":
+                assert _examined_something(checks[check_id]), check_id
     assert checks["h"]["status"] == "not_applicable"
     assert result.exit_code == exit_code
     assert result.report["exit_code"] == exit_code
@@ -924,11 +933,10 @@ def test_clean_scenario_reports_clean(
         assert checks[check_id]["status"] == "pass", checks[check_id]
         assert checks[check_id]["title"] == reconciliation.CHECK_TITLES[check_id]
         assert checks[check_id]["examined"], check_id
-        assert all(count > 0 for count in checks[check_id]["examined"].values()), checks[check_id]
-    assert checks["g"]["status"] == "not_applicable"
-    assert checks["g"]["reason"] == (
-        "No Movement-history archival exists yet. This check starts with the archival purge."
-    )
+        if check_id != "g":
+            assert _examined_something(checks[check_id]), checks[check_id]
+    # (g) runs since the purge exists (history archival step 2); nothing was purged here.
+    assert checks["g"]["examined"] == {"purged_records": 0, "purge_runs": 0}
     assert checks["h"]["status"] == "not_applicable"
     assert checks["h"]["title"] == "Append-only guards and database-role privileges intact"
     assert checks["h"]["reason"] == (
@@ -2116,7 +2124,7 @@ def test_connection_lost_at_the_advisory_guard_keeps_the_results(
     assert result.report["database"] is not None
     for check_id in _ALL_RUN:
         assert checks[check_id]["status"] == "pass", checks[check_id]
-    assert checks["g"]["status"] == checks["h"]["status"] == "not_applicable"
+    assert checks["h"]["status"] == "not_applicable"
 
 
 def test_run_level_database_errors_are_classified_by_their_origin() -> None:
@@ -2310,12 +2318,11 @@ def test_unexpected_error_keeps_finished_results(
         assert checks[check_id]["status"] == "pass"
     assert (checks["e"]["status"], checks["e"]["error_code"]) == ("error", "internal_error")
     # (h) decides its applicability when it runs, so it is not run either.
-    for check_id in ("f", "h", "i", "j"):
+    for check_id in ("f", "g", "h", "i", "j"):
         assert (checks[check_id]["status"], checks[check_id]["error_code"]) == (
             "error",
             "not_run",
         )
-    assert checks["g"]["status"] == "not_applicable"
     assert "RuntimeError: defect in check e" in result.stderr
     assert "Traceback" in result.stderr
 

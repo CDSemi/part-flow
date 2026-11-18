@@ -17,9 +17,11 @@ The read-only management surface of `app.application.tracking`:
   history, and the first page of the immutable Movement history.
 - ``GET /tracking/movements?part_number=&before=`` — a further page of
   that history: reverse-chronological ``(occurred_at DESC, id DESC)``,
-  ``before`` naming the last Movement delivered and the server resolving
+  ``before`` naming the last entry delivered and the server resolving
   its timestamp for the keyset; ``movement_type=SCRAPPED`` is the Scrap
-  history — the same immutable history restricted to scrap events.
+  history — the same immutable history restricted to scrap events. A
+  flow whose Movements an archival run purged (Phase 16) is ONE entry of
+  ``archived`` at the place of its newest archived Movement.
 - ``GET /tracking/flows?part_number=&before=`` — a further page of the
   PN's Quantity Flows in the one immutable flow order (newest first on
   the flow id alone; a flow's ACTIVE / closed status is presentation,
@@ -376,6 +378,37 @@ class RouteAdjustmentNoteResponse(BaseModel):
     actor_user: UserRefResponse | None
 
 
+class ArchivedHistoryResponse(BaseModel):
+    """One flow's archived history (Phase 16): "History archived in run N"."""
+
+    quantity_flow_id: int
+    run_id: int
+    # The archive folder's name in the archive folder (run-<id>-<UTC stamp>).
+    archive_name: str | None
+    # The flow's status when it was archived.
+    flow_status: str
+    movement_count: int
+    first_occurred_at: datetime.datetime
+    last_occurred_at: datetime.datetime
+    # Its place in the Movement history, and the `before` cursor after it.
+    last_movement_id: int
+    purged_at: datetime.datetime
+
+
+def _archived_response(entry: tracking.ArchivedHistory) -> ArchivedHistoryResponse:
+    return ArchivedHistoryResponse(
+        quantity_flow_id=entry.flow_id,
+        run_id=entry.run_id,
+        archive_name=entry.archive_name,
+        flow_status=entry.flow_status,
+        movement_count=entry.movement_count,
+        first_occurred_at=entry.first_occurred_at,
+        last_occurred_at=entry.last_occurred_at,
+        last_movement_id=entry.last_movement_id,
+        purged_at=entry.purged_at,
+    )
+
+
 class FlowResponse(BaseModel):
     id: int
     quantity: int
@@ -397,6 +430,9 @@ class FlowResponse(BaseModel):
     # Every adjustment of this flow's own snapshot, oldest first (Phase 14
     # slice 6) — a split child or merge result shows only its own.
     route_adjustments: list[RouteAdjustmentNoteResponse]
+    # Set once an archival run purged the flow's Movements (Phase 16): its
+    # trace and deviations are then empty and its route steps ARCHIVED.
+    archived: ArchivedHistoryResponse | None
 
 
 class AllocationResponse(BaseModel):
@@ -467,10 +503,19 @@ class MovementResponse(BaseModel):
 
 class MovementPageResponse(BaseModel):
     movements: list[MovementResponse]
+    # The retained Movements in scope.
     total: int
     has_more: bool
     # Pass as `before` for the next (older) page; null on the last page.
+    # It is the id of the page's last entry: a Movement id, or an archived
+    # entry's `last_movement_id`.
     next_before_movement_id: int | None
+    # The archived flows whose place falls on this page (Phase 16), newest
+    # first: interleave them with `movements` by (time, id) — a Movement's
+    # (occurred_at, id), an entry's (last_occurred_at, last_movement_id).
+    archived: list[ArchivedHistoryResponse]
+    # The archived entries in scope.
+    archived_total: int
 
 
 class FlowPageResponse(BaseModel):
@@ -638,6 +683,7 @@ def _flow(entry: tracking.TrackingFlow) -> FlowResponse:
             )
             for note in entry.route_adjustments
         ],
+        archived=_archived_response(entry.archived) if entry.archived is not None else None,
     )
 
 
@@ -730,7 +776,9 @@ def _movement_page(page: tracking.MovementPage) -> MovementPageResponse:
         movements=movements,
         total=page.total,
         has_more=page.has_more,
-        next_before_movement_id=movements[-1].id if page.has_more and movements else None,
+        next_before_movement_id=page.next_before,
+        archived=[_archived_response(entry) for entry in page.archived],
+        archived_total=page.archived_total,
     )
 
 

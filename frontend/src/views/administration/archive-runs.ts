@@ -1,8 +1,10 @@
 // Presentation of the history archival runs and previews of
 // Administration → History archival & purge (Phase 16, archival design B
-// step 1): the plain words of each run state, the counts, sizes and
-// times. Presentation only — the server owns every rule and decides what
-// a run may do; the actions offered here follow the states it answers.
+// steps 1 and 2): the plain words of each run state and result, the
+// counts (exported, purged, skipped), sizes and times, and the purge's
+// evidence (the pre-purge backup and the receipt). Presentation only —
+// the server owns every rule and decides what a run may do; the actions
+// offered here follow the states it answers.
 
 import type { ArchiveCounts, ArchiveRun } from '../../api/history-archive';
 import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
@@ -18,8 +20,12 @@ export function runStateLabel(run: ArchiveRun): string {
       return run.copyConfirmedAt === null
         ? 'Waiting for the off-host copy'
         : 'Copy confirmed — waiting for the job';
+    case 'PURGING':
+      return 'Purging';
     case 'COMPLETED':
       return 'Completed';
+    case 'COMPLETED_WITH_SKIPS':
+      return 'Completed with skips';
     case 'NOTHING_ELIGIBLE':
       return 'Nothing eligible';
     case 'CANCELLED':
@@ -35,12 +41,14 @@ export function runStateLabel(run: ArchiveRun): string {
 export function runStateTone(run: ArchiveRun): 'on' | 'off' | 'term' | 'err' {
   switch (run.state) {
     case 'COMPLETED':
+    case 'COMPLETED_WITH_SKIPS':
       return 'on';
     case 'FAILED':
       return 'err';
     case 'APPROVED':
     case 'RUNNING':
     case 'WAITING_FOR_COPY':
+    case 'PURGING':
       return 'term';
     default:
       return 'off';
@@ -48,7 +56,8 @@ export function runStateTone(run: ArchiveRun): 'on' | 'off' | 'term' | 'err' {
 }
 
 /** A requested run, or one waiting for its off-host copy, may be
- * cancelled (the server decides; a refusal is shown). */
+ * cancelled — never one the job works on (`RUNNING`, `PURGING`); the
+ * server decides and a refusal is shown. */
 export function runCanBeCancelled(run: ArchiveRun): boolean {
   return run.state === 'APPROVED' || run.state === 'WAITING_FOR_COPY';
 }
@@ -62,12 +71,24 @@ export function runAwaitsCopyConfirmation(run: ArchiveRun): boolean {
   );
 }
 
+/** The plain words of a completed run's result. */
+function resultLabel(result: string | null): string {
+  switch (result) {
+    case 'PURGED':
+      return 'Archived and purged.';
+    case 'NOTHING_PURGED':
+      return 'Nothing purged (every component changed).';
+    case 'EXPORT_ONLY':
+      return 'Exported to files; nothing deleted.';
+    default:
+      return `Completed (${result ?? 'no result'}).`;
+  }
+}
+
 /** What a finished run came to, in plain words; null while it is open. */
 export function runOutcome(run: ArchiveRun): string | null {
-  if (run.state === 'COMPLETED') {
-    return run.result === 'EXPORT_ONLY'
-      ? 'Exported to files; nothing deleted.'
-      : `Completed (${run.result ?? 'no result'}).`;
+  if (run.state === 'COMPLETED' || run.state === 'COMPLETED_WITH_SKIPS') {
+    return resultLabel(run.result);
   }
   if (run.state === 'FAILED') return run.failureReason ?? 'Failed.';
   if (run.state === 'NOTHING_ELIGIBLE') {
@@ -147,6 +168,8 @@ export function runTimes(run: ArchiveRun): { label: string; at: string }[] {
     { label: 'Verified', at: run.verifiedAt },
     { label: 'Copied', at: run.copiedAt },
     { label: 'Copy confirmed', at: run.copyConfirmedAt },
+    { label: 'Backup started', at: run.prePurgeBackup?.dumpStartedAt ?? null },
+    { label: 'Purge started', at: run.purgeStartedAt },
     { label: 'Finished', at: run.finishedAt },
   ];
   return times.filter(
@@ -183,17 +206,29 @@ export function runCounts(run: ArchiveRun): {
   return { shown: run.exported, previewLine: differs ? 'differs' : null };
 }
 
-/** The latest step a run reached after its request (Finished, Verified,
- * Exported or Started), or null when it has not started. */
+/** The latest step a run reached after its request (Finished, Purge
+ * started, Verified, Exported or Started), or null when it has not
+ * started. */
 export function latestRunStep(
   run: ArchiveRun,
 ): { label: string; at: string } | null {
   const steps: { label: string; at: string | null }[] = [
     { label: 'Finished', at: run.finishedAt },
+    { label: 'Purge started', at: run.purgeStartedAt },
     { label: 'Verified', at: run.verifiedAt },
     { label: 'Exported', at: run.exportedAt },
     { label: 'Started', at: run.startedAt },
   ];
   const latest = steps.find((step) => step.at !== null);
   return latest ? { label: latest.label, at: latest.at as string } : null;
+}
+
+/** The purged counts of a run whose purge started, as the server counts
+ * them: `Purged: 4,190 Movements · 118 components · 305 flows` (`Purged so
+ * far` while it purges); null before the purge. */
+export function purgedLine(run: ArchiveRun): string | null {
+  const { purged } = run;
+  if (purged === null) return null;
+  const label = run.state === 'PURGING' ? 'Purged so far' : 'Purged';
+  return `${label}: ${movementsText(purged.movements)} · ${componentsAndFlows(purged)}`;
 }

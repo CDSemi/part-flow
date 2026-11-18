@@ -8,8 +8,9 @@
 #   backup   a manual deploy/production/backup.sh (OPERATIONS_RUNBOOK §3)
 #   restore  the new-instance restore of a backup into an empty database (OPERATIONS_RUNBOOK §6)
 #   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
-#   archive  the hourly work of Movement-history archival now: deploy/production/archive.sh (§11; build step 1 only
-#            exports archives and never deletes anything)
+#   archive  the hourly work of Movement-history archival now: deploy/production/archive.sh (§11): the export, check
+#            and off-host copy of a requested run, its pre-purge backup and the purge of the archived Movement history
+#            from the database, then the reconcile after the purge
 #   delete-permanently
 #            the preview, or with --confirm a verified manual backup and then the deletion, of Work Orders and Part
 #            Numbers entered only for testing (`app.cli delete-permanently` in the owner's one-shot db-roles service;
@@ -20,7 +21,7 @@
 set -eu
 
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
-BACKUP_NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
+BACKUP_NAME_PATTERN='^[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release|pre-purge)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$'
 # The values in the shell would override the env file for every Compose command: the script sets them per command only.
 unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_BACKUP_DIR PARTFLOW_BACKEND_WORKERS \
     COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES
@@ -43,7 +44,9 @@ Commands:
                             (OPERATIONS_RUNBOOK §6, New-instance restore); the checkout must be at the backup's release
   status [--url URL]        the containers, /api/health and the status report; with --url the full check.sh
   archive                   run the hourly work of Movement-history archival now (archive.sh; OPERATIONS_RUNBOOK
-                            §11): export, verify and copy an approved run, or finish a confirmed one; never deletes
+                            §11): export, verify and copy a requested run, take its pre-purge backup and PURGE its
+                            archived Movement history from the database, then reconcile; or continue a run that
+                            waits for its copy confirmation or was left purging
   delete-permanently (--work-order NUMBER | --part-number PN)... --reason TEXT [--confirm]
                             show what would be deleted of Work Orders and Part Numbers entered only for testing; with
                             --confirm take a verified manual backup, then delete them in one transaction

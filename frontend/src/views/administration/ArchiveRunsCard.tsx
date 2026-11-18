@@ -22,6 +22,7 @@ import {
   formatInstant,
   latestRunStep,
   movementsText,
+  purgedLine,
   runAwaitsCopyConfirmation,
   runCanBeCancelled,
   runCounts,
@@ -33,12 +34,14 @@ import {
 import { ServerErrorNote, SettingsCard } from './section-widgets';
 
 // Administration → History archival & purge → Runs (archival design B
-// step 1): every run, newest first, with its state in plain words, the
-// cutoff, the previewed and the exported counts, who requested it and
-// why, its times, its archive and what it came to. A user who may run
-// history archival cancels a requested run or one waiting for its
-// off-host copy (after a confirmation), and confirms the off-host copy of
-// a run waiting for it against the manifest SHA-256 shown. The server
+// steps 1 and 2): every run, newest first, with its state in plain words,
+// the cutoff, the previewed, exported, purged and skipped counts, who
+// requested it and why, its times, its archive with the pre-purge backup
+// and the purge receipt, and what it came to. A user who may run history
+// archival cancels a requested run or one waiting for its off-host copy
+// (after a confirmation) — never one the job works on — and confirms the
+// off-host copy of a run waiting for it against the manifest SHA-256
+// shown; the job then takes the pre-purge backup and purges. The server
 // decides every transition and its refusals are shown as given; an action
 // whose answer was lost reloads the runs and says so (both actions are
 // safe to repeat).
@@ -70,7 +73,8 @@ export function ArchiveRunsCard({
   return (
     <SettingsCard
       title="Runs"
-      description="Each run exports the Movement history before its cutoff to archive files on the server; in this version nothing is deleted."
+      description="Each run exports the Movement history before its cutoff to archive files on the server and, after the off-host copy and a pre-purge backup, purges it from the database."
+      note="Archived commands can no longer be undone."
       action={
         <button
           type="button"
@@ -181,6 +185,7 @@ function RunRow({
       ? run.skipped
       : null;
   const counts = runCounts(run);
+  const purged = purgedLine(run);
   const latest = latestRunStep(run);
   const times = runTimes(run);
   // Requested and the latest step are shown; the rest only under All times.
@@ -209,6 +214,9 @@ function RunRow({
           ) : null}
           {counts.previewLine === 'differs' ? (
             <span className="admin-runsub">{`Preview: ${movementsText(run.preview.movements)} · ${componentsAndFlows(run.preview)}`}</span>
+          ) : null}
+          {purged !== null ? (
+            <span className="admin-runsub">{purged}</span>
           ) : null}
           {skipped !== null ? (
             <span className="admin-runsub">{`Skipped (changed during the run): ${componentsAndFlows(skipped)}`}</span>
@@ -249,6 +257,29 @@ function RunRow({
               <span className="admin-runsub">
                 {formatArchiveSize(run.archiveBytes)}
               </span>
+            ) : null}
+            {/* The purge's evidence, each folded like All times so a
+                typical run keeps its few lines. */}
+            {run.prePurgeBackup !== null ? (
+              <details className="admin-runevidence">
+                <summary>Pre-purge backup</summary>
+                <div className="admin-runlines">
+                  <span className="admin-runarchive">
+                    {run.prePurgeBackup.name}
+                  </span>
+                </div>
+              </details>
+            ) : null}
+            {run.receiptName !== null ? (
+              <details className="admin-runevidence">
+                <summary>Purge receipt</summary>
+                <div className="admin-runlines">
+                  <span className="admin-runarchive">{run.receiptName}</span>
+                  {run.receiptSha256 !== null ? (
+                    <span className="admin-runarchive">{`SHA-256 ${run.receiptSha256}`}</span>
+                  ) : null}
+                </div>
+              </details>
             ) : null}
           </div>
         )}
@@ -372,7 +403,7 @@ function ConfirmCopyDialog({
       await confirmArchiveCopy(run.id, sha256);
       onFinished({
         kind: 'done',
-        text: `The off-host copy of run ${run.id} is confirmed. The archival job on the server completes the run at its next start.`,
+        text: `The off-host copy of run ${run.id} is confirmed. At its next start the archival job on the server takes the pre-purge backup and purges the archived history.`,
       });
     } catch (error) {
       if (writeOutcomeUnknown(error)) {
@@ -417,7 +448,8 @@ function ConfirmCopyDialog({
           <span>The archive folder is copied off the server</span>
         </label>
         <p className="admin-fieldhelp">
-          The archival job on the server completes the run at its next start.
+          At its next start the archival job on the server then takes the
+          pre-purge backup and purges the archived history from the database.
         </p>
         <ServerErrorNote message={serverError} />
       </div>

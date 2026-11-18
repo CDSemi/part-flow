@@ -8,7 +8,8 @@ often it takes a scheduled backup and how many its rotation keeps.
   settings): a full replace of strict integers; a refused value writes
   nothing, a no-op writes nothing, an effective change is audited once as
   ``ApplicationPolicy`` / ``backups`` with its actor, and no other section
-  changes;
+  changes; the pre-purge backups kept (history archival step 2) is optional
+  in a ``PUT`` and keeps its stored value when left out;
 - ``python -m app.cli backup-policy``: the stored policy as one JSON
   document, and a failure document when the database cannot be read.
 
@@ -48,17 +49,20 @@ _DEFAULTS = {
     "backup_keep_hourly": 48,
     "backup_keep_daily": 30,
     "backup_keep_weekly": 52,
+    "backup_keep_pre_purge": 3,
 }
 _CHANGED = {
     "backup_interval_hours": 6,
     "backup_keep_hourly": 24,
     "backup_keep_daily": 14,
     "backup_keep_weekly": 8,
+    "backup_keep_pre_purge": 5,
 }
 _E_INTERVAL = "Back up every 1, 2, 3, 4, 6, 8, 12 or 24 hours."
 _E_HOURLY = "Hourly backups kept must be a whole number from 0 to 720."
 _E_DAILY = "Daily backups kept must be a whole number from 1 to 3650."
 _E_WEEKLY = "Weekly backups kept must be a whole number from 0 to 520."
+_E_PRE_PURGE = "Pre-purge backups kept must be a whole number from 1 to 100."
 
 
 def _alembic_config(database_url: URL) -> Config:
@@ -206,7 +210,32 @@ def test_every_allowed_value_is_admitted(
         "backup_keep_daily": daily,
         "backup_keep_weekly": weekly,
     }
-    assert _values(_ok(admin_of(client).put(_POLICY_PATH, json=body))) == body
+    # The pre-purge backups kept, left out, keeps its stored value.
+    assert _values(_ok(admin_of(client).put(_POLICY_PATH, json=body))) == {
+        **body,
+        "backup_keep_pre_purge": 3,
+    }
+
+
+@pytest.mark.parametrize("keep", [1, 100])
+def test_the_pre_purge_backups_kept_is_optional(
+    client: TestClient, db_engine: Engine, keep: int
+) -> None:
+    scheduled = {key: value for key, value in _DEFAULTS.items() if key != "backup_keep_pre_purge"}
+    before = len(_policy_audits(db_engine))
+    body = _ok(
+        admin_of(client).put(_POLICY_PATH, json={**scheduled, "backup_keep_pre_purge": keep})
+    )
+    assert _values(body) == {**_DEFAULTS, "backup_keep_pre_purge": keep}
+    rows = _policy_audits(db_engine)
+    assert len(rows) == before + 1
+    assert tuple(rows[-1])[1:3] == (_DEFAULTS, {**_DEFAULTS, "backup_keep_pre_purge": keep})
+    # Left out, it stays; the four scheduled fields still replace in full.
+    changed = {**scheduled, "backup_keep_daily": 14}
+    assert _values(_ok(admin_of(client).put(_POLICY_PATH, json=changed))) == {
+        **changed,
+        "backup_keep_pre_purge": keep,
+    }
 
 
 @pytest.mark.parametrize(
@@ -221,10 +250,13 @@ def test_every_allowed_value_is_admitted(
         ("backup_keep_daily", 3651, _E_DAILY),
         ("backup_keep_weekly", -1, _E_WEEKLY),
         ("backup_keep_weekly", 521, _E_WEEKLY),
+        ("backup_keep_pre_purge", 0, _E_PRE_PURGE),
+        ("backup_keep_pre_purge", 101, _E_PRE_PURGE),
+        ("backup_keep_pre_purge", None, _E_PRE_PURGE),
     ],
 )
 def test_refused_values_write_nothing(
-    client: TestClient, db_engine: Engine, field: str, value: int, message: str
+    client: TestClient, db_engine: Engine, field: str, value: int | None, message: str
 ) -> None:
     row = _stored_row(db_engine)
     count = _audit_count(db_engine)
@@ -243,9 +275,10 @@ def test_refused_values_write_nothing(
         {**_DEFAULTS, "backup_keep_daily": 30.0},
         {**_DEFAULTS, "backup_keep_hourly": True},
         {**_DEFAULTS, "backup_keep_hourly": None},
+        {**_DEFAULTS, "backup_keep_pre_purge": "3"},
         {**_DEFAULTS, "extra": 1},
     ],
-    ids=["missing-field", "string", "float", "bool", "null", "extra-field"],
+    ids=["missing-field", "string", "float", "bool", "null", "pre-purge-string", "extra-field"],
 )
 def test_malformed_bodies_are_refused_by_the_schema(
     client: TestClient, db_engine: Engine, body: dict[str, Any]
@@ -301,9 +334,11 @@ def test_the_cli_prints_the_stored_policy(
         "keep_hourly": 48,
         "keep_daily": 30,
         "keep_weekly": 52,
+        "keep_pre_purge": 3,
         "error": None,
     }
     assert "backup-policy: a scheduled backup every hour; keep 48 hourly, 30 daily" in err
+    assert err.rstrip().endswith("and 3 pre-purge backups")
 
     _ok(admin_of(client).put(_POLICY_PATH, json=_CHANGED))
     assert cli.main(["backup-policy"]) == 0
@@ -313,7 +348,8 @@ def test_the_cli_prints_the_stored_policy(
         document["keep_hourly"],
         document["keep_daily"],
         document["keep_weekly"],
-    ) == (6, 24, 14, 8)
+        document["keep_pre_purge"],
+    ) == (6, 24, 14, 8, 5)
 
 
 def test_the_cli_reports_a_database_it_cannot_reach(
@@ -328,10 +364,11 @@ def test_the_cli_reports_a_database_it_cannot_reach(
         get_settings.cache_clear()
     out, err = capsys.readouterr()
     document = json.loads(out)
-    assert (document["result"], document["exit_code"], document["interval_hours"]) == (
-        "failed",
-        2,
-        None,
-    )
+    assert (
+        document["result"],
+        document["exit_code"],
+        document["interval_hours"],
+        document["keep_pre_purge"],
+    ) == ("failed", 2, None, None)
     assert document["error"]["code"] == "database_unavailable"
     assert "could not reach its database" in err

@@ -7,7 +7,7 @@ the schema of the password rules and Remember me (owner request of
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_history_archive_schema.py`` with ``0040_phase16_history_archive``;
+  ``tests/test_history_purge_schema.py`` with ``0041_phase16_history_purge``;
 - the migration's literals equal the model constants and the section ids;
 - a fresh install holds today's behavior — 6 to 256 characters, no
   composition rule, Remember me not offered (30 days when it is) — and every

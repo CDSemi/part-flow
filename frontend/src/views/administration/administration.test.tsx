@@ -157,7 +157,13 @@ interface FakeState {
   /** `application_policy` Due Soon warning policy. */
   dueSoon: { min: number; percent: number; max: number };
   /** `application_policy` backup policy (Phase 16). */
-  backup: { interval: number; hourly: number; daily: number; weekly: number };
+  backup: {
+    interval: number;
+    hourly: number;
+    daily: number;
+    weekly: number;
+    prePurge: number;
+  };
   /** Scan Station devices (Phase 14 slice 4), every state. */
   devices: DeviceRow[];
   /** What issuing an enrollment code needs (the server's answer). */
@@ -319,7 +325,7 @@ function seedState(): FakeState {
     badgeConfirm: { done: true, queue: true, undo: true },
     undoReasonRequired: false,
     dueSoon: { min: 2, percent: 15, max: 7 },
-    backup: { interval: 1, hourly: 48, daily: 30, weekly: 52 },
+    backup: { interval: 1, hourly: 48, daily: 30, weekly: 52, prePurge: 3 },
     devices: [],
     enrollmentPermissions: [
       'MANAGE_CORRECTION_PERMISSIONS',
@@ -462,6 +468,8 @@ const E_BK_INTERVAL = 'Back up every 1, 2, 3, 4, 6, 8, 12 or 24 hours.';
 const E_BK_HOURLY = 'Hourly backups kept must be a whole number from 0 to 720.';
 const E_BK_DAILY = 'Daily backups kept must be a whole number from 1 to 3650.';
 const E_BK_WEEKLY = 'Weekly backups kept must be a whole number from 0 to 520.';
+const E_BK_PRE_PURGE =
+  'Pre-purge backups kept must be a whole number from 1 to 100.';
 
 const wholeIn = (value: unknown, min: number, max: number) =>
   typeof value === 'number' &&
@@ -763,6 +771,8 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       archive_start_minute: 20,
       archive_preview_seconds: 90,
       archive_max_wait_days: 7,
+      archive_purge_batch_movements: 50000,
+      archive_purge_batch_part_numbers: 20,
       updated_at: T0,
     });
   }
@@ -774,15 +784,20 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       return json({ detail: backupFailure.detail }, backupFailure.status);
     }
     if (method === 'PUT') {
-      // A full replace: exactly the four strict-integer fields.
+      // A full replace of the four strict-integer fields of the
+      // scheduled backups; the pre-purge backups kept is optional (left
+      // out = kept), as the server takes it.
       const keys = [
         'backup_interval_hours',
         'backup_keep_hourly',
         'backup_keep_daily',
         'backup_keep_weekly',
       ];
+      const given = Object.keys(body);
       if (
-        Object.keys(body).length !== keys.length ||
+        !given.every(
+          (key) => keys.includes(key) || key === 'backup_keep_pre_purge',
+        ) ||
         !keys.every(
           (key) =>
             typeof body[key] === 'number' &&
@@ -795,19 +810,32 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       const hourly = body.backup_keep_hourly as number;
       const daily = body.backup_keep_daily as number;
       const weekly = body.backup_keep_weekly as number;
+      const prePurge = given.includes('backup_keep_pre_purge')
+        ? body.backup_keep_pre_purge
+        : state.backup.prePurge;
       if (![1, 2, 3, 4, 6, 8, 12, 24].includes(interval)) {
         return json({ detail: E_BK_INTERVAL }, 422);
       }
       if (!wholeIn(hourly, 0, 720)) return json({ detail: E_BK_HOURLY }, 422);
       if (!wholeIn(daily, 1, 3650)) return json({ detail: E_BK_DAILY }, 422);
       if (!wholeIn(weekly, 0, 520)) return json({ detail: E_BK_WEEKLY }, 422);
-      state.backup = { interval, hourly, daily, weekly };
+      if (!wholeIn(prePurge, 1, 100)) {
+        return json({ detail: E_BK_PRE_PURGE }, 422);
+      }
+      state.backup = {
+        interval,
+        hourly,
+        daily,
+        weekly,
+        prePurge: prePurge as number,
+      };
     }
     return json({
       backup_interval_hours: state.backup.interval,
       backup_keep_hourly: state.backup.hourly,
       backup_keep_daily: state.backup.daily,
       backup_keep_weekly: state.backup.weekly,
+      backup_keep_pre_purge: state.backup.prePurge,
       updated_at: T0,
     });
   }
@@ -4307,7 +4335,7 @@ test('Settings shows the other general settings as disabled previews of what Par
 
 const BACKUP_PATH = '/api/policies/backups';
 const BACKUP_HELP =
-  "The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
+  "The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Of the pre-purge backups, which the history archival job takes before each purge, it keeps the newest number set here and removes the older ones. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
 const BACKUP_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Check the backup settings before trying again; saving the same values again is safe.';
 
@@ -4341,15 +4369,21 @@ test('FA-B1: Backups loads the owner defaults and explains the hourly task', asy
   expect(keptField('Hourly backups kept')).toHaveValue(48);
   expect(keptField('Daily backups kept')).toHaveValue(30);
   expect(keptField('Weekly backups kept')).toHaveValue(52);
+  expect(keptField('Pre-purge backups kept')).toHaveValue(3);
   expect(
     screen.getByRole('heading', { name: 'Scheduled backups' }),
   ).toBeInTheDocument();
   expect(document.body.textContent).toContain(BACKUP_HELP);
-  expect(document.body.textContent).toContain(
-    'Keeps one scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups.',
+  // Pre-purge backups are rotated to the newest N, unlike the backups
+  // taken by hand or before an update.
+  expect(document.body.textContent).not.toContain(
+    'removes the other scheduled backups. Backups taken by hand',
   );
   expect(document.body.textContent).toContain(
-    'How often the server takes a scheduled backup, and how many hourly, daily and weekly backups it keeps',
+    'Keeps one scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups. Keeps the newest 3 pre-purge backups.',
+  );
+  expect(document.body.textContent).toContain(
+    'How often the server takes a scheduled backup, and how many hourly, daily, weekly and pre-purge backups it keeps',
   );
   expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
   expect(screen.queryByRole('note')).toBeNull();
@@ -4357,7 +4391,7 @@ test('FA-B1: Backups loads the owner defaults and explains the hourly task', asy
   expect(document.body.textContent).not.toMatch(/Phase \d/);
 });
 
-test('FA-B2: a change PUTs all four fields and re-reads', async () => {
+test('FA-B2: a change PUTs all five fields and re-reads', async () => {
   const interval = await openBackups();
   fireEvent.change(interval, { target: { value: '6' } });
   fireEvent.change(keptField('Hourly backups kept'), {
@@ -4388,6 +4422,7 @@ test('FA-B2: a change PUTs all four fields and re-reads', async () => {
         backup_keep_hourly: 0,
         backup_keep_daily: 14,
         backup_keep_weekly: 1,
+        backup_keep_pre_purge: 3,
       },
     },
   ]);
@@ -4396,6 +4431,7 @@ test('FA-B2: a change PUTs all four fields and re-reads', async () => {
     hourly: 0,
     daily: 14,
     weekly: 1,
+    prePurge: 3,
   });
   await waitFor(() => expect(save).toBeDisabled());
   // Editing again clears the saved note.
@@ -4458,7 +4494,7 @@ test('FA-B4: an unanswered save is an unknown outcome and re-reads the stored po
 });
 
 test('FA-B5: offline the stored policy stays visible and cannot be saved', async () => {
-  state.backup = { interval: 12, hourly: 0, daily: 7, weekly: 4 };
+  state.backup = { interval: 12, hourly: 0, daily: 7, weekly: 4, prePurge: 3 };
   const interval = await openBackups('unavailable');
   expect(interval).toHaveValue('12');
   fireEvent.change(keptField('Daily backups kept'), {
@@ -4472,7 +4508,13 @@ test('FA-B5: offline the stored policy stays visible and cannot be saved', async
 
 test('FA-B6: without the permission the policy reads as text; a failed load offers Retry', async () => {
   session = sessionValue(signedInUser(['MANAGE_USERS_AND_ROLES']));
-  state.backup = { interval: 1, hourly: 48, daily: 30, weekly: 52 };
+  state.backup = {
+    interval: 1,
+    hourly: 48,
+    daily: 30,
+    weekly: 52,
+    prePurge: 5,
+  };
   renderAdmin();
   openSection('Backups');
   await waitFor(() =>
@@ -4481,6 +4523,7 @@ test('FA-B6: without the permission the policy reads as text; a failed load offe
       'Hourly backups kept': '48',
       'Daily backups kept': '30',
       'Weekly backups kept': '52',
+      'Pre-purge backups kept': '5',
     }),
   );
   expect(
@@ -4501,6 +4544,51 @@ test('FA-B6: without the permission the policy reads as text; a failed load offe
   backupFailure = null;
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   expect(await screen.findByLabelText('Scheduled backup')).toHaveValue('1');
+});
+
+test('FA-B7: Pre-purge backups kept is saved with the four other fields; out of range it cannot be saved; a refusal stays in place', async () => {
+  await openBackups();
+  const save = screen.getByRole('button', { name: 'Save' });
+  const prePurge = keptField('Pre-purge backups kept');
+  for (const value of ['0', '101', '2.5', '']) {
+    fireEvent.change(prePurge, { target: { value } });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Enter a whole number from 1 to 100.',
+    );
+    expect(save).toBeDisabled();
+  }
+
+  fireEvent.change(prePurge, { target: { value: '1' } });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(document.body.textContent).toContain(
+    'Keeps the newest pre-purge backup.',
+  );
+  fireEvent.click(save);
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    '✓ Backup settings saved.',
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: BACKUP_PATH,
+      body: {
+        backup_interval_hours: 1,
+        backup_keep_hourly: 48,
+        backup_keep_daily: 30,
+        backup_keep_weekly: 52,
+        backup_keep_pre_purge: 1,
+      },
+    },
+  ]);
+  expect(state.backup.prePurge).toBe(1);
+
+  // The server's own range message is shown as given.
+  backupFailure = { status: 422, detail: E_BK_PRE_PURGE };
+  fireEvent.change(prePurge, { target: { value: '7' } });
+  fireEvent.click(save);
+  expect(await screen.findByRole('alert')).toHaveTextContent(E_BK_PRE_PURGE);
+  expect(prePurge).toHaveValue(7);
+  expect(state.backup.prePurge).toBe(1);
 });
 
 /* ============ Users (Phase 13 — application accounts) ============ */
@@ -6218,6 +6306,8 @@ test('FA-3: without its permission every section is view-only — values as text
     'Start minute': '20 minutes past each hour',
     'Preview time limit': '90 seconds',
     'Report a waiting run after': '7 days',
+    'Movements per purge batch': '50,000',
+    'Part Numbers per purge batch': '20',
   });
   expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull();
 

@@ -26,14 +26,15 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → History archival & purge (Phase 16, archival design B
-// step 1; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings of the
+// steps 1 and 2; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings of the
 // Movement-history archival (`/api/policies/data-retention` — the
 // retention period, the shortest allowed period, the Start minute of the
-// server's archival job, the preview time limit and the wait limit), the
-// preview of what a run would export at a cutoff and the request of a
-// run, and the table of runs with Cancel and Confirm off-host copy. In
-// this step a run exports the history to archive files and deletes
-// nothing. Every change needs the Run history archival and purge
+// server's archival job, the preview time limit, the wait limit and the
+// purge batch limits), the preview of what a run would archive at a
+// cutoff and the request of a run, and the table of runs with Cancel and
+// Confirm off-host copy. A run exports the history to archive files and,
+// after the off-host copy and a pre-purge backup, purges it from the
+// database. Every change needs the Run history archival and purge
 // permission (the server checks it); every signed-in user reads the
 // settings and the runs, with one view-only line under the header when
 // the user may not change them. The server validates every value and
@@ -62,7 +63,7 @@ export function HistoryArchivalSection() {
       <div className="admin-cards admin-cards-two">
         <SettingsCard
           title="Retention and schedule"
-          description="How long Movement history stays in the database, and when the server's archival job does its work."
+          description="How long Movement history stays in the database, when the server's archival job does its work, and how much it purges at a time."
           edit={
             canWrite && policy
               ? {
@@ -163,6 +164,18 @@ function RetentionSettingsBody({
           <span className="k">Report a waiting run after</span>
           <span className="v">{`${policy.maxWaitDays} days`}</span>
         </div>
+        <div className="prow">
+          <span className="k">Movements per purge batch</span>
+          <span className="v">
+            {policy.purgeBatchMovements.toLocaleString('en-US')}
+          </span>
+        </div>
+        <div className="prow">
+          <span className="k">Part Numbers per purge batch</span>
+          <span className="v">
+            {policy.purgeBatchPartNumbers.toLocaleString('en-US')}
+          </span>
+        </div>
       </div>
       {editing ? (
         <RetentionSettingsDialog
@@ -210,6 +223,12 @@ function RetentionSettingsDialog({
   const [minuteText, setMinuteText] = useState(String(saved.startMinute));
   const [secondsText, setSecondsText] = useState(String(saved.previewSeconds));
   const [daysText, setDaysText] = useState(String(saved.maxWaitDays));
+  const [batchMovementsText, setBatchMovementsText] = useState(
+    String(saved.purgeBatchMovements),
+  );
+  const [batchPartNumbersText, setBatchPartNumbersText] = useState(
+    String(saved.purgeBatchPartNumbers),
+  );
   const [busy, setBusy] = useState(false);
   const [wrote, setWrote] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -219,13 +238,17 @@ function RetentionSettingsDialog({
   const minute = parseWhole(minuteText);
   const seconds = parseWhole(secondsText);
   const days = parseWhole(daysText);
+  const batchMovements = parseWhole(batchMovementsText);
+  const batchPartNumbers = parseWhole(batchPartNumbersText);
   const periodInvalid = keepPeriod && period === null;
   const invalid =
     periodInvalid ||
     shortest === null ||
     minute === null ||
     seconds === null ||
-    days === null;
+    days === null ||
+    batchMovements === null ||
+    batchPartNumbers === null;
   const shortestChanged =
     shortest !== null && shortest !== saved.shortestRetentionMonths;
   // Only the valid settings whose value differs from the stored ones.
@@ -242,6 +265,13 @@ function RetentionSettingsDialog({
       : {}),
     ...(days !== null && days !== saved.maxWaitDays
       ? { maxWaitDays: days }
+      : {}),
+    ...(batchMovements !== null && batchMovements !== saved.purgeBatchMovements
+      ? { purgeBatchMovements: batchMovements }
+      : {}),
+    ...(batchPartNumbers !== null &&
+    batchPartNumbers !== saved.purgeBatchPartNumbers
+      ? { purgeBatchPartNumbers: batchPartNumbers }
       : {}),
   };
   const changed = Object.keys(patch).length > 0;
@@ -422,6 +452,46 @@ function RetentionSettingsDialog({
           <p className="admin-fieldhelp">
             When a run waits longer than this for its off-host copy to be
             confirmed, the server's monitoring check reports it.
+          </p>
+        )}
+        <AdminField label="Movements per purge batch">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={batchMovementsText}
+            disabled={busy}
+            onChange={(event) => setBatchMovementsText(event.target.value)}
+          />
+        </AdminField>
+        {batchMovements === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            The purge deletes whole components, in batches of at most this many
+            Movements; a larger component is a batch of its own.
+          </p>
+        )}
+        <AdminField label="Part Numbers per purge batch">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={batchPartNumbersText}
+            disabled={busy}
+            onChange={(event) => setBatchPartNumbersText(event.target.value)}
+          />
+        </AdminField>
+        {batchPartNumbers === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            A batch locks at most this many Part Numbers; work on them waits
+            until the batch ends.
           </p>
         )}
         <ServerErrorNote message={serverError} />

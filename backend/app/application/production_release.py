@@ -69,7 +69,7 @@ import uuid
 from collections.abc import Collection
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import Integer, any_, func, literal, select
+from sqlalchemy import Integer, any_, func, literal, select, union_all
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -96,6 +96,7 @@ from app.infrastructure.models import (
     DEVICE_EVENT_ID_CONSTRAINT,
     AssignedRoute,
     AssignedRouteStep,
+    HistoryArchivedFlow,
     Operation,
     PartMovement,
     QuantityFlow,
@@ -592,8 +593,9 @@ def released_quantities(session: Session, work_order_demand_ids: Collection[int]
     Movement→Demand foreign key (deliberately forbidden: WorkOrderDemand
     never owns Movement) and no stored counter: the release command
     always records the initiating demand id in the ``RECEIVED``
-    metadata, and `part_movements` rows can never be updated or
-    deleted, so the answer never regresses and needs no reconciliation.
+    metadata, and `part_movements` rows are never updated and deleted
+    only by the purge of archived history, whose records keep the same
+    evidence — so the answer never regresses.
 
     Demands without release evidence are simply absent from the result
     (callers read them as 0). The values feed both the removal rule of
@@ -601,24 +603,39 @@ def released_quantities(session: Session, work_order_demand_ids: Collection[int]
     quantity is ``requested_quantity`` minus this value, and a Work
     Order whose every current demand has no remaining quantity reads as
     RELEASED (GUI_DESIGN §11.1).
+
+    Archived history (history archival design B §4.3): the purge deletes
+    the ``RECEIVED`` Movements of archived flows and keeps each flow's
+    released quantity and demand line on its carry-forward record; the
+    PURGED records are added in the same statement, so the answer is
+    the same before and after a purge.
     """
     ids = [int(demand_id) for demand_id in work_order_demand_ids]
     if not ids:
         return {}
+    # ONE array parameter, not one bind parameter per id: a whole-table
+    # caller (reconcile check (e)) may pass more ids than the protocol's
+    # 65,535-parameter limit.
+    wanted = literal(ids, ARRAY(Integer))
     demand_id_value = PartMovement.metadata_[CONTEXT_KEY][DEMAND_ID_KEY].as_integer()
-    rows = session.execute(
-        select(demand_id_value, func.sum(PartMovement.quantity))
-        .where(
+    evidence = union_all(
+        select(demand_id_value.label("demand_id"), PartMovement.quantity.label("quantity")).where(
             # Only a RECEIVED Movement is release evidence: later
             # movement types may carry demand context for other
             # reasons without meaning "this demand released".
             PartMovement.movement_type == MovementType.RECEIVED,
-            # ONE array parameter, not one bind parameter per id: a
-            # whole-table caller (reconcile check (e)) may pass more ids
-            # than the protocol's 65,535-parameter limit.
-            demand_id_value == any_(literal(ids, ARRAY(Integer))),
-        )
-        .group_by(demand_id_value)
+            demand_id_value == any_(wanted),
+        ),
+        select(
+            HistoryArchivedFlow.received_demand_id.label("demand_id"),
+            HistoryArchivedFlow.received_quantity.label("quantity"),
+        ).where(
+            HistoryArchivedFlow.purged_at.is_not(None),
+            HistoryArchivedFlow.received_demand_id == any_(wanted),
+        ),
+    ).subquery()
+    rows = session.execute(
+        select(evidence.c.demand_id, func.sum(evidence.c.quantity)).group_by(evidence.c.demand_id)
     )
     return {int(demand_id): int(total) for demand_id, total in rows if demand_id is not None}
 

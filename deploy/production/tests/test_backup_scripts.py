@@ -1,6 +1,6 @@
 """P16-S5: deploy/production/backup.sh and restore-test.sh against fake `docker`, `df`, `ps`, `uname`, `id`, `curl` and
 `sleep` executables (P16-S5 SPEC section 6.3: SB-1, SB-2, BS-1..BS-17, RT-1..RT-19;
-the P16-S5 audit adds BS-18 and RT-20).
+the P16-S5 audit adds BS-18 and RT-20; the purge of history archival adds BS-24..BS-31 and RT-21).
 
 The harness of test_release_scripts.py is reused: a temporary fake repository root (a copy of compose.production.yaml,
 compose.production.build.yaml and an env file whose PARTFLOW_BACKUP_DIR is a temporary directory), a `bin` directory
@@ -45,7 +45,10 @@ IMAGE_WEB = "sha256:" + "c" * 64
 IMAGE_DB = "sha256:" + "d" * 64
 REVISION = "0032_phase14_route_adjusted"
 COMPOSE_PREFIX = "compose -f compose.production.yaml --env-file .env.production "
-NAME_RE = r"[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?"
+NAME_RE = r"[0-9]{8}T[0-9]{6}Z-(scheduled|daily|manual|pre-release|pre-purge)(-[A-Za-z0-9][A-Za-z0-9._-]{0,63})?"
+# Movement-history archival step 2: the label of a pre-purge backup is the archive name of its run.
+PRE_PURGE_LABEL = "run-3-20261008T012000Z"
+DUMP_STARTED = "2026-10-08T02:00:31Z"
 DB_SIZE = r"exec -T db sh -c psql .*pg_database_size"
 PG_STAT = r"exec -T db sh -c psql .*pg_stat_activity"
 PG_DUMP = r"exec -T -e TZ=UTC db sh -c pg_dump "
@@ -83,10 +86,15 @@ def report(command, result, exit_code, **fields):
                       indent=2, ensure_ascii=True) + "\n"
 
 
-def policy_report(interval=1, hourly=48, daily=30, weekly=52):
+def policy_report(interval=1, hourly=48, daily=30, weekly=52, pre_purge=3):
     """The backup policy of Administration → Backups as `app.cli backup-policy` prints it."""
     return report("backup-policy", "read", 0, interval_hours=interval, keep_hourly=hourly, keep_daily=daily,
-                  keep_weekly=weekly, error=None)
+                  keep_weekly=weekly, keep_pre_purge=pre_purge, error=None)
+
+
+def verify_report(name="x", kind="scheduled", started=DUMP_STARTED):
+    """A verified `backup-verify` report (the fields backup.sh reads)."""
+    return report("backup-verify", "verified", 0, name=name, kind=kind, dump_started_at=started)
 
 
 def due_report(due=True, newest=None, interval=1):
@@ -278,7 +286,9 @@ class Static(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class Backup(ScriptHarness):
+class BackupHarness(ScriptHarness):
+    """The fakes of a green backup.sh run (BS cases)."""
+
     def setUp(self):
         super().setUp()
         bd = str(self.backup_dir)
@@ -327,6 +337,8 @@ class Backup(ScriptHarness):
         (self.lock / "owner").write_text(text, encoding="utf-8", newline="\n")
         return text
 
+
+class Backup(BackupHarness):
     # BS-1
     def test_bs1_scheduled_all_green(self):
         self.backup()
@@ -356,7 +368,7 @@ class Backup(ScriptHarness):
             + IMAGE_BACKEND + " --image-web " + IMAGE_WEB + " --image-db " + IMAGE_DB,
             "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-verify " + name,
             "--profile ops run --rm --no-deps -T --user 1000:1000 backup-tools backup-rotate --keep-hourly 48"
-            " --keep-daily 30 --keep-weekly 52",
+            " --keep-daily 30 --keep-weekly 52 --keep-pre-purge 3",
         ]
         self.assertEqual(self.docker(), expected)
         for entry in self.docker_entries(r"backup-tools "):
@@ -405,13 +417,15 @@ class Backup(ScriptHarness):
             self.assertExit(0)
             self.assertNoDocker(r"backup-rotate")
 
-    # BS-19: the policy of Administration → Backups decides the interval and the retention.
+    # BS-19: the policy of Administration → Backups decides the interval and the retention, the pre-purge backups kept
+    # included (archival step 2: the scheduled rotation passes --keep-pre-purge).
     def test_bs19_the_policy_reaches_the_due_check_and_the_rotation(self):
-        self.prepend("docker", rule(r"app\.cli backup-policy$", out(policy_report(6, 24, 14, 8))))
+        self.prepend("docker", rule(r"app\.cli backup-policy$", out(policy_report(6, 24, 14, 8, 5))))
         self.backup()
         self.assertExit(0)
         self.assertEqual(len(self.docker_entries(r"backup-due --interval-hours 6$")), 1)
-        self.assertEqual(len(self.docker_entries(r"backup-rotate --keep-hourly 24 --keep-daily 14 --keep-weekly 8$")), 1)
+        self.assertEqual(len(self.docker_entries(
+            r"backup-rotate --keep-hourly 24 --keep-daily 14 --keep-weekly 8 --keep-pre-purge 5$")), 1)
         due = self.docker_entries(r"backup-due ")[0]
         self.assertEqual(due["env"].get("PARTFLOW_RELEASE"), RELEASE)
 
@@ -429,11 +443,12 @@ class Backup(ScriptHarness):
         self.assertEqual(self.partial_entries(), [])
         self.assertFalse(self.lock.exists())
 
-    # BS-21: the policy cannot be read (database down, an older schema): the run could not run.
+    # BS-21: the policy cannot be read (database down, an older schema): the run could not run. keep_pre_purge: BS-31.
     def test_bs21_policy_unreadable(self):
         failed = report("backup-policy", "failed", 2, interval_hours=None, keep_hourly=None, keep_daily=None,
-                        keep_weekly=None, error={"code": "database_unavailable", "message": "x"})
-        for answer in (out(failed, rc=2), out("", rc=1, stderr="no such command\n"), out(policy_report(), rc=2)):
+                        keep_weekly=None, keep_pre_purge=None, error={"code": "database_unavailable", "message": "x"})
+        for answer in (out(failed, rc=2), out("", rc=1, stderr="no such command\n"), out(policy_report(), rc=2),
+                       out(policy_report(hourly=None))):
             with self.subTest(answer=answer):
                 self.reset()
                 self.prepend("docker", rule(r"app\.cli backup-policy$", answer))
@@ -745,6 +760,191 @@ class Backup(ScriptHarness):
         self.backup()
         self.assertExit(0)
         self.assertIn("backup: warning — extra tables in the dump: s4_extra", self.result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# backup.sh, Movement-history archival step 2: the pre-purge kind (BS-24..BS-26) and the lock wait (BS-27..BS-30)
+# ---------------------------------------------------------------------------
+
+
+class PrePurge(BackupHarness):
+    def pre_purge_line(self):
+        match = re.fullmatch(rf"BACKUP ([0-9]{{8}}T[0-9]{{6}}Z-pre-purge-{PRE_PURGE_LABEL}) (\S+) (\S+)\n",
+                             self.result.stdout)
+        self.assertIsNotNone(match, self.result.stdout + self.result.stderr)
+        return match.groups()
+
+    # BS-24: a pre-purge backup is published and verified like every backup, reads no policy, never rotates, takes the
+    # default reason, and its BACKUP line adds the dump start of its backup-verify report.
+    def test_bs24_pre_purge_backup(self):
+        self.prepend("docker", rule(TOOL_RUN + "backup-verify ", out(verify_report(kind="pre-purge"))))
+        self.backup("--label", PRE_PURGE_LABEL, kind="pre-purge")
+        self.assertExit(0)
+        name, path, started = self.pre_purge_line()
+        self.assertEqual(path, f"{sh_path(self.backup_dir)}/{name}")
+        self.assertEqual(started, DUMP_STARTED)
+        self.assertEqual(self.published(), [name])
+        manifest = " ".join(self.docker_entries(r"backup-manifest ")[0]["argv"])
+        self.assertIn(f"--name {name} --operator scheduler --reason pre-purge backup for {PRE_PURGE_LABEL} --release-tag",
+                      manifest)
+        self.assertEqual(len(self.docker_entries(rf"backup-verify {name}$")), 1)
+        self.assertIn('"command": "backup-verify"', self.result.stderr)
+        self.assertNoDocker(r"backup-policy", r"backup-due", r"backup-rotate")
+        self.assertFalse(self.lock.exists())
+        owner = self.docker_entries(r"backup-manifest ")[0]["watch"][str(self.lock / "owner")]
+        self.assertIn(f"name={name}", owner.splitlines())
+        with self.subTest(case="a reason of its own"):
+            self.reset()
+            self.prepend("docker", rule(TOOL_RUN + "backup-verify ", out(verify_report(kind="pre-purge"))))
+            self.backup("--label", PRE_PURGE_LABEL, "--reason", "by hand", kind="pre-purge")
+            self.assertExit(0)
+            self.assertIn("--reason by hand --release-tag", " ".join(self.docker_entries(r"backup-manifest ")[0]["argv"]))
+
+    # BS-25: the label is required for pre-purge and must be an archive name; --no-rotate is for scheduled only; the
+    # other kinds still refuse a label.
+    def test_bs25_pre_purge_arguments(self):
+        for arguments, kind, message in (
+            ((), "pre-purge", "--kind pre-purge needs --label ARCHIVE (the archive name of the archival run"),
+            (("--label", "v1.1.0"), "pre-purge", "--label must be the archive name of an archival run"),
+            (("--label", "run-3-20261008"), "pre-purge", "--label must be the archive name of an archival run"),
+            (("--label", f"{PRE_PURGE_LABEL} x"), "pre-purge", "--label must be the archive name of an archival run"),
+            (("--label", PRE_PURGE_LABEL, "--no-rotate"), "pre-purge", "--no-rotate is only for --kind scheduled."),
+            (("--label", PRE_PURGE_LABEL), "scheduled", "--label is only for --kind pre-release and --kind pre-purge."),
+            (("--label", PRE_PURGE_LABEL, "--reason", "x"), "manual",
+             "--label is only for --kind pre-release and --kind pre-purge."),
+            ((), "bogus", "--kind must be scheduled, manual, pre-release or pre-purge."),
+        ):
+            with self.subTest(kind=kind, arguments=arguments):
+                self.reset()
+                self.backup(*arguments, kind=kind)
+                self.assertExit(2)
+                self.assertIn(message, self.result.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(list(self.backup_dir.iterdir()), [])
+
+    # BS-26: a verified pre-purge backup whose backup-verify report names no dump start cannot be given to a purge:
+    # exit 3 and no BACKUP line (the backup stays for the rotation).
+    def test_bs26_no_dump_start(self):
+        self.prepend("docker", rule(TOOL_RUN + "backup-verify ", out(verify_report(kind="pre-purge", started=None))))
+        self.backup("--label", PRE_PURGE_LABEL, kind="pre-purge")
+        self.assertExit(3)
+        self.assertEqual(self.result.stdout, "")
+        self.assertIn("names no dump start (dump_started_at), so no purge can use it", self.result.stderr)
+        self.assertEqual(len(self.published()), 1)
+        self.assertFalse(self.lock.exists())
+
+    # BS-31: a backup policy without the key keep_pre_purge (an image from before the purge, whose backup-rotate has no
+    # --keep-pre-purge) is not an error: the scheduled backup completes and its rotation leaves pre-purge backups alone.
+    # The key present with the value null is unreadable, like the other values kept.
+    def test_bs31_policy_without_keep_pre_purge(self):
+        older = report("backup-policy", "read", 0, interval_hours=1, keep_hourly=48, keep_daily=30, keep_weekly=52,
+                       error=None)
+        self.prepend("docker", rule(r"app\.cli backup-policy$", out(older)))
+        self.backup()
+        self.assertExit(0)
+        self.assertEqual(len(self.docker_entries(r"backup-rotate --keep-hourly 48 --keep-daily 30 --keep-weekly 52$")),
+                         1)
+        self.assertNoDocker(r"--keep-pre-purge")
+        self.assertIn("backup: the backup policy names no pre-purge backups kept (keep_pre_purge; an image from before"
+                      " the purge of history archival): the rotation leaves every pre-purge backup alone.",
+                      self.result.stderr)
+        with self.subTest(case="keep_pre_purge null"):
+            self.reset()
+            self.prepend("docker", rule(r"app\.cli backup-policy$", out(policy_report(pre_purge=None))))
+            self.backup()
+            self.assertExit(2)
+            self.assertIn("the backup policy of Administration → Backups could not be read from the database",
+                          self.result.stderr)
+            self.assertNoDocker(r"backup-due", r"pg_dump", r"backup-rotate")
+            self.assertEqual(self.result.stdout, "")
+
+
+class LockWait(BackupHarness):
+    """--lock-wait-minutes (archive.sh's pre-purge backup): a fake `date` supplies the clock of the wait."""
+
+    tools = ScriptHarness.tools + ("date",)
+    EPOCH = 1791424800  # 2026-10-08T02:00:00Z
+
+    def setUp(self):
+        super().setUp()
+        self.rules["date"] = [
+            rule(r"^-u \+%Y%m%dT%H%M%SZ$", out("20261008T020000Z\n")),
+            rule(r"^\+%s%3N$", out(f"{self.EPOCH}000\n")),
+            rule(r"^-u \+%Y-%m-%dT%H:%M:%SZ$", out("2026-10-08T02:00:00Z\n")),
+            rule(r"^\+%s$", out(f"{self.EPOCH}\n")),
+        ]
+
+    # BS-27: a backup holds the lock: the run waits, checking every 15 s, and takes the lock the moment it is free.
+    def test_bs27_waits_for_a_running_backup(self):
+        self.write_lock()
+        self.rules["sleep"] = [rule(r"^15$", {"run": f"import shutil\nshutil.rmtree({str(self.lock)!r})"})]
+        self.backup("--lock-wait-minutes", "5")
+        self.assertExit(0)
+        self.assertEqual([entry["argv"] for entry in self.calls("sleep")], [["15"]])
+        self.assertIn("backup: a backup is running (backup.sh on bs-host, pid 4242, since 2026-10-08T02:00:00Z): waiting"
+                      " up to 5 min for the backup lock, checking every 15 s.", self.result.stderr)
+        self.assertIn("backup: the backup lock was released after 0 s of waiting; continuing.", self.result.stderr)
+        name, _ = self.name()
+        owner = self.docker_entries(r"backup-manifest ")[0]["watch"][str(self.lock / "owner")]
+        self.assertIn("by=backup.sh", owner.splitlines())
+        self.assertNotIn("pid=4242", owner.splitlines())
+        self.assertEqual(self.published(), [name])
+        self.assertFalse(self.lock.exists())
+
+    # BS-28: the lock is still held when the time is up: refused (exit 1), nothing written, the lock untouched.
+    def test_bs28_refused_after_the_wait(self):
+        owner = self.write_lock()
+        self.rules["date"][3] = rule(r"^\+%s$", out(f"{self.EPOCH}\n"), out(f"{self.EPOCH + 61}\n"))
+        self.backup("--lock-wait-minutes", "1")
+        self.assertExit(1)
+        self.assertIn("backup: refused — a backup is running (backup.sh on bs-host, pid 4242, since 2026-10-08T02:00:00Z),"
+                      " still after a wait of 1 min. Nothing was written.", self.result.stderr)
+        self.assertEqual(len(self.calls("sleep")), 1)
+        self.assertNoDocker(r"sh -c pg_dump", r"backup-tools")
+        self.assertEqual((self.lock / "owner").read_text(encoding="utf-8"), owner)
+        self.assertEqual(self.partial_entries(), [])
+
+    # BS-29: a stale lock is refused at once, never waited for; also one left by a killed release.sh (archive.sh never
+    # runs while a release runs, so the only release.sh lock it can meet is a stale one).
+    def test_bs29_stale_lock_is_never_waited_for(self):
+        for name, by, extra in (("backup.sh", "backup.sh", ("name=20261008T010000Z-scheduled",)),
+                                ("killed release.sh", "release.sh",
+                                 ("release=/home/ops/partflow-deployments/20261008T010000Z-v1.1.0",))):
+            with self.subTest(case=name):
+                self.reset()
+                owner = self.write_lock(by=by, extra=extra)
+                self.prepend("ps", rule(r"^-p 4242$", out("", rc=1)))
+                self.backup("--lock-wait-minutes", "60")
+                self.assertExit(1)
+                self.assertIn(f"backup: refused — the backup lock of {by} (host bs-host, pid 4242", self.result.stderr)
+                self.assertIn("was left by a run that no longer exists", self.result.stderr)
+                self.assertEqual(self.calls("sleep"), [])
+                self.assertEqual((self.lock / "owner").read_text(encoding="utf-8"), owner)
+
+    # BS-30: --lock-wait-minutes is 0 to 1440 and not for a release's own backup; 0 refuses at once, as without it.
+    def test_bs30_wait_arguments(self):
+        record = "/home/ops/partflow-deployments/20261008T100000Z-v1.1.0"
+        for arguments, message in (
+            (("--lock-wait-minutes", "1441"), "--lock-wait-minutes must be between 0 and 1440."),
+            (("--lock-wait-minutes", "x"), "--lock-wait-minutes must be a whole number."),
+            (("--lock-wait-minutes", "5", "--lock-held-by-release", record),
+             "--lock-wait-minutes is not for --lock-held-by-release"),
+        ):
+            with self.subTest(arguments=arguments):
+                self.reset()
+                self.backup(*arguments)
+                self.assertExit(2)
+                self.assertIn(message, self.result.stderr)
+                # Only the fake clock was read (the backup's name stamp comes first): no other command ran.
+                self.assertEqual({entry["tool"] for entry in self.calls()}, {"date"})
+        with self.subTest(case="0 refuses at once"):
+            self.reset()
+            self.write_lock()
+            self.backup("--lock-wait-minutes", "0")
+            self.assertExit(1)
+            self.assertIn("backup: refused — a backup is running (backup.sh on bs-host, pid 4242, since"
+                          " 2026-10-08T02:00:00Z). Nothing was written.", self.result.stderr)
+            self.assertEqual(self.calls("sleep"), [])
 
 
 # ---------------------------------------------------------------------------
@@ -1223,6 +1423,44 @@ class RestoreDrill(ScriptHarness):
         self.assertIn(f"keep or build the images of release {RELEASE}", self.result.stderr)
         self.assertNoDocker(r" up ")
         self.assertEqual(self.teardown_record()["teardown"], "not_created")
+
+    # RT-21 (archival step 2): a pre-purge backup restores like any other kind, and the drill never names the
+    # production archive or copy folder, even when the env file sets them.
+    def test_rt21_pre_purge_backup(self):
+        name = f"20261008T030000Z-pre-purge-{PRE_PURGE_LABEL}"
+        backup = self.backup_dir / name
+        backup.mkdir()
+        (backup / "partflow.dump").write_bytes(b"PGDMP pre-purge drill dump")
+        shutil.copyfile(self.backup_dir / BACKUP_NAME / "manifest.json", backup / "manifest.json")
+        archive = self.tmp / "archive"
+        copy = self.tmp / "archive-copy"
+        for folder in (archive, copy):
+            folder.mkdir()
+            (folder / "keep.txt").write_text("untouched\n", encoding="utf-8")
+        self.write_env([*self.env_lines, f"PARTFLOW_ARCHIVE_DIR={sh_path(archive)}",
+                        f"PARTFLOW_ARCHIVE_COPY_DIR={sh_path(copy)}"])
+        self.drill(backup=name)
+        self.assertExit(0)
+        found = sorted(self.records.glob(f"*-restore-test-{name}"))
+        self.assertEqual(len(found), 1, f"{self.result.stdout}\n{self.result.stderr}")
+        evidence = json.loads((found[0] / "evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual((evidence["outcome"], evidence["backup"]["name"]), ("passed", name))
+        self.assertEqual(len(self.docker_entries(rf"backup-tools backup-verify {name}$")), 1)
+        self.assertEqual(self.docker_entries(r"pg_restore")[0]["stdin"]["bytes"], len(b"PGDMP pre-purge drill dump"))
+        env = dict(line.split("=", 1) for line in (found[0] / "work" / "restore-test.env").read_text(
+            encoding="utf-8").splitlines())
+        self.assertEqual((env["PARTFLOW_ARCHIVE_DIR"], env["PARTFLOW_ARCHIVE_COPY_DIR"]), ("", ""))
+        override = (found[0] / "work" / "restore-test.override.yaml").read_text(encoding="utf-8")
+        paths = {sh_path(archive), sh_path(copy), archive.as_posix(), copy.as_posix(), str(archive), str(copy)}
+        for entry in self.calls("docker"):
+            text = " ".join(entry["argv"])
+            for path in paths:
+                self.assertNotIn(path, text)
+                self.assertNotIn(path, override)
+            self.assertNotIn("PARTFLOW_ARCHIVE_DIR", entry["env"])
+        for folder in (archive, copy):
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), ["keep.txt"])
+        self.assertNotIn(" maintenance ", " ".join(self.docker()) + " ")
 
 
 # ---------------------------------------------------------------------------

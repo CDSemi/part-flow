@@ -1271,6 +1271,9 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/api/work_order_import.py",
     # Phase 16: the history archival routes that require a key.
     "app/api/history_archive.py",
+    # Phase 16, history archival step 2: the host job re-checks that the User
+    # who requested a run still holds its key before the backup and the purge.
+    "app/application/history_archive_job.py",
 }
 
 

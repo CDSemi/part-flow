@@ -162,6 +162,11 @@ for (const [label, flow] of [
     adjustableFlowWire({ steps: [editorStepWire({ state: 'SKIPPED' })] }),
   ],
   [
+    // The editor lists ACTIVE flows only, whose history is never archived.
+    'an archived step',
+    adjustableFlowWire({ steps: [editorStepWire({ state: 'ARCHIVED' })] }),
+  ],
+  [
     'a missing future_step_ids',
     adjustableFlowWire({ future_step_ids: undefined }),
   ],
@@ -353,6 +358,7 @@ function flowWire(extra: Record<string, unknown> = {}) {
       note(),
       note({ audit_event_id: 502, actor_user: null }),
     ],
+    archived: null,
     ...extra,
   };
 }
@@ -363,6 +369,8 @@ function page(key: string) {
     total: 0,
     has_more: false,
     [`next_before_${key === 'movements' ? 'movement' : 'allocation'}_id`]: null,
+    // A Movement page carries its archived entries (history archival).
+    ...(key === 'movements' ? { archived: [], archived_total: 0 } : {}),
   };
 }
 

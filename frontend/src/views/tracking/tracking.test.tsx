@@ -17,7 +17,7 @@ import { useRouter } from '../../app/router-context';
 import { RouterProvider } from '../../app/router-provider';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
-import { formatTimestampShort } from '../dates';
+import { formatTimeOfDay, formatTimestampShort } from '../dates';
 import {
   clearPriorityFocus,
   peekPriorityFocus,
@@ -298,6 +298,7 @@ function detailPayload() {
           off_route: false,
           deviations: [],
           route_adjustments: [],
+          archived: null,
         },
         {
           id: 140,
@@ -330,6 +331,7 @@ function detailPayload() {
           off_route: false,
           deviations: [],
           route_adjustments: [],
+          archived: null,
         },
       ],
       total: 2,
@@ -390,6 +392,8 @@ function detailPayload() {
       total: 9,
       has_more: true,
       next_before_movement_id: 5,
+      archived: [] as unknown[],
+      archived_total: 0,
     },
     // The same history restricted to scrap: the newest event first, an
     // older (undone) one on the next page.
@@ -407,6 +411,8 @@ function detailPayload() {
       total: 2,
       has_more: true,
       next_before_movement_id: 11,
+      archived: [] as unknown[],
+      archived_total: 0,
     },
     route_adjustment_total: 0,
   };
@@ -429,6 +435,8 @@ function olderScrapPayload() {
     total: 2,
     has_more: false,
     next_before_movement_id: null,
+    archived: [] as unknown[],
+    archived_total: 0,
   };
 }
 
@@ -454,6 +462,8 @@ function olderPayload() {
     total: 9,
     has_more: false,
     next_before_movement_id: null,
+    archived: [] as unknown[],
+    archived_total: 0,
   };
 }
 
@@ -3047,4 +3057,399 @@ test('FT-5: a refused navigation leaves the path and hands nothing over', async 
   fireEvent.click(screen.getByRole('button', { name: 'Change priority' }));
   expect(window.location.pathname).toBe('/management/tracking');
   expect(peekPriorityFocus()).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Phase 16 — archived history (history archival step 2)
+// ---------------------------------------------------------------------------
+
+/** One flow's archived history as the server sends it (times at noon UTC
+ * keep the local dates the same in any usual time zone). */
+function archivedEntry(overrides: Record<string, unknown> = {}) {
+  return {
+    quantity_flow_id: 130,
+    run_id: 3,
+    archive_name: 'run-3-20301101T042000Z',
+    flow_status: 'STOCKED',
+    movement_count: 6,
+    first_occurred_at: '2030-07-01T12:00:00Z',
+    last_occurred_at: '2030-07-21T12:00:00Z',
+    last_movement_id: 8,
+    purged_at: '2030-11-01T05:00:00Z',
+    ...overrides,
+  };
+}
+
+const ARCHIVED_130 =
+  'History archived in run 3 (Jul 01, 2030 – Jul 21, 2030, 6 Movements) · QF-130 · run-3-20301101T042000Z';
+
+/** The detail with archived entries in both histories: the Movement
+ * history's first page ends on an archived entry (its cursor), and the
+ * Scrap history holds one archived flow that kept a scrap. */
+function archivedDetailPayload() {
+  const base = detailPayload();
+  return {
+    ...base,
+    movements: {
+      ...base.movements,
+      next_before_movement_id: 3,
+      archived: [
+        archivedEntry(),
+        archivedEntry({
+          quantity_flow_id: 131,
+          movement_count: 1,
+          first_occurred_at: '2030-07-15T12:00:00Z',
+          last_occurred_at: '2030-07-15T12:00:00Z',
+          last_movement_id: 3,
+        }),
+      ],
+      archived_total: 3,
+    },
+    scrap_history: {
+      ...base.scrap_history,
+      archived: [
+        archivedEntry({
+          quantity_flow_id: 132,
+          last_occurred_at: '2030-07-22T12:00:00Z',
+          last_movement_id: 10,
+        }),
+      ],
+      archived_total: 1,
+    },
+  };
+}
+
+/** The older page below the archived entry the first page ended on. */
+function archivedOlderPayload() {
+  const older = olderPayload();
+  return {
+    ...older,
+    archived: [
+      archivedEntry({
+        quantity_flow_id: 133,
+        last_occurred_at: '2030-07-13T12:00:00Z',
+        last_movement_id: 2,
+      }),
+    ],
+    archived_total: 3,
+  };
+}
+
+function historyRows(): Element[] {
+  return Array.from(document.querySelectorAll('.mv.history li'));
+}
+
+function historyPaging(): string {
+  return (
+    document
+      .querySelector('.mv.history')!
+      .parentElement!.querySelector('.tk-paging')?.textContent ?? ''
+  );
+}
+
+test('archived entries interleave with the Movements newest first, each as one line, and the count names both', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/detail')
+      ? jsonResponse(archivedDetailPayload())
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+
+  const rows = historyRows();
+  // Movements 12, 11, 9; QF-130's history (newest Movement Jul 21 noon);
+  // Movements 6, 5; QF-131's history (Jul 15).
+  expect(
+    rows.map((row) => row.querySelector('.mtype')?.textContent ?? ''),
+  ).toEqual([
+    'AREA_COMPLETED',
+    'SCRAPPED',
+    'TRANSFERRED',
+    'ARCHIVED',
+    'REVERSED',
+    'ASSIGNED_TO_MACHINE',
+    'ARCHIVED',
+  ]);
+  expect(rows[3].classList.contains('archived')).toBe(true);
+  expect(rows[3].querySelector('.desc')?.textContent).toBe(ARCHIVED_130);
+  // An archived entry's time always carries its year (archived history is
+  // older than the retention period); a Movement row keeps the short form.
+  expect(rows[3].querySelector('.t')?.textContent).toBe(
+    `Jul 21, 2030 ${formatTimeOfDay('2030-07-21T12:00:00Z')}`,
+  );
+  expect(rows[6].querySelector('.t')?.textContent).toBe(
+    `Jul 15, 2030 ${formatTimeOfDay('2030-07-15T12:00:00Z')}`,
+  );
+  expect(rows[0].querySelector('.t')?.textContent).toBe(
+    formatTimestampShort('2030-07-22T15:05:00Z'),
+  );
+  expect(rows[6].querySelector('.desc')?.textContent).toBe(
+    'History archived in run 3 (Jul 15, 2030, 1 Movement) · QF-131 · run-3-20301101T042000Z',
+  );
+  expect(historyPaging()).toContain(
+    'Showing 5 of 9 Movements and 2 of 3 archived entries',
+  );
+});
+
+test('the older page continues below the archived entry the first page ended on, with the cursor passed back unchanged', async () => {
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      return jsonResponse(archivedDetailPayload());
+    }
+    if (
+      url.startsWith('/api/tracking/movements') &&
+      !url.includes('SCRAPPED')
+    ) {
+      return jsonResponse(archivedOlderPayload());
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show older Movements' }));
+  await act(async () => {});
+  expect(trackingCalls(fetchMock).at(-1)).toBe(
+    '/api/tracking/movements?part_number=2027-60-8114-00&before=3&limit=50',
+  );
+  const rows = historyRows();
+  expect(rows).toHaveLength(9);
+  // QF-133's history (Jul 13) before the release Movement (Jul 12).
+  expect(rows[7].querySelector('.desc')?.textContent).toContain(
+    'History archived in run 3 (Jul 01, 2030 – Jul 13, 2030, 6 Movements) · QF-133',
+  );
+  expect(rows[8].querySelector('.mtype')?.textContent).toBe('RECEIVED');
+  expect(historyPaging()).toContain(
+    'Showing 6 of 9 Movements and 3 of 3 archived entries',
+  );
+  expect(
+    screen.queryByRole('button', { name: 'Show older Movements' }),
+  ).toBeNull();
+});
+
+test('the Scrap history lists an archived flow that kept a scrap and counts it', async () => {
+  stubFetch((url) =>
+    url.startsWith('/api/tracking/detail')
+      ? jsonResponse(archivedDetailPayload())
+      : defaultAnswer(url),
+  );
+  await renderTracking();
+  await openFirstRow();
+
+  const list = document.querySelector('.mv.scrap') as HTMLElement;
+  const rows = list.querySelectorAll('li');
+  // The archived flow's newest Movement (Jul 22 noon) is older than the
+  // retained scrap (Jul 22 14:10).
+  expect(rows).toHaveLength(2);
+  expect(rows[0].querySelector('.mtype')?.textContent).toBe('SCRAPPED');
+  expect(rows[1].querySelector('.desc')?.textContent).toContain(
+    'History archived in run 3 (Jul 01, 2030 – Jul 22, 2030, 6 Movements) · QF-132',
+  );
+  expect(rows[1].querySelector('.t')?.textContent).toBe(
+    `Jul 22, 2030 ${formatTimeOfDay('2030-07-22T12:00:00Z')}`,
+  );
+  expect(rows[0].querySelector('.t')?.textContent).not.toContain('2030');
+  expect(list.closest('.tk-sec')?.textContent).toContain(
+    'Showing 1 of 2 scrap events and 1 of 1 archived entry',
+  );
+});
+
+test('a Scrap history whose only scrap was archived still lists it', async () => {
+  stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const payload = archivedDetailPayload();
+      return jsonResponse({
+        ...payload,
+        scrap_history: {
+          ...payload.scrap_history,
+          movements: [],
+          total: 0,
+          has_more: false,
+          next_before_movement_id: null,
+        },
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  const list = document.querySelector('.mv.scrap') as HTMLElement;
+  expect(list.querySelectorAll('li')).toHaveLength(1);
+  const section = list.closest('.tk-sec') as HTMLElement;
+  expect(section.textContent).not.toContain('No scrap recorded for this PN.');
+  expect(section.textContent).toContain(
+    'Showing 0 of 0 scrap events and 1 of 1 archived entry',
+  );
+});
+
+test('a stale cursor reloads the history from its first page with a short message', async () => {
+  let purgedMeanwhile = true;
+  const fetchMock = stubFetch((url) => {
+    if (url.startsWith('/api/tracking/movements') && purgedMeanwhile) {
+      purgedMeanwhile = false;
+      return jsonResponse(
+        {
+          detail: "Movement 5 is not part of 2027-60-8114-00's history.",
+        },
+        404,
+      );
+    }
+    return defaultAnswer(url);
+  });
+  const detailReads = () =>
+    trackingCalls(fetchMock).filter((url) =>
+      url.startsWith('/api/tracking/detail'),
+    ).length;
+  await renderTracking();
+  await openFirstRow();
+  expect(detailReads()).toBe(1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show older Movements' }));
+  await act(async () => {});
+  await act(async () => {});
+  // Back to the first page, read again, with the reason said once.
+  expect(detailReads()).toBe(2);
+  expect(historyRows()).toHaveLength(5);
+  const section = document.querySelector('.mv.history')!.closest('.tk-sec')!;
+  expect(within(section as HTMLElement).getByRole('status').textContent).toBe(
+    'Part of this history was archived while it was read, so it was reloaded from the newest entries.',
+  );
+  expect(within(section as HTMLElement).queryByRole('alert')).toBeNull();
+
+  // Paging again starts below the first page and clears the message.
+  fireEvent.click(screen.getByRole('button', { name: 'Show older Movements' }));
+  await act(async () => {});
+  expect(trackingCalls(fetchMock).at(-1)).toBe(
+    '/api/tracking/movements?part_number=2027-60-8114-00&before=5&limit=50',
+  );
+  expect(historyRows()).toHaveLength(6);
+  expect(within(section as HTMLElement).queryByRole('status')).toBeNull();
+});
+
+test('a history that changed while read (409 after the server retried) shows the server text as given', async () => {
+  const CHANGED =
+    'The history of 2027-60-8114-00 changed while it was read (an archival run purged part of it). Reload it.';
+  let racing = true;
+  stubFetch((url) => {
+    if (url.startsWith('/api/tracking/movements') && racing) {
+      return jsonResponse({ detail: CHANGED }, 409);
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show older Movements' }));
+  await act(async () => {});
+  const section = document.querySelector('.mv.history')!.closest('.tk-sec')!;
+  expect(within(section as HTMLElement).getByRole('alert').textContent).toBe(
+    CHANGED,
+  );
+  expect(historyRows()).toHaveLength(5);
+
+  racing = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Show older Movements' }));
+  await act(async () => {});
+  expect(historyRows()).toHaveLength(6);
+  expect(within(section as HTMLElement).queryByRole('alert')).toBeNull();
+});
+
+test('an archived flow shows its snapshot steps as archived and its history line instead of a trace', async () => {
+  stubFetch((url) => {
+    if (url.startsWith('/api/tracking/detail')) {
+      const base = detailPayload();
+      const [floating, planned] = base.flows.flows;
+      const archivedStep = (id: number, area: typeof LATHE) => ({
+        id,
+        sequence: id * 10,
+        area,
+        operation: null,
+        expected_duration: null,
+        state: 'ARCHIVED',
+      });
+      return jsonResponse({
+        ...base,
+        flows: {
+          ...base.flows,
+          flows: [
+            ...base.flows.flows,
+            {
+              ...planned,
+              id: 130,
+              status: 'STOCKED',
+              closed_at: '2030-07-21T12:00:00Z',
+              position: null,
+              children: [],
+              trace: [],
+              route_steps: [
+                archivedStep(21, MATERIAL),
+                archivedStep(22, LATHE),
+                archivedStep(23, STOCKROOM),
+              ],
+              off_route: false,
+              deviations: [],
+              archived: archivedEntry(),
+            },
+            {
+              ...floating,
+              id: 131,
+              status: 'SCRAPPED',
+              closed_at: '2030-07-15T12:00:00Z',
+              position: null,
+              parents: [],
+              trace: [],
+              deviations: [],
+              archived: archivedEntry({
+                quantity_flow_id: 131,
+                flow_status: 'SCRAPPED',
+                movement_count: 1,
+                first_occurred_at: '2030-07-15T12:00:00Z',
+                last_occurred_at: '2030-07-15T12:00:00Z',
+                last_movement_id: 3,
+              }),
+            },
+          ],
+          total: 4,
+        },
+      });
+    }
+    return defaultAnswer(url);
+  });
+  await renderTracking();
+  await openFirstRow();
+
+  // The Planned flow keeps its snapshot, every step marked archived —
+  // neither done, current nor still to come.
+  const planned = flowBlock('QF-130');
+  const steps = Array.from(planned.querySelectorAll('.rstep'));
+  expect(steps.map((step) => step.textContent)).toEqual([
+    'Material',
+    'Lathe',
+    'Stockroom',
+  ]);
+  expect(steps.every((step) => step.classList.contains('archived'))).toBe(true);
+  expect(planned.querySelectorAll('.rstep.done, .rstep.cur')).toHaveLength(0);
+  expect(planned.querySelector('.devnote.archived')?.textContent).toBe(
+    'History archived in run 3 (Jul 01, 2030 – Jul 21, 2030, 6 Movements) · run-3-20301101T042000Z',
+  );
+  expect(planned.querySelector('.devnote.deviation')).toBeNull();
+
+  // The Floating flow has no trace left: the history line stands in its
+  // place, and its note says where the trace is.
+  const floating = flowBlock('QF-131');
+  expect(floating.querySelector('.route')).toBeNull();
+  expect(
+    Array.from(floating.querySelectorAll('.devnote'), (note) =>
+      note.textContent?.trim(),
+    ),
+  ).toEqual([
+    'History archived in run 3 (Jul 15, 2030, 1 Movement) · run-3-20301101T042000Z',
+    'Floating Route — its actual trace is in the archive.',
+  ]);
+  expect(floating.textContent).not.toContain('No arrival recorded');
+  // The live flows are unchanged.
+  expect(flowBlock('QF-140').querySelectorAll('.rstep.archived')).toHaveLength(
+    0,
+  );
 });

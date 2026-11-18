@@ -63,7 +63,7 @@ from collections.abc import Collection, Iterable
 from enum import StrEnum
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import ColumnElement, false, func, or_, select
+from sqlalchemy import ColumnElement, Connection, false, func, or_, select
 from sqlalchemy.orm import Session, undefer
 
 from app.application import audit, images
@@ -117,7 +117,7 @@ def canonical_part_number(value: object) -> str:
 _PART_NUMBER_LOCK_NAMESPACE: Final = "partflow:part-number:"
 
 
-def acquire_part_number_lock(session: Session, part_number: str) -> None:
+def acquire_part_number_lock(session: Session | Connection, part_number: str) -> None:
     """Serialize this transaction against every other write of one PN.
 
     ``pg_advisory_xact_lock`` blocks until the concurrent holder's
@@ -151,6 +151,17 @@ def acquire_part_number_lock(session: Session, part_number: str) -> None:
     flow — need no lock: they can never make a precondition that was
     judged under the lock become true again.
 
+    Closed flows (Movement-history archival, design B §7.5): the purge of
+    an archival run takes this lock for every PN of a batch and then
+    re-checks, under it, that the history it is about to delete is
+    unchanged. That is enough only because every command that writes on a
+    CLOSED flow takes this lock — today only Undo, which reopens one; the
+    commands that write on flows take the flow row lock and refuse a flow
+    that is not ACTIVE. Any future command that writes a Movement on, or
+    otherwise changes, a closed flow MUST take this lock for its PN before
+    it reads the flow, or a purge could delete history that command has
+    just changed.
+
     After the lock is granted, the state it protects must be RE-READ
     from the database: a snapshot taken while waiting is not authority.
     """
@@ -163,7 +174,7 @@ def acquire_part_number_lock(session: Session, part_number: str) -> None:
     )
 
 
-def acquire_part_number_locks(session: Session, part_numbers: Iterable[str]) -> None:
+def acquire_part_number_locks(session: Session | Connection, part_numbers: Iterable[str]) -> None:
     """Lock several canonical PNs in ONE deterministic order.
 
     Ascending canonical-PN order, so two transactions that need an

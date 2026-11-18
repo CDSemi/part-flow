@@ -18,6 +18,14 @@
 // Flows and the allocation history page the same way through
 // `GET /api/tracking/flows` and `GET /api/tracking/allocations`.
 //
+// Archived history (Phase 16, history archival step 2): once an archival
+// run purged a flow's Movements, the flow carries its `archived` entry
+// ("History archived in run N"), its trace and deviations are empty and
+// its route steps read `ARCHIVED`; a Movement page carries the archived
+// entries whose place falls on it (their own list, with their own total)
+// and its cursor may name an archived entry. A missing or malformed
+// archived entry throws instead of hiding archived history.
+//
 // Search and every filter are judged server-side on the derived row;
 // the server never sends a derived time value — dwell times and due
 // countdowns derive at render from the fixed timestamps and the shared
@@ -47,7 +55,9 @@ export type TrackingStatusFilter = TrackingStatus | 'ALL';
 export type TrackingDueWindow = 'ANY' | 'OVERDUE' | 'THIS_WEEK' | 'THIS_MONTH';
 export type LocationState =
   'MACHINE' | 'QUEUE' | 'PROCESSING' | 'DONE' | 'STOCKED';
-export type RouteStepState = 'DONE' | 'CURRENT' | 'FUTURE';
+/** `ARCHIVED`: the flow's history was archived and purged, so its
+ * progress along the route is in the archive. */
+export type RouteStepState = 'DONE' | 'CURRENT' | 'FUTURE' | 'ARCHIVED';
 
 export interface TrackingFilters {
   search: string;
@@ -245,6 +255,24 @@ export interface TrackingLineageLink {
   relation: string;
 }
 
+/** One flow's archived history — "History archived in run N": what the
+ * flow's purged carry-forward record keeps, as the server sends it. */
+export interface TrackingArchivedHistory {
+  quantityFlowId: number;
+  runId: number;
+  /** The archive folder's name (`run-<id>-<UTC stamp>`). */
+  archiveName: string | null;
+  /** The flow's status when it was archived. */
+  flowStatus: string;
+  movementCount: number;
+  firstOccurredAt: string;
+  lastOccurredAt: string;
+  /** Its newest archived Movement's id: with `lastOccurredAt`, its place
+   * in the Movement history, and the `before` cursor after it. */
+  lastMovementId: number;
+  purgedAt: string;
+}
+
 export interface TrackingFlow {
   id: number;
   quantity: number;
@@ -265,6 +293,9 @@ export interface TrackingFlow {
   deviations: TrackingRouteDeviation[];
   /** Every adjustment of this flow's own AssignedRoute, oldest first. */
   routeAdjustments: TrackingRouteAdjustment[];
+  /** Set once an archival run purged the flow's Movements: its trace and
+   * deviations are then empty and every route step reads `ARCHIVED`. */
+  archived: TrackingArchivedHistory | null;
 }
 
 export interface TrackingWorkOrderRef {
@@ -325,10 +356,18 @@ export interface TrackingMovement {
 
 export interface TrackingMovementPage {
   movements: TrackingMovement[];
+  /** The retained Movements in scope. */
   total: number;
   hasMore: boolean;
-  /** Pass as `before` for the next (older) page; null on the last. */
+  /** Pass as `before` for the next (older) page, unchanged; null on the
+   * last. It is the id of the page's last entry of either kind: a
+   * Movement, or an archived entry's `lastMovementId`. */
   nextBeforeMovementId: number | null;
+  /** The archived entries whose place falls on this page, newest first —
+   * interleaved with `movements` by (time, id) into the one page. */
+  archived: TrackingArchivedHistory[];
+  /** The archived entries in scope. */
+  archivedTotal: number;
 }
 
 /** One bounded page of the PN's Quantity Flows in the one immutable
@@ -495,6 +534,8 @@ interface MovementPageWire {
   total: number;
   has_more: boolean;
   next_before_movement_id: number | null;
+  archived: unknown;
+  archived_total: unknown;
 }
 
 interface FlowWire {
@@ -547,6 +588,7 @@ interface FlowWire {
     worker: TrackingWorkerRef | null;
   }[];
   route_adjustments: unknown;
+  archived: unknown;
 }
 
 interface AllocationWire {
@@ -719,12 +761,74 @@ function toMovement(wire: MovementWire): TrackingMovement {
   };
 }
 
+function malformedArchivedHistory(): Error {
+  return new Error('The server answered a malformed archived history.');
+}
+
+/**
+ * One archived entry ("History archived in run N") — on a flow or a
+ * Movement page; a missing or malformed field throws instead of hiding
+ * archived history.
+ */
+function toArchivedHistory(wire: unknown): TrackingArchivedHistory {
+  if (typeof wire !== 'object' || wire === null || Array.isArray(wire)) {
+    throw malformedArchivedHistory();
+  }
+  const entry = wire as Record<string, unknown>;
+  const whole = [
+    entry.quantity_flow_id,
+    entry.run_id,
+    entry.movement_count,
+    entry.last_movement_id,
+  ];
+  const texts = [
+    entry.flow_status,
+    entry.first_occurred_at,
+    entry.last_occurred_at,
+    entry.purged_at,
+  ];
+  if (
+    !whole.every((value) => Number.isInteger(value)) ||
+    !texts.every((value) => typeof value === 'string') ||
+    (entry.archive_name !== null && typeof entry.archive_name !== 'string')
+  ) {
+    throw malformedArchivedHistory();
+  }
+  return {
+    quantityFlowId: entry.quantity_flow_id as number,
+    runId: entry.run_id as number,
+    archiveName: entry.archive_name as string | null,
+    flowStatus: entry.flow_status as string,
+    movementCount: entry.movement_count as number,
+    firstOccurredAt: entry.first_occurred_at as string,
+    lastOccurredAt: entry.last_occurred_at as string,
+    lastMovementId: entry.last_movement_id as number,
+    purgedAt: entry.purged_at as string,
+  };
+}
+
+/** The `archived` list of a Movement page — always present (empty when
+ * no archived entry falls on the page). */
+function toArchivedHistories(wire: unknown): TrackingArchivedHistory[] {
+  if (!Array.isArray(wire)) throw malformedArchivedHistory();
+  return wire.map(toArchivedHistory);
+}
+
+function toArchivedTotal(wire: unknown): number {
+  if (typeof wire !== 'number' || !Number.isInteger(wire) || wire < 0) {
+    throw malformedArchivedHistory();
+  }
+  return wire;
+}
+
 function toMovementPage(wire: MovementPageWire): TrackingMovementPage {
   return {
     movements: wire.movements.map(toMovement),
     total: wire.total,
     hasMore: wire.has_more,
     nextBeforeMovementId: wire.next_before_movement_id,
+    archived: toArchivedHistories(wire.archived),
+    archivedTotal: toArchivedTotal(wire.archived_total),
   };
 }
 
@@ -824,6 +928,7 @@ function toFlow(wire: FlowWire): TrackingFlow {
       worker: item.worker,
     })),
     routeAdjustments: toRouteAdjustments(wire.route_adjustments),
+    archived: wire.archived === null ? null : toArchivedHistory(wire.archived),
   };
 }
 
@@ -1001,8 +1106,10 @@ export async function loadTrackingDetail(
 
 /**
  * The next (older) page of the Movement history below `before` — the
- * last Movement a page delivered; `movementType: 'SCRAPPED'` continues
- * the Scrap history instead.
+ * `nextBeforeMovementId` a page answered, passed back unchanged (it may
+ * name an archived entry); `movementType: 'SCRAPPED'` continues the Scrap
+ * history instead. A `before` naming a Movement purged since the page was
+ * read is a 404: the history must be read again from its first page.
  */
 export async function loadTrackingMovements(
   pn: string,

@@ -7,8 +7,8 @@ the schema of two-step sign-in (owner decisions of 2026-11-13 and
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_history_archive_schema.py`` with
-  ``0040_phase16_history_archive``;
+  ``tests/test_history_purge_schema.py`` with
+  ``0041_phase16_history_purge``;
 - the migration's literals equal the model constants: the three tables'
   CHECKs, the policy columns with their defaults and ranges, the
   wrong-code counter, the User session end reasons (the Phase 14 ones of

@@ -18,15 +18,16 @@
 // replaced as a whole (its fields share a cross-field rule). It also
 // holds the settings of History archival & purge (the Movement-history
 // retention period, the shortest allowed period, the Start minute of the
-// host job, the preview time limit and the wait limit; a partial merge,
-// Phase 16), which the host job and the preview read. Security → User sign-in reads the user sign-in
+// host job, the preview time limit, the wait limit and the purge batch
+// limits; a partial merge, Phase 16), which the host job and the preview
+// read. Security → User sign-in reads the user sign-in
 // policy (how long a user's sign-in lasts, when failed sign-ins lock an
 // account, whether an administrator-set password must be replaced) —
 // readable by any signed-in user, written as a partial merge by users
 // whose role may configure system settings. Backups holds how often the
-// server's hourly backup task takes a scheduled backup and how many its
-// rotation keeps — replaced as a whole, read by that task at its next
-// run. Settings → Outgoing mail server and Security → Two-step sign-in
+// server's hourly backup task takes a scheduled backup, how many its
+// rotation keeps and how many pre-purge backups it keeps — replaced as a
+// whole, read by that task at its next run. Settings → Outgoing mail server and Security → Two-step sign-in
 // (Phase 17) hold the mail server PartFlow sends through, with its
 // timeout, and every number of two-step sign-in (a partial merge like User
 // sign-in). Security → Password rules and Remember me (owner request of
@@ -226,6 +227,11 @@ export interface RetentionPolicy {
   /** Days a run may wait for its off-host copy confirmation (or a failed
    * last run may stand) before the monitoring line fails. */
   maxWaitDays: number;
+  /** The most Movements one purge batch deletes (whole components; a
+   * larger component is a batch of its own). */
+  purgeBatchMovements: number;
+  /** The most Part Numbers one purge batch locks. */
+  purgeBatchPartNumbers: number;
   /** The policy singleton's timestamp (shared by every section). */
   updatedAt: string;
 }
@@ -239,6 +245,8 @@ const RETENTION_WIRE: Record<RetentionSetting, string> = {
   startMinute: 'archive_start_minute',
   previewSeconds: 'archive_preview_seconds',
   maxWaitDays: 'archive_max_wait_days',
+  purgeBatchMovements: 'archive_purge_batch_movements',
+  purgeBatchPartNumbers: 'archive_purge_batch_part_numbers',
 };
 
 const RETENTION_POLICY_PATH = '/api/policies/data-retention';
@@ -300,6 +308,9 @@ export interface BackupPolicy {
   keepHourly: number;
   keepDaily: number;
   keepWeekly: number;
+  /** The newest N pre-purge backups (taken by the history archival job
+   * before each purge) are kept. */
+  keepPrePurge: number;
 }
 
 interface BackupPolicyWire {
@@ -307,6 +318,7 @@ interface BackupPolicyWire {
   backup_keep_hourly: number;
   backup_keep_daily: number;
   backup_keep_weekly: number;
+  backup_keep_pre_purge: number;
   updated_at: string;
 }
 
@@ -318,6 +330,7 @@ function toBackupPolicy(wire: BackupPolicyWire): BackupPolicy {
     keepHourly: wire.backup_keep_hourly,
     keepDaily: wire.backup_keep_daily,
     keepWeekly: wire.backup_keep_weekly,
+    keepPrePurge: wire.backup_keep_pre_purge,
   };
 }
 
@@ -327,7 +340,7 @@ export async function getBackupPolicy(): Promise<BackupPolicy> {
   return toBackupPolicy(wire);
 }
 
-/** Replace the backup policy (all four fields); an unchanged policy is a
+/** Replace the backup policy (all five fields); an unchanged policy is a
  * server no-op. */
 export async function updateBackupPolicy(
   policy: BackupPolicy,
@@ -339,6 +352,7 @@ export async function updateBackupPolicy(
       backup_keep_hourly: policy.keepHourly,
       backup_keep_daily: policy.keepDaily,
       backup_keep_weekly: policy.keepWeekly,
+      backup_keep_pre_purge: policy.keepPrePurge,
     },
   });
   return toBackupPolicy(wire);

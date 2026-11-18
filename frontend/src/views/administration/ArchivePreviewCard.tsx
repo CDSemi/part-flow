@@ -17,19 +17,26 @@ import {
 import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
 // Administration → History archival & purge → Preview and the request of
-// a run (archival design B step 1). The preview asks the server what a
-// run would export at a cutoff date — by default the newest date the
-// retention period allows, which the server answers — and can take up to
-// the preview time limit, so it shows its progress while the rest of the
-// page stays usable. `Request a run…` opens the request with the reason
-// and the previewed numbers; the server recomputes the preview, stores
-// it with the run and refuses what it must (another open run, nothing
-// eligible, the cutoff), and its messages are shown as given. A request
-// whose answer was lost may have created the run: the runs are reloaded
-// and the user is told to check them before requesting again.
+// a run (archival design B steps 1 and 2). The preview asks the server
+// what a run would archive at a cutoff date — by default the newest date
+// the retention period allows, which the server answers — and can take up
+// to the preview time limit, so it shows its progress while the rest of
+// the page stays usable. The card and the request say what a run does: it
+// exports the history and, after the off-host copy and a pre-purge
+// backup, purges it from the database. `Request a run…` opens the request
+// with the reason and the previewed numbers; the server recomputes the
+// preview, stores it with the run and refuses what it must (another open
+// run, nothing eligible, the cutoff), and its messages are shown as
+// given. A request whose answer was lost may have created the run: the
+// runs are reloaded and the user is told to check them before requesting
+// again.
 
 const REQUEST_UNKNOWN =
   'The server did not answer, so the run may or may not have been requested. Check the runs table before requesting again.';
+
+/** What follows a purge, said on the card and in the request. */
+const AFTER_PURGE =
+  'Tracking then shows one “History archived in run N” line per archived flow, and archived commands can no longer be undone.';
 
 export function ArchivePreviewCard({
   previewSeconds,
@@ -104,7 +111,8 @@ export function ArchivePreviewCard({
   return (
     <SettingsCard
       title="Preview"
-      description="What a run would export at a cutoff date, before you request it."
+      description="What a run would archive and purge at a cutoff date, before you request it."
+      note={`After the off-host copy and a pre-purge backup, a run deletes the archived Movement history from the database. ${AFTER_PURGE}`}
     >
       <div className="admin-cardform">
         <div className="admin-configgrid">
@@ -129,8 +137,8 @@ export function ArchivePreviewCard({
         </div>
         <p className="admin-confighelp">
           {latestCutoffDate === null
-            ? 'History before the start of this day is exported. Leave it empty for the latest date the retention period allows.'
-            : `History before the start of this day is exported. The latest date the retention period allows is ${formatIsoDate(latestCutoffDate)}.`}
+            ? 'History before the start of this day is archived. Leave it empty for the latest date the retention period allows.'
+            : `History before the start of this day is archived. The latest date the retention period allows is ${formatIsoDate(latestCutoffDate)}.`}
         </p>
         {running ? (
           <p className="admin-confighelp" role="status">
@@ -268,9 +276,7 @@ function RequestRunDialog({
     <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
       <p className="admin-idnote">
-        The run exports the Movement history before{' '}
-        {formatIsoDate(preview.cutoffDate)} to archive files on the server and
-        deletes nothing.
+        {`The run exports the Movement history before ${formatIsoDate(preview.cutoffDate)} to archive files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database. ${AFTER_PURGE}`}
       </p>
       <div className="admin-identity">
         <div className="idrow">

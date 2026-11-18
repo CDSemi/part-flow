@@ -14,7 +14,7 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, Any, Final
 
@@ -89,16 +89,52 @@ class JsonLinesWriter:
     def write(self, row_id: int, value: object) -> bytes:
         """Append one row; returns the exact line written (with its newline)."""
         line = canonical_json(value) + b"\n"
+        self.write_line(row_id, line)
+        return line
+
+    def write_line(self, row_id: int, line: bytes) -> None:
+        """Append one row already rendered by ``canonical_json`` (with its newline)."""
         self._gzip.write(line)
         self.rows += 1
         self.ids.add(row_id)
-        return line
 
     def close(self) -> None:
         self._gzip.close()
         self._raw.flush()
         os.fsync(self._raw.fileno())
         self._raw.close()
+
+
+def write_readable_sections(path: Path, sections: Iterable[tuple[str, Iterable[object]]]) -> None:
+    """``readable_json({key: [rows…], …})`` written section by section and row by row.
+
+    The bytes are exactly those of ``readable_json`` for the same document
+    (sorted keys, two-space indentation, UTF-8, a final line break), but no
+    section is ever held whole: each row is rendered alone and indented to
+    its depth, which works because JSON text holds a line break only between
+    its tokens (a line break inside a string is escaped). ``sections`` must
+    come in sorted key order. The file is created new (mode 0600, never
+    overwriting) and fsynced, like ``write_document``.
+    """
+    encoder = json.JSONEncoder(sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb", buffering=backup_files.BLOCK_SIZE) as stream:
+        previous: str | None = None
+        for key, rows in sections:
+            if previous is not None and key <= previous:
+                raise ValueError(f"section {key!r} follows {previous!r}: keys must be sorted")
+            stream.write(("{" if previous is None else ",").encode("utf-8"))
+            stream.write(f"\n  {encoder.encode(key)}: ".encode())
+            first = True
+            for row in rows:
+                rendered = encoder.encode(row).replace("\n", "\n    ")
+                stream.write(f"{'[' if first else ','}\n    {rendered}".encode())
+                first = False
+            stream.write(b"[]" if first else b"\n  ]")
+            previous = key
+        stream.write(b"{}\n" if previous is None else b"\n}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def read_json_lines(path: Path) -> Iterator[tuple[bytes, Any]]:
@@ -111,6 +147,32 @@ def read_json_lines(path: Path) -> Iterator[tuple[bytes, Any]]:
 def write_document(path: Path, content: bytes) -> None:
     """A new file (mode 0600, never overwriting), fsynced."""
     backup_files.write_new_file(path, content)
+
+
+def replace_document(path: Path, content: bytes, partial_dir: Path) -> None:
+    """Write ``content`` to ``path`` atomically (the purge receipt).
+
+    The file is written new (mode 0600) in ``partial_dir`` — a directory of
+    the same file system, created 0700 when absent — fsynced, then renamed
+    over ``path`` in one step, and the directory is fsynced: a reader sees
+    the old file or the new one, never a part of it.
+    """
+    backup_files.make_private_directory(partial_dir)
+    temporary = partial_dir / path.name
+    if backup_files.exists(temporary):
+        backup_files.remove_file(temporary)
+    backup_files.write_new_file(temporary, content)
+    os.replace(temporary, path)
+    for directory in {path.parent, partial_dir}:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def sha256_of_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def sums_text(digests: Mapping[str, str]) -> bytes:

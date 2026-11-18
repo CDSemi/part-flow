@@ -841,6 +841,10 @@ There is no separate Undo card and **no Recent Scans list**.
   no write.
 - Undo creates compensating (reversal) history; the original action is never deleted. After a confirmed Undo, the Last
   Scanned PN advances to the next eligible previous PN operation. With nothing eligible, Undo is disabled.
+- **Archived history cannot be undone.** A command whose Movements an archival run purged (§9 History archival &
+  purge, PROJECT_PROFILE §28 Administrative Archival and Purge) is no longer eligible: its rows are no longer in the
+  database. The Last Scanned PN only offers operations whose history is kept, and an Undo of an archived command's id
+  is refused because no production event is recorded under that id any more.
 - **Worker identity for Undo** follows the Area's Worker ID mode (§4.12): Disabled records no Worker; Fixed Worker
   records the configured Worker; Scanned session with a valid session records the **Worker active at the moment the
   Undo is confirmed** on the `REVERSED` (audit) record. The confirmation shows the original action's Worker as context
@@ -2346,6 +2350,12 @@ trap**, layered below navigation and application dialogs.
      marked with who, when and why, and the audit-preservation note.
    - **`FLOATING` flow.** It shows the **actual route trace derived from Movement history**: repeated Areas preserved,
      split flows shown independently, and Repair transfers marked explicitly, for example `A → B → C → D → B ⟲ REPAIR`.
+   - **Archived flow.** A flow whose Movements an archival run purged (§9 History archival & purge) keeps its block,
+     status, lineage links and route snapshot, but its trace and its deviations are in the archive. Where the trace
+     would be, the block shows the line `History archived in run N (first – last, M Movements)` with the archive's
+     name. Every snapshot chip of a `PLANNED` archived flow reads archived: a dashed, unfilled chip that is neither done
+     nor still to come (the server's `ARCHIVED` step state). A `FLOATING` archived flow shows no trace, and its note
+     says that its actual trace is in the archive.
    - **Steps and arrows** render as **separate sibling flex items** (step, arrow, step, …): each arrow is centered
      between adjacent steps, arrows never overlap step cards, and wrapping stays readable.
    - The finished rack never appears as a route step: `AREA_COMPLETED` is completion inside the existing source Area,
@@ -2367,6 +2377,14 @@ trap**, layered below navigation and application dialogs.
    - Movement rows name the recorded Worker as `W: <name>`, and route-deviation notes add ` by <name>`; rows without a
      recorded Worker omit it.
    - An undone original stays visible with an explicit `REVERSED` badge, beside the `REVERSED` row that undid it.
+   - **Archived entries.** Each flow whose Movements an archival run purged is one row, an archived entry, in the
+     place of its newest archived Movement: that Movement's date and time, always with the year (`Nov 18, 2023 02:06`,
+     because archived history is older than the retention period, while the other rows show `Nov 18 02:06`), an
+     `ARCHIVED` marker in a neutral tone, and `History archived in run N (first – last, M Movements)` with the flow and
+     the archive's name (one date when the flow's history began and ended on the same day). The entries interleave
+     with the Movements newest first: a
+     Movement by its time and id, an archived entry by the time and id of its newest archived Movement. The dates and
+     the number of Movements are the server's record; the browser never computes an archived quantity.
    - On phone widths, a Movement history row wraps its description onto its own line.
    - The current-state sections distinguish active Machine assignment, direct Area processing, Area completion (ready
      to transfer, with operator wording such as `Completed processing at Lathe — ready to transfer` and the completing
@@ -2374,7 +2392,9 @@ trap**, layered below navigation and application dialogs.
      to be `STOCKED`.
    - The history is read-only; no edit affordances exist.
 6. **Scrap history.** The PN's `SCRAPPED` events and cumulative scrapped quantity, with the reconciliation note
-   (introduced = active + stocked + scrapped; scrap never reduces the requested quantity).
+   (introduced = active + stocked + scrapped; scrap never reduces the requested quantity). An archived flow whose
+   record keeps an effective scrap is listed there as its archived entry, interleaved like the Movement history; the
+   cumulative and reconciliation figures are the server's and include the archived quantities.
 7. **Stocked & Allocation history.** Stocked quantity and Work Order Allocation entries, with the PROJECT_PROFILE §18
    ordering note, and an empty state when nothing is stocked. A Management entry names the user who recorded it, and
    a Stockroom station entry names the Worker its station identified (`Worker <name>`; nothing when the station's Area
@@ -2437,17 +2457,26 @@ previous route stays in the audit history.
   refresh keeps the last complete detail, with a `Feed stale — reconnecting` note under the PN.
 - **Movement history** is reverse-chronological by timestamp (`occurred_at`, with the Movement id breaking ties) and
   paged on that same order (`Showing n of m Movements`; `Show older Movements` appends the next page of the immutable
-  history without a gap or a duplicate).
+  history without a gap or a duplicate). The server picks each page from the Movements and the archived entries
+  together (§7.2 item 5), and the page continues below the cursor the server answered, passed back unchanged; it may
+  name an archived entry. While archived entries are in scope, the count names both kinds, each against its own total:
+  `Showing n of m Movements and a of b archived entries` (`entry` when b is 1).
+- **Archived history read meanwhile.** When the cursor names a Movement that an archival run purged after the page was
+  read, the server refuses it, and the history starts again from its first page, which is read again, with the line
+  `Part of this history was archived while it was read, so it was reloaded from the newest entries.` until older rows
+  are shown again. A page that a purge kept changing through the server's own retries is refused with the server's
+  message, shown as given; showing older rows tries again.
 - **Scrap history** (§7.2 item 6) lists the PN's `SCRAPPED` events as rows of that same history (timestamp, quantity,
   Area, reason; an undone event is kept with its `REVERSED` badge) under the net cumulative figure, with
-  `Show older scrap events`.
+  `Show older scrap events`. Its archived entries are counted like those of the Movement history
+  (`Showing n of m scrap events and a of b archived entries`).
 - **Quantity Flows** page in one stable order: newest flow first, on the immutable flow id. A flow's active or closed
   status is presentation and never its position. One bounded page loads at a time (`Show older Quantity Flows`); the
   current quantities stay complete in the `Current quantity by Area` section regardless of flow paging.
 - **Allocation history** pages likewise (`Show older allocation entries`). Nothing is truncated out of reach.
 - An appended page of any section is dropped and read again to the same depth when a refresh moves its boundary or
-  changes what its rows show (a flow closed or reopened, a scrap undone, a route adjusted), never on a refresh that
-  changes nothing relevant.
+  changes what its rows show (a flow closed or reopened, a scrap undone, a route adjusted, a flow's history archived),
+  never on a refresh that changes nothing relevant.
 
 ## 7.4 Audit trail
 
@@ -2884,65 +2913,86 @@ entity (§4.12, PROJECT_PROFILE §8.13).
 
 ### History archival & purge
 
-History archival & purge exports old Movement history to archive files on the server (PROJECT_PROFILE §28
-Administrative Archival and Purge). **In this version a run exports and deletes nothing**: all Movement history stays in
-the database, and a completed run's result reads `Exported to files; nothing deleted.` Every signed-in user
+History archival & purge exports old Movement history to archive files on the server and then purges it from the
+database (PROJECT_PROFILE §28 Administrative Archival and Purge): after the off-host copy of the archive and a pre-purge
+backup, a run deletes the archived Movements in batches of whole components. Tracking then shows one archived entry,
+`History archived in run N`, per archived flow (§7.2), and archived commands can no longer be undone (§4.5). Runs that
+finished before runs purged keep their result `Exported to files; nothing deleted.` Every signed-in user
 reads the settings and the runs. The preview, a request and every change need the **Run history archival and purge**
 permission; without it one `View only` line names that permission, the Preview card is not shown and no action is
 offered. The section follows the card rule, with at most two columns: the **Retention and schedule** and **Preview**
 cards side by side in two equal columns when two fit (each at least 25rem, the width at which its widest label and
 value stay on one line), otherwise one full-width column; then the **Runs** card at the full width of the page.
 
-- **Retention and schedule** — `How long Movement history stays in the database, and when the server's archival job
-  does its work.` The card shows the **Retention period** (initially `24 months (2 years)`; `No retention period` makes
-  nothing eligible), the **Shortest allowed period** (initially 12 months), the **Start minute** of the job's hourly work
-  (`20 minutes past each hour`), the **Preview time limit** (90 seconds) and **Report a waiting run after** (7 days).
+- **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
+  its work, and how much it purges at a time.` The card shows the **Retention period** (initially `24 months (2
+  years)`; `No retention period` makes nothing eligible), the **Shortest allowed period** (initially 12 months), the
+  **Start minute** of the job's hourly work (`20 minutes past each hour`), the **Preview time limit** (90 seconds),
+  **Report a waiting run after** (7 days), **Movements per purge batch** (initially 50,000) and **Part Numbers per
+  purge batch** (initially 20).
   The dialog's field `Preview time limit (seconds)` explains: `Keep it below the wait of every proxy in front of
   PartFlow: through Cloudflare a request ends after 100 seconds.` The field `Report a waiting run after (days)` explains: `When a run waits longer than this for its off-host
   copy to be confirmed, the server's monitoring check reports it.` (A failed last run is reported whatever this
-  setting says.)
+  setting says.) The field `Movements per purge batch` explains: `The purge deletes whole components, in batches of at
+  most this many Movements; a larger component is a batch of its own.` The field `Part Numbers per purge batch`
+  explains: `A batch locks at most this many Part Numbers; work on them waits until the batch ends.`
   `Edit retention and schedule…` opens the dialog: `No retention period` or `Keep a set period of history` with the
-  months, then the other four numbers. A change of the shortest allowed period adds a required reason field. A save
-  sends only the changed values; the server checks every range and its message is shown in the dialog, which itself
-  refuses only a value that is not a whole number.
-- **Preview** — `What a run would export at a cutoff date, before you request it.` The **Cutoff date** field starts
-  empty, which asks for the latest date the retention period allows; a run exports the history before the start of
-  that day. `Run preview` shows `Running the preview… N s (time limit N s)` while the server works, which can take up
-  to the preview time limit, and the rest of the page stays usable meanwhile. The result shows the cutoff date (also
-  filled into the field, with the latest allowed date under it), the components, flows and Movements, the first and
-  last Movement, the estimated archive size and how long the preview took. Choosing another date clears the result
-  until the preview runs again. A refusal (no retention period, a cutoff that is too new, the time limit reached) is
-  shown as the server words it. When nothing is eligible, the card says so and offers no request.
+  months, then a field for each other value of the card. A change of the shortest allowed period adds a required
+  reason field. A save sends only the changed values; the server checks every range and its message is shown in the
+  dialog, which itself refuses only a value that is not a whole number.
+- **Preview** — `What a run would archive and purge at a cutoff date, before you request it.` The **Cutoff date** field
+  starts empty, which asks for the latest date the retention period allows; a run archives and then purges the history
+  before the start of that day. The card's footnote says what follows: `After the off-host copy and a pre-purge backup,
+  a run deletes the archived Movement history from the database. Tracking then shows one “History archived in run N”
+  line per archived flow, and archived commands can no longer be undone.` `Run preview` shows `Running the preview…
+  N s (time limit N s)` while the server works, which can take up to the preview time limit, and the rest of the page
+  stays usable meanwhile. The result shows the cutoff date (also filled into the field, with the latest allowed date
+  under it), the components, flows and Movements, the first and last Movement, the estimated archive size and how long
+  the preview took. Choosing another date clears the result until the preview runs again. A refusal (no retention
+  period, a cutoff that is too new, the time limit reached) is shown as the server words it. When nothing is eligible,
+  the card says so and offers no request.
 - **Request a run** — `Request a run…`, after a preview, opens a dialog with the cutoff date, the preview numbers and a
-  required reason. `Request run` sends the reason and the previewed cutoff date; the server checks the numbers again
-  (up to the preview time limit) and stores them with the run, which then waits for the job. A refusal (another run
-  still open, nothing eligible) stays in the dialog with the reason kept. When the request gets no clear answer (no
-  answer, or a gateway error or timeout such as 502, 504 or 524), the dialog closes, the runs reload, and the card says
-  that the run may or may not have been requested and that the runs table must be checked before requesting again.
-- **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server; in this version
-  nothing is deleted.` A `Reload` button, then the runs, newest first: the run number; the state in plain words as a
-  status pill (`Requested — waiting for the job`, `Running`, `Waiting for the off-host copy`, `Copy confirmed — waiting
-  for the job`, `Completed`, `Nothing eligible`, `Cancelled`, `Failed`); the cutoff date; the counts; who requested
-  the run, with the reason; the times; the archive folder name and size; and the result or the failure reason. The
-  wide table keeps a typical run to about five lines:
+  required reason. Its text says what the run does: `The run exports the Movement history before <date> to archive
+  files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database.`, followed by
+  the second sentence of the Preview card's footnote. `Request run` sends the reason and the previewed cutoff date; the
+  server checks the numbers again (up to the preview time limit) and stores them with the run, which then waits for the
+  job. A refusal (another run still open, nothing eligible) stays in the dialog with the reason kept. When the request
+  gets no clear answer (no answer, or a gateway error or timeout such as 502, 504 or 524), the dialog closes, the runs
+  reload, and the card says that the run may or may not have been requested and that the runs table must be checked
+  before requesting again.
+- **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server and, after the
+  off-host copy and a pre-purge backup, purges it from the database.` The card's footnote says once `Archived commands
+  can no longer be undone.` A `Reload` button, then the runs, newest first: the run number; the state in plain words as
+  a status pill (`Requested — waiting for the job`, `Running`, `Waiting for the off-host copy`, `Copy confirmed —
+  waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing eligible`, `Cancelled`, `Failed`); the
+  cutoff date; the counts; who requested the run, with the reason; the times; the archive folder name and size, with
+  the pre-purge backup and the purge receipt; and the result or the failure reason. A completed run's result reads
+  `Archived and purged.`, `Nothing purged (every component changed).` or, for a run that finished before runs purged,
+  `Exported to files; nothing deleted.` The wide table keeps a typical run to about five lines:
   - **Counts** show the exported numbers once there are any, otherwise the preview's: the Movements first
     (`4,210 Movements`), then `120 components · 310 flows` on a smaller line. A further line says `From the preview`
-    while nothing is exported, or gives the preview's numbers when the export differs from them, and a `Skipped
-    (changed during the run)` line appears only when components were skipped;
-  - **Times** show `Requested` and the latest step only (`Finished`, `Verified`, `Exported` or `Started`), each with
-    its date and time kept together; the full timeline is folded under `All times`, a disclosure that the keyboard
-    opens;
-  - the **archive folder name** is in a smaller monospace that wraps anywhere, with the size under it.
+    while nothing is exported, or gives the preview's numbers when the export differs from them. Once the purge
+    started, a line gives what it deleted, as the server counts it (`Purged: 4,190 Movements · 118 components · 305
+    flows`, `Purged so far: …` while the run is purging; a run that failed while purging keeps the whole components it
+    purged). A `Skipped (changed during the run)` line appears only when components were skipped, by the verification
+    or by the purge's own check;
+  - **Times** show `Requested` and the latest step only (`Finished`, `Purge started`, `Verified`, `Exported` or
+    `Started`), each with its date and time kept together; the full timeline, with `Backup started` (the pre-purge
+    backup) and `Purge started`, is folded under `All times`, a disclosure that the keyboard opens;
+  - the **archive folder name** is in a smaller monospace that wraps anywhere, with the size under it, then two
+    disclosures that the keyboard opens: `Pre-purge backup` with the backup's name, and `Purge receipt` with the
+    receipt's file name (`<archive folder name>.purged.json`, beside the archive folder) and its SHA-256.
 
   Below 800 px the rows stack.
   - `Cancel…` on a run that is requested or waiting for its off-host copy asks first (`Cancel run N?`, with `Cancel run`
-    and `Keep run (Esc)`); the archive folder of a waiting run stays on the server.
+    and `Keep run (Esc)`); the archive folder of a waiting run stays on the server. A run the job works on (`Running`,
+    `Purging`) offers no `Cancel…`, and the server refuses to cancel it.
   - `Confirm copy…` (accessible name `Confirm the off-host copy of run N…`) on a run waiting for its off-host copy
     opens `Confirm the off-host copy of run N`, which shows the archive folder name and the manifest
     SHA-256, and explains that the folder must first be copied from the server's archive folder to storage off the
     server, for example by adding the archive folder to the Hyper Backup task. `Confirm copy` is enabled once `The
-    archive folder is copied off the server` is ticked and sends the SHA-256 shown; the job completes the run at its
-    next start.
+    archive folder is copied off the server` is ticked and sends the SHA-256 shown; at its next start the job then
+    takes the pre-purge backup and purges the archived history.
   - A refusal is shown in the dialog as the server words it. When a cancel or a confirmation gets no clear answer, the
     runs reload and the card says to check the run's state; both are safe to repeat.
 
@@ -2956,12 +3006,17 @@ Configure system settings.
 - **Hourly backups kept** (0–720, initially 48), **Daily backups kept** (1–3650, initially 30) and **Weekly backups
   kept** (0–520, initially 52) are whole numbers, each with its own inline error. The rotation keeps the newest
   scheduled backup of each of that many hours, days and weeks (UTC).
-- A neutral line restates the retention and its upper bound, for example `Keeps one scheduled backup per hour for the
-  last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at most 130 scheduled backups.`
+- **Pre-purge backups kept** (1–100, initially 3) is a whole number with its own inline error: of the pre-purge backups,
+  which the history archival job takes before each purge (§9 History archival & purge), the rotation keeps the newest
+  that many.
+- A neutral line restates the retention and its upper bound, then the pre-purge backups kept, for example `Keeps one
+  scheduled backup per hour for the last 48 hours, per day for the last 30 days and per week for the last 52 weeks — at
+  most 130 scheduled backups. Keeps the newest 3 pre-purge backups.`
 - The help text states that the task takes a backup when the interval has passed since the newest scheduled backup,
-  that backups taken by hand or before an update are never removed, and that a change applies from the task's next
-  run. Saving is one audited full replace, asks for no confirmation and takes or removes no backup.
-- Without the permission, the four values read as text.
+  that it keeps the newest pre-purge backups up to the number set and removes the older ones, that backups taken by
+  hand or before an update are never removed, and that a change applies from the task's next run. Saving is one
+  audited full replace of the five values, asks for no confirmation and takes or removes no backup.
+- Without the permission, the five values read as text.
 
 ---
 
@@ -4187,7 +4242,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: History archival & purge shows its settings, the preview, the request of a run and the runs with Cancel and Confirm off-host copy; a run exports history and deletes nothing, and the new Run history archival and purge permission guards the section. |
+| 2026-11-18 | uncommitted | §4.5, §7.2, §7.3 and §9: an archival run purges the archived history after the off-host copy and a pre-purge backup, Tracking shows archived entries and archived route steps, archived commands can no longer be undone, and the purge batch limits and Pre-purge backups kept are settings. |
+| 2026-11-17 | 2f12d33 | §9: History archival & purge shows its settings, the preview, the request of a run and the runs with Cancel and Confirm off-host copy; a run exports history and deletes nothing, and the new Run history archival and purge permission guards the section. |
 | 2026-11-17 | 1490927 | §11: Add Part offers, previews and creates the canonical form of a new PN that the server derives from the entry. |
 | 2026-11-17 | 1a553f2 | §9: every Administration settings section shows each group of settings as its own card, as Security does. |
 | 2026-11-17 | 932473a | §9: the Security cards fill the page width in equal columns, each at least as wide as its widest label and value need. |

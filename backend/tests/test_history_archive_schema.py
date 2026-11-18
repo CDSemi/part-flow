@@ -3,9 +3,10 @@
 Runs the real Alembic chain against isolated, temporary PostgreSQL databases
 (created and dropped by the fixtures) and verifies:
 
-- the exact head boundary (``0040_phase16_history_archive`` is the single
-  head, and the models match the schema migrated to it) and the migration's
-  literals against the models, enums and policies;
+- the cases run against this revision inside the current chain; the head
+  boundary and the models parity moved to ``tests/test_history_purge_schema.py``
+  with ``0041_phase16_history_purge``; the migration's literals against the
+  models, enums and policies of step 1 (as migration 0041 repeats them);
 - a fresh install: the 24-month retention period with its migration audit
   row, the defaults of the new settings, the key granted to Administrator and
   Super User with one Role audit row each;
@@ -59,7 +60,9 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _VERSIONS = _BACKEND_DIR / "alembic" / "versions"
 _PREVIOUS_REVISION = "0039_security_settings"
 _HEAD_REVISION = "0040_phase16_history_archive"
+_CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _VERSIONS / "20261117_0040_phase16_history_archive.py"
+_PURGE_MIGRATION_FILE = _VERSIONS / "20261118_0041_phase16_history_purge.py"
 _USERS_ROLES_FILE = _VERSIONS / "20261006_0028_phase13_users_roles.py"
 _ROUTE_ADJUSTED_FILE = _VERSIONS / "20261007_0032_phase14_route_adjusted.py"
 _RETENTION_FILE = _VERSIONS / "20261006_0027_phase13_retention_period.py"
@@ -276,20 +279,11 @@ def _running(connection: Connection, run_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_has_a_single_head() -> None:
+def test_the_revision_is_in_the_chain() -> None:
     config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
+    revision = ScriptDirectory.from_config(config).get_revision(_HEAD_REVISION)
+    assert revision is not None and revision.down_revision == _PREVIOUS_REVISION
     assert schema_revision.non_transactional_revisions([_HEAD_REVISION]) == []
-
-
-def test_models_metadata_matches_the_migrated_schema(head: Engine) -> None:
-    from alembic.autogenerate import compare_metadata
-    from alembic.migration import MigrationContext
-
-    with head.connect() as connection:
-        context = MigrationContext.configure(connection)
-        diffs = compare_metadata(context, models.Base.metadata)
-    assert diffs == []
 
 
 def _model_checks(model: type[models.Base]) -> dict[str, str]:
@@ -317,21 +311,32 @@ def test_the_migration_literals_match_the_model() -> None:
     )
     assert migration._PREVIOUS_RETENTION_SQL == retention._RETENTION_SQL
     assert migration._RETENTION_SQL == models.POLICY_RETENTION_PERIOD_SQL
+    # Step 1's settings; step 2 (0041) adds the purge batch limits after them.
     assert {
         column: (minimum, maximum) for column, _, minimum, maximum in migration._POLICY_COLUMNS
-    } == models.HISTORY_ARCHIVE_POLICY_RANGES
+    } == {
+        column: bounds
+        for column, bounds in models.HISTORY_ARCHIVE_POLICY_RANGES.items()
+        if not column.startswith("archive_purge_")
+    }
     assert migration._POLICY_COLUMNS[0][1] == models.SHORTEST_RETENTION_MONTHS_DEFAULT
     assert migration._SECTION == policies.DATA_RETENTION_SECTION
-    assert migration._SECTION_COLUMNS == policies.HISTORY_ARCHIVE_COLUMNS
-    assert tuple(state.value for state in HistoryArchiveRunState) == migration._STATES
-    assert tuple(result.value for result in HistoryArchiveRunResult) == migration._RESULTS
-    assert migration._FINAL_STATES == models.HISTORY_ARCHIVE_FINAL_STATES
-    assert migration._OPEN_STATES == models.HISTORY_ARCHIVE_OPEN_STATES
+    assert policies.HISTORY_ARCHIVE_COLUMNS[:5] == migration._SECTION_COLUMNS
+    # The run states, results and CHECKs as 0041 found them (it repeats 0040's).
+    purge = _load(_PURGE_MIGRATION_FILE, "history_purge_migration_for_0040")
+    assert migration._STATES == purge._PREVIOUS_STATES
+    assert migration._RESULTS == purge._PREVIOUS_RESULTS
+    assert set(migration._STATES) < {state.value for state in HistoryArchiveRunState}
+    assert set(migration._RESULTS) < {result.value for result in HistoryArchiveRunResult}
+    assert migration._FINAL_STATES == purge._PREVIOUS_FINAL_STATES
+    assert migration._OPEN_STATES == purge._PREVIOUS_OPEN_STATES
     assert migration._CANONICAL_PART_NUMBER_SQL == models.CANONICAL_PART_NUMBER_SQL
-    assert migration._RUN_OPEN_WHERE_SQL == models.HISTORY_ARCHIVE_RUN_OPEN_WHERE_SQL
-    assert {
-        f"ck_history_archive_runs_{suffix}": sql for suffix, sql in migration._RUN_CHECKS
-    } == _model_checks(models.HistoryArchiveRun)
+    assert purge._in("state", purge._PREVIOUS_OPEN_STATES) == migration._RUN_OPEN_WHERE_SQL
+    changed = {suffix for suffix, _old, _new in purge._CHANGED_RUN_CHECKS}
+    model_checks = _model_checks(models.HistoryArchiveRun)
+    for suffix, sql in migration._RUN_CHECKS:
+        if suffix not in changed:
+            assert model_checks[f"ck_history_archive_runs_{suffix}"] == sql, suffix
     assert {
         f"ck_history_archived_flows_{suffix}": sql for suffix, sql in migration._FLOW_CHECKS
     } == _model_checks(models.HistoryArchivedFlow)
@@ -391,7 +396,7 @@ def _section(connection: Connection) -> dict[str, Any]:
 
 def test_a_fresh_install_holds_the_defaults_and_the_key(head: Engine) -> None:
     with head.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         assert _section(connection) == _SECTION_DEFAULTS
         [retention] = _audits(connection, "ApplicationPolicy")
         assert retention["entity_id"] == "data-retention"
@@ -642,7 +647,7 @@ def test_the_cutoff_floor_admits_the_site_cutoff_at_the_end_of_february(
     moment = datetime.datetime(2027, 2, 28, 18, 0, tzinfo=datetime.UTC)
     monkeypatch.setattr(history_archive, "now", lambda: moment)
     monkeypatch.setattr(history_archive, "site_zone", lambda: ZoneInfo("Asia/Bangkok"))
-    settings = history_archive.ArchivalSettings(13, 13, 7, 20, 90)
+    settings = history_archive.ArchivalSettings(13, 13, 7, 20, 90, 50000, 20)
     cutoff = history_archive.resolve_cutoff(settings, None)
     assert cutoff == history_archive.Cutoff(
         datetime.date(2026, 2, 1), datetime.datetime(2026, 1, 31, 17, 0, tzinfo=datetime.UTC)
@@ -975,19 +980,21 @@ def test_the_roles_split_the_runs_between_the_application_and_the_job(
     )
     assert _as(head, roles.maintenance, [*waiting, confirm]) == "P0001"
     assert _as(head, roles.maintenance, [*waiting, unmarked, confirm]) == "P0001"
-    # Nor completes a run that was neither copied nor confirmed (the CHECK).
+    # Nor completes a run that was neither copied nor confirmed — since step 2 (0041) no
+    # run ends EXPORT_ONLY any more, copied or not (the run guard).
     complete = (
         "UPDATE history_archive_runs SET state = 'COMPLETED', result = 'EXPORT_ONLY',"
         " finished_at = now() WHERE id = :id",
         by_id,
     )
-    assert _as(head, roles.maintenance, [*waiting, complete]) == "23514"
+    assert _as(head, roles.maintenance, [*waiting, complete]) == "P0001"
     copied = ("UPDATE history_archive_runs SET copied_at = now() WHERE id = :id", by_id)
-    assert _as(head, roles.maintenance, [*waiting, copied, complete]) is None
+    assert _as(head, roles.maintenance, [*waiting, copied, complete]) == "P0001"
     assert _as(head, roles.maintenance, [(_AUDIT_ROW, {"type": "HistoryArchiveRun"})]) is None
     assert _as(head, roles.maintenance, [(_AUDIT_ROW, {"type": "ApplicationPolicy"})]) == "P0001"
     assert _as(head, roles.maintenance, [("SELECT 1 FROM audit_events LIMIT 1", {})]) == "42501"
-    assert _as(head, roles.maintenance, [("DELETE FROM part_movements WHERE false", {})]) == "42501"
+    # Since step 2 it may delete Movements, as the purge's row guard allows (none here).
+    assert _as(head, roles.maintenance, [("DELETE FROM part_movements WHERE false", {})]) is None
     assert _as(
         head, roles.maintenance, [("UPDATE quantity_flows SET id = id WHERE false", {})]
     ) == ("42501")
@@ -1027,7 +1034,7 @@ def test_the_downgrade_restores_the_previous_schema(head_database: URL, head: En
         connection.execute(sa.text("UPDATE application_policy SET retention_period_months = 11"))
     command.upgrade(_alembic_config(head_database), "head")
     with head.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
         assert _KEY in _grants(connection)["Administrator"]
 
 
@@ -1065,7 +1072,7 @@ def test_the_downgrade_refuses_while_archival_data_exists(
     with pytest.raises(DBAPIError, match="History archival data exists"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head.connect() as connection:
-        assert _version(connection) == _HEAD_REVISION
+        assert _version(connection) == _CODE_HEAD
 
 
 def test_the_role_snapshot_matches_the_roles_module() -> None:

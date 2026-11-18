@@ -56,7 +56,7 @@ pytestmark = pytest.mark.database_owner
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0039_security_settings"
+_PREVIOUS = "0040_phase16_history_archive"
 # The revision before the last one that alters audit_events (0032): the
 # lock case needs a pending migration that waits for that table.
 _BEFORE_AUDIT_ALTER = "0031_phase14_beyond_demand"

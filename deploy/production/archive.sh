@@ -1,20 +1,46 @@
 #!/bin/sh
-# PartFlow history archival host job (Movement-history archival, build step 1; OPERATIONS_RUNBOOK §11, DEPLOYMENT §3.1).
-# Run from the repository root of the RUNNING release's checkout, as the account that owns PARTFLOW_ARCHIVE_DIR (root on
-# the NAS). `deploy/production/archive.sh --help` prints the usage. Step 1 exports and copies archives and NEVER deletes
-# anything: every run ends as COMPLETED with the result EXPORT_ONLY, or as NOTHING_ELIGIBLE, CANCELLED or FAILED.
+# PartFlow history archival host job (Movement-history archival, build steps 1 and 2; OPERATIONS_RUNBOOK §11,
+# DEPLOYMENT §3.1). Run from the repository root of the RUNNING release's checkout, as the account that owns
+# PARTFLOW_ARCHIVE_DIR and PARTFLOW_BACKUP_DIR (root on the NAS). `deploy/production/archive.sh --help` prints the
+# usage. This job DELETES: once a run's archive is exported, verified and copied off the host, it takes the run's
+# pre-purge backup and purges the archived Movement history from the database (whole flow components, in batches), and
+# the full reconcile checks the database right after the purge.
 #
 # The hourly work runs the steps of `python -m app.cli history-archive` in the one-shot `maintenance` service (as the
-# maintenance database role, the archive folder mounted, `--user` this account): recover; next; then, as `next` says,
-# export --run N, verify --run N and copy --run N (or copy --run N alone); and status at the end. Each step's JSON
-# report and stderr go to <records-dir>/archive/<UTC stamp>/; that folder is kept only when a step did something or
-# failed. The optional off-host copy folder (PARTFLOW_ARCHIVE_COPY_DIR) is mounted at /archive-copy only while it
-# exists, is writable, and lies on a file system that is neither the archive folder's nor the root file system `/` (a
-# disk or share that dropped out leaves its path on `/`); the rule is evaluated again before every step, so a copy
-# folder that vanishes during a long export is not used by the copy. The mount is a long-syntax bind with
-# create_host_path: false in a generated Compose override file (`docker compose run` has no --mount; its -v would
-# create a missing host path), so Docker refuses a source that vanished in between. Otherwise the job finds
-# /archive-copy unusable and the run waits for a copy confirmation in Administration.
+# maintenance database role, the archive folder mounted, `--user` this account): `recover`; then `next` and the step it
+# names, again and again until `next` answers wait, running or none, a run finishes, or a step fails: export --run N,
+# verify --run N and copy --run N; for `backup`, the pre-purge backup (deploy/production/backup.sh --kind pre-purge
+# --label <archive name>, which waits up to --backup-wait-minutes for a backup that is running) and then purge --run N
+# --backup NAME --backup-started-at UTC; for `purge` (a run an earlier start left PURGING), purge --run N alone. After a
+# purge that ended with exit 0, or with exit 3 once the run was purging, the full `python -m app.cli reconcile` runs in a
+# one-off `backend` container as the application database role, as release.sh and scheduled-reconcile.sh run it; then
+# `status`. A start never begins another run after a purge: the reconcile's verdict comes first. A purge that ends with
+# exit 2 (a transient database error or a lost connection while PURGING: the batch in progress rolled back, and the run
+# stays PURGING) is not reconciled in that start: the next start resumes the purge and reconciles when it ends.
+#
+# A run left RUNNING after its copy (its pre-purge backup failed, or the job stopped) is failed by the next start's
+# `recover`, on purpose: the pre-purge backup is taken while the run is RUNNING, so a database restored from that backup
+# never purges again. A database restored from a backup taken while a run was PURGING (an hourly backup during a purge)
+# holds that run PURGING, and the next start resumes its purge: disable the task before any restore (OPERATIONS_RUNBOOK
+# §6).
+#
+# Each step's JSON report and stderr go to <records-dir>/archive/<UTC stamp>/ (`next`, then `next-2`, `next-3`, ...;
+# backup.out and backup.log of backup.sh; reconcile.json and reconcile.log); that folder is kept only when a step did
+# something or failed. A reconcile after a purge that does not end clean (a finding, an error, no complete report) is an
+# incident (design §10): archive.sh exits 4 and writes the incident record <records-dir>/archive/reconcile-after-purge
+# (key=value lines: result, exit code, run, archive name, pre-purge backup, failing checks, time, report path), which
+# check.sh reports as FAIL archival_proposal reconcile_after_purge. While the record exists, the job fails closed: a
+# start runs `recover` and `status` only and refuses every step that changes data (export, verify, copy, the pre-purge
+# backup and the purge, the resumed purge of a run left PURGING included) with exit 1. Only the operator removes the
+# record, once the investigation is done (OPERATIONS_RUNBOOK §8).
+#
+# The optional off-host copy folder (PARTFLOW_ARCHIVE_COPY_DIR) is mounted at /archive-copy only while it exists, is
+# writable, and lies on a file system that is neither the archive folder's nor the root file system `/` (a disk or
+# share that dropped out leaves its path on `/`); the rule is evaluated again before every step, so a copy folder that
+# vanishes during a long export is not used by the copy. The mount is a long-syntax bind with create_host_path: false in
+# a generated Compose override file (`docker compose run` has no --mount; its -v would create a missing host path), so
+# Docker refuses a source that vanished in between. Otherwise the job finds /archive-copy unusable and the run waits for
+# a copy confirmation in Administration.
 #
 # `--scheduled` (the host task that starts every 5 minutes, design D12): the hourly work runs once per hour, at the first
 # start at or after the Start minute of Administration → History archival & purge (`history-archive settings`). The
@@ -25,17 +51,22 @@
 #
 # Locks: <records-dir>/.archive.lock (owner file: host, pid, started_at, by, and the kernel boot id and the process
 # start time from /proc) is taken only for the hourly work, never by a start that only checks the time and never while
-# a run merely waits for its copy confirmation. archive.sh refuses while <records-dir>/.release.lock exists, and
-# release.sh refuses while the archive lock is held. A lock whose owner provably no longer exists (same host, no
-# `maintenance` container running, and its pid gone, or the boot id or the pid's start time differs from the recorded
-# one) is removed automatically: the job's `recover` then fails a run left RUNNING. The database itself is guarded by
-# the job's advisory lock.
+# a run merely waits for its copy confirmation. It is held for the whole hourly work, the wait for the backup lock, the
+# purge and the reconcile included. archive.sh refuses while <records-dir>/.release.lock exists, and release.sh refuses
+# while the archive lock is held, so no live release holds the backup lock while the pre-purge backup waits for it (a
+# backup lock left by a killed release.sh is stale, and backup.sh refuses it at once). A lock whose owner provably no
+# longer exists (same host, no `maintenance` container running, and its pid gone, or the boot id or the pid's start time
+# differs from the recorded one) is removed automatically: the job's `recover` then fails a run left RUNNING. The
+# database itself is guarded by the job's advisory lock.
 #
 # stdout on exit 0: exactly one line, `NOT_DUE`, `DEFERRED <reason>` (scheduled: the previous start still works on
 # its hourly work), or `ARCHIVE <outcome> <run id|-> <state|->`. stderr: progress, each step's one-line summary, errors.
 # Exit status: 0 done (or nothing due); 1 refused, nothing changed (a release runs, the archive lock is held, a step
-# refused); 2 could not run (configuration, Docker, database, an unknown outcome); 3 a run failed: it is now FAILED and
-# a new run must be requested in Administration → History archival & purge.
+# refused, the incident record exists); 2 could not run (configuration, Docker, database, an unknown outcome), or the
+# pre-purge backup failed (nothing was deleted; the next start fails the run); 3 a run failed: it is now FAILED and a
+# new run must be requested in Administration → History archival & purge (a run that failed while purging keeps the
+# whole components it purged, which its purge receipt lists); 4 the reconcile after a purge did not end clean: an
+# incident (OPERATIONS_RUNBOOK §8, Reconcile finding after a purge).
 set -eu
 
 # The values in the shell would override the env file for every Compose command: the script sets them per command only.
@@ -44,7 +75,11 @@ unset PARTFLOW_RELEASE PARTFLOW_COMMIT PARTFLOW_ACCEPT_SCHEMA_REVISION PARTFLOW_
 # Records, logs and the stamp are readable by the owning account only.
 umask 077
 
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 RELEASE_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+# The archive name of a run, the label of its pre-purge backup (contract §4).
+ARCHIVE_NAME_PATTERN='^run-[0-9]+-[0-9]{8}T[0-9]{6}Z$'
+UTC_PATTERN='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 # The container path of the copy folder (compose.production.yaml sets PARTFLOW_ARCHIVE_COPY_DIR to it when configured).
 COPY_TARGET=/archive-copy
 # The kernel's process information. A constant: the tests point it at a fake tree.
@@ -78,18 +113,27 @@ owner_alive() {
 usage() {
     cat <<'EOF'
 Usage: deploy/production/archive.sh [--scheduled] [--env-file .env.production] [--records-dir DIR]
+           [--backup-wait-minutes N]
 
-Run from the repository root of the running release's checkout, as the account that owns PARTFLOW_ARCHIVE_DIR.
-Runs the hourly work of Movement-history archival in the `maintenance` service: recover, next, then export, verify
-and copy as `next` says, and status. Build step 1: it exports and copies archives and never deletes anything.
-  --scheduled           the host task that starts every 5 minutes: the hourly work runs once per hour, at the first
-                        start at or after the Start minute of Administration → History archival & purge; every other
-                        start ends at once (NOT_DUE)
-  --env-file FILE       default .env.production
-  --records-dir DIR     default $HOME/partflow-deployments: the release lock .release.lock, the archive lock
-                        .archive.lock, the hourly stamp archive/hourly-slot and the reports archive/<UTC stamp>/
-Exit: 0 done (or nothing due), 1 refused (a release runs, the archive lock is held, a step refused; nothing changed),
-      2 could not run, 3 a run failed: it is FAILED; request a new run in Administration → History archival & purge.
+Run from the repository root of the running release's checkout, as the account that owns PARTFLOW_ARCHIVE_DIR and
+PARTFLOW_BACKUP_DIR. Runs the hourly work of Movement-history archival in the `maintenance` service: recover, then the
+steps that `next` names (export, verify and copy; the pre-purge backup and the purge; or the purge of a run left
+PURGING), the full reconcile after a purge, and status. The purge DELETES the archived Movement history from the
+database, after the archive's off-host copy and the pre-purge backup.
+  --scheduled             the host task that starts every 5 minutes: the hourly work runs once per hour, at the first
+                          start at or after the Start minute of Administration → History archival & purge; every
+                          other start ends at once (NOT_DUE)
+  --env-file FILE         default .env.production
+  --records-dir DIR       default $HOME/partflow-deployments: the release lock .release.lock, the archive lock
+                          .archive.lock, the hourly stamp archive/hourly-slot, the reports archive/<UTC stamp>/ and
+                          the incident record archive/reconcile-after-purge (while it exists, a start runs recover
+                          and status only and works on no run)
+  --backup-wait-minutes N how long the pre-purge backup waits for another backup that holds the backup lock, polling
+                          (0-1440, default 60; 0 = refused at once)
+Exit: 0 done (or nothing due), 1 refused (a release runs, the archive lock is held, a step refused, the incident record
+      exists; nothing changed), 2 could not run, or the pre-purge backup failed (nothing was deleted; the next start
+      fails the run), 3 a run failed: it is FAILED; request a new run in Administration → History archival & purge,
+      4 the reconcile after a purge did not end clean: an incident (OPERATIONS_RUNBOOK §8).
 stdout on exit 0: NOT_DUE, DEFERRED <reason>, or ARCHIVE <outcome> <run id|-> <state|->
 EOF
 }
@@ -107,6 +151,8 @@ usage_error() {
 SCHEDULED=
 ENV_FILE=.env.production
 RECORDS_DIR=
+# The default of --backup-wait-minutes: long enough for an hourly backup that still runs at the Start minute to end.
+BACKUP_WAIT_MINUTES=60
 SEEN=' '
 while [ "$#" -gt 0 ]; do
     option=$1
@@ -120,7 +166,7 @@ while [ "$#" -gt 0 ]; do
             exit 0
             ;;
         --scheduled) SCHEDULED=1; shift; continue ;;
-        --env-file | --records-dir)
+        --env-file | --records-dir | --backup-wait-minutes)
             [ "$#" -ge 2 ] || usage_error "$option needs a value."
             value=$2
             shift 2
@@ -130,6 +176,11 @@ while [ "$#" -gt 0 ]; do
     case "$option" in
         --env-file) ENV_FILE=$value ;;
         --records-dir) RECORDS_DIR=$value ;;
+        --backup-wait-minutes)
+            { printf '%s' "$value" | grep -Eq '^(0|[1-9][0-9]{0,3})$' && [ "$value" -le 1440 ]; } \
+                || usage_error "--backup-wait-minutes must be a whole number from 0 to 1440."
+            BACKUP_WAIT_MINUTES=$value
+            ;;
     esac
 done
 if [ -z "$RECORDS_DIR" ]; then
@@ -154,6 +205,8 @@ say() {
     fi
 }
 STAMP_FILE=$RECORDS_DIR/archive/hourly-slot
+# The incident record of a reconcile after a purge that did not end clean (check.sh reads it).
+INCIDENT_FILE=$RECORDS_DIR/archive/reconcile-after-purge
 # Scheduled only: set once the hourly work is due (or its due check started), cleared once the stamp is written.
 STAMP_PENDING=
 SLOT=
@@ -185,6 +238,14 @@ json_field() {
 json_number() {
     sed -n 's/^  "'"$2"'": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
 }
+# json_nested FILE OBJECT KEY: the string value KEY of the top-level object OBJECT (empty for null or absent).
+json_nested() {
+    sed -n '/^  "'"$2"'": {$/,/^  }/s/^    "'"$3"'": "\([^"]*\)",\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+# json_nested_number FILE OBJECT KEY: the whole-number value KEY of the top-level object OBJECT.
+json_nested_number() {
+    sed -n '/^  "'"$2"'": {$/,/^  }/s/^    "'"$3"'": \([0-9][0-9]*\),\{0,1\}$/\1/p' "$1" 2>/dev/null | head -n 1
+}
 # json_list FILE KEY: the items of a top-level list of strings or numbers, one per line.
 json_list() {
     awk -v key="$2" '
@@ -200,6 +261,13 @@ error_message() {
 # report_valid FILE RC: the report holds exactly the line of its exit code (OPERATIONS_RUNBOOK §7 rule).
 report_valid() {
     grep -qx "  \"exit_code\": $2," "$1" 2>/dev/null
+}
+# failing_checks FILE: the ids of the checks of a reconcile report whose status is fail or error, space-separated.
+failing_checks() {
+    awk '
+        /^      "id": "/ { id = $0; sub(/^      "id": "/, "", id); sub(/",?$/, "", id) }
+        /^      "status": "(fail|error)",?$/ { printf "%s%s", sep, id; sep = " " }
+    ' "$1" 2>/dev/null
 }
 # mount_point PATH: the mount point of the file system holding PATH (empty when df cannot tell).
 mount_point() {
@@ -324,6 +392,13 @@ WORK=
 LOCK=$RECORDS_DIR/.archive.lock
 RELEASE_LOCK=$RECORDS_DIR/.release.lock
 LOCK_OWNED=
+# The step that runs now (export, verify, copy, backup, purge or reconcile), for the signal handler.
+CURRENT_STEP=
+# Set once a purge may have deleted something in this start, cleared once its reconcile result is recorded.
+RECONCILE_PENDING=
+RUN_ID=
+ARCHIVE_NAME=
+BACKUP_NAME=
 cleanup() {
     [ -z "$WORK" ] || rm -rf "$WORK"
     if [ -n "$LOCK_OWNED" ]; then
@@ -334,12 +409,47 @@ cleanup() {
         rm -rf "$REC"
     fi
 }
+# record_incident RESULT EXIT_CODE CHECKS: the incident record of a reconcile after a purge that did not end clean,
+# replaced in one rename. Until the operator removes it, check.sh reports it and no start works on a run.
+record_incident() {
+    {
+        echo "result=$1"
+        echo "exit_code=$2"
+        echo "run=$RUN_ID"
+        echo "archive_name=$ARCHIVE_NAME"
+        echo "pre_purge_backup=$BACKUP_NAME"
+        echo "failing_checks=$3"
+        echo "finished_at=$(utc)"
+        echo "report=$REC/reconcile.json"
+    } >"$INCIDENT_FILE.tmp" 2>/dev/null && mv -f "$INCIDENT_FILE.tmp" "$INCIDENT_FILE" 2>/dev/null \
+        || say "the incident record $INCIDENT_FILE could not be written, so it cannot stop the next start: disable the history archive task until the incident is closed (OPERATIONS_RUNBOOK §8)."
+}
 on_signal() {
     trap - INT TERM
+    # The trap can run while a step's output is redirected to its report and log: speak on the script's own stdout and
+    # stderr (fds 8 and 9), never into the step's files.
+    exec 1>&8 2>&9
     KEEP=1
-    say "interrupted. The next start recovers a run left RUNNING (it becomes FAILED); nothing was deleted."
+    case "$CURRENT_STEP" in
+        purge)
+            say "interrupted during the purge of run ${RUN_ID:-?}. Whole components only are ever deleted: the next start resumes the purge of a run left PURGING and reconciles when it ends (the purge receipt then lists what was deleted), or fails a run that was still RUNNING (then nothing was deleted)."
+            ;;
+        backup)
+            say "interrupted during the pre-purge backup of run ${RUN_ID:-?}. Nothing was deleted: the run stays RUNNING, and the next start fails it (recover); request a new run in Administration → History archival & purge."
+            ;;
+        *)
+            if [ -n "$RECONCILE_PENDING" ]; then
+                record_incident interrupted 2 ""
+                say "interrupted before the reconcile after the purge of run ${RUN_ID:-?} ended: run it by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge). $INCIDENT_FILE records the incident: no start works on a run until you remove it."
+            else
+                say "interrupted. The next start recovers a run left RUNNING (it becomes FAILED); nothing was deleted."
+            fi
+            ;;
+    esac
     exit 2
 }
+# fds 8 and 9: the script's own stdout and stderr, for on_signal.
+exec 8>&1 9>&2
 trap cleanup EXIT
 trap on_signal INT TERM
 WORK=$(mktemp -d) || could_not_run "a temporary directory cannot be created."
@@ -424,7 +534,8 @@ lock_busy() {
         alive=1
     fi
     if [ -n "$containers" ] || [ -n "$alive" ]; then
-        # A step runs, or the owner is between two steps: a scheduled start leaves this hour to it.
+        # A step runs, or the owner is between two steps (its pre-purge backup or reconcile included): a scheduled start
+        # leaves this hour to it.
         if [ -n "$SCHEDULED" ]; then
             mark_slot
             say "the previous archive.sh ($who) is still working; this hour's work is skipped."
@@ -479,128 +590,339 @@ REC=$RECORDS_DIR/archive/$(date -u +%Y%m%dT%H%M%SZ)
 mkdir "$REC" 2>/dev/null || { REC=; could_not_run "the record folder $RECORDS_DIR/archive/<UTC stamp> cannot be created."; }
 
 # ---------------------------------------------------------------------------
-# The hourly work (contract §2.4)
+# The hourly work (contract §3.1)
 # ---------------------------------------------------------------------------
 
 EXIT=0
-RUN_ID=
 STATE=
 OUTCOME=
-# step NAME ARGS...: one history-archive command; report REC/NAME.json, stderr REC/NAME.log; sets RC, RESULT, VALID.
+STEP_NAME=
+STEP_CMD=
+# The purge of this start reached PURGING (its report names the run's pre-purge backup): it may have deleted something.
+PURGE_STARTED=
+# step NAME COMMAND ARGS...: one history-archive command; report REC/NAME.json, stderr REC/NAME.log; sets RC, RESULT,
+# VALID and STATE (when the report names a state).
 step() {
-    name=$1
+    STEP_NAME=$1
+    STEP_CMD=$2
     shift
     RC=0
     # The copy folder may have dropped out during a long step: the rule is evaluated before every step.
     copy_rule
-    job "$@" >"$REC/$name.json" 2>"$REC/$name.log" || RC=$?
+    CURRENT_STEP=$STEP_CMD
+    job "$@" >"$REC/$STEP_NAME.json" 2>"$REC/$STEP_NAME.log" || RC=$?
+    CURRENT_STEP=
     VALID=
-    if report_valid "$REC/$name.json" "$RC"; then
+    if report_valid "$REC/$STEP_NAME.json" "$RC"; then
         VALID=1
-        RESULT=$(json_field "$REC/$name.json" result)
-        state=$(json_field "$REC/$name.json" state)
+        RESULT=$(json_field "$REC/$STEP_NAME.json" result)
+        state=$(json_field "$REC/$STEP_NAME.json" state)
         [ -z "$state" ] || STATE=$state
-        summary=$(tail -n 1 "$REC/$name.log" 2>/dev/null) || summary=
-        say "${summary:-history-archive $name: $RESULT}"
+        summary=$(tail -n 1 "$REC/$STEP_NAME.log" 2>/dev/null) || summary=
+        say "${summary:-history-archive $STEP_CMD: $RESULT}"
     else
         RESULT=
-        say "history-archive $name gave no valid report (exit $RC; $REC/$name.json, $REC/$name.log)."
-        tail -n 3 "$REC/$name.log" >&2 2>/dev/null || true
+        say "history-archive $STEP_CMD gave no valid report (exit $RC; $REC/$STEP_NAME.json, $REC/$STEP_NAME.log)."
+        tail -n 3 "$REC/$STEP_NAME.log" >&2 2>/dev/null || true
     fi
 }
-# failed NAME: the step NAME did not end with exit 0: set EXIT and say why (the run's state is in the report).
+REQUEST_NEW="Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+# failed: the step STEP_CMD (record STEP_NAME) did not end with exit 0: set EXIT and say why (the run's state is in the
+# report).
 failed() {
     KEEP=1
-    message=$(error_message "$REC/$1.json")
+    message=$(error_message "$REC/$STEP_NAME.json")
+    [ -n "$message" ] || message="see $REC/$STEP_NAME.json."
     if [ -z "$VALID" ]; then
         EXIT=2
-        case "$1" in
+        case "$STEP_CMD" in
             export | verify | copy)
-                say "the outcome of $1 is unknown. The next start recovers a run left RUNNING (it becomes FAILED); nothing was deleted." ;;
+                say "the outcome of $STEP_CMD is unknown. The next start recovers a run left RUNNING (it becomes FAILED); nothing was deleted." ;;
+            purge)
+                say "the outcome of the purge of run ${RUN_ID:-?} is unknown. Whole components only are ever deleted: the next start resumes a run left PURGING and reconciles when its purge ends, or fails a run that is still RUNNING (then nothing was deleted)." ;;
         esac
         return 0
     fi
     case "$RC" in
         1)
             EXIT=1
-            say "history-archive $1 refused: ${message:-see $REC/$1.json}"
+            say "history-archive $STEP_CMD refused: $message"
+            if [ "$STEP_CMD" = purge ] && [ "$STATE" = PURGING ]; then
+                say "run ${RUN_ID:-?} stays PURGING: the next start resumes its purge and reconciles when it ends."
+            elif [ "$STEP_CMD" = purge ]; then
+                say "Nothing was deleted. Run ${RUN_ID:-?} stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+            fi
             ;;
         3)
             EXIT=3
-            say "run ${RUN_ID:-?} FAILED: ${message:-see $REC/$1.json} Nothing was deleted. Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+            if [ "$STEP_CMD" = purge ] && [ -n "$PURGE_STARTED" ]; then
+                say "run ${RUN_ID:-?} FAILED while purging: $message Whole components only were deleted; the purge receipt $ARCHIVE_DIR/${ARCHIVE_NAME:-<archive name>}.purged.json lists what was deleted and what stays in the database. Request a new run for the rest in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+            else
+                say "run ${RUN_ID:-?} FAILED: $message Nothing was deleted. $REQUEST_NEW"
+            fi
             ;;
         *)
             EXIT=2
-            say "history-archive $1 could not run: ${message:-see $REC/$1.json}"
+            if [ "$STEP_CMD" = purge ] && [ "$STATE" = PURGING ]; then
+                # A transient database error or a lost connection while purging (design §7.5): the run stays
+                # PURGING, and the reconcile waits for the resumed purge to end.
+                say "the purge of run ${RUN_ID:-?} stopped: $message"
+                say "run ${RUN_ID:-?} stays PURGING: the batch in progress was rolled back (whole components only are ever deleted), and the next start resumes the purge and reconciles when it ends."
+            else
+                say "history-archive $STEP_CMD could not run: $message"
+                [ "$STEP_CMD" != purge ] \
+                    || say "Nothing was deleted. Run ${RUN_ID:-?} stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+            fi
             ;;
     esac
 }
 
+# reconcile_after_purge: the full reconcile right after a purge (contract §3.1, design §10), in a one-off backend
+# container as the application database role, as release.sh and scheduled-reconcile.sh run it. Not clean (a finding,
+# an error, no complete report): an incident, exit 4 and the incident record. No earlier record can exist here: while
+# one exists, no start purges.
+reconcile_after_purge() {
+    KEEP=1
+    say "run ${RUN_ID:-?}: the full reconcile after the purge (python -m app.cli reconcile in a one-off backend container)."
+    CURRENT_STEP=reconcile
+    rrc=0
+    pf run --rm --no-deps -T backend python -m app.cli reconcile --max-findings 10000 \
+        >"$REC/reconcile.json" 2>"$REC/reconcile.log" || rrc=$?
+    CURRENT_STEP=
+    result=
+    if report_valid "$REC/reconcile.json" "$rrc"; then
+        result=$(json_field "$REC/reconcile.json" result)
+    fi
+    if [ "$rrc" -eq 0 ] && [ "$result" = clean ]; then
+        RECONCILE_PENDING=
+        say "the reconcile after the purge of run ${RUN_ID:-?} is clean ($REC/reconcile.json)."
+        return 0
+    fi
+    EXIT=4
+    checks=$(failing_checks "$REC/reconcile.json")
+    case "$rrc:$result" in
+        1:mismatch) what="found a mismatch${checks:+ (checks $checks)}" ;;
+        2:error) what="ended in error${checks:+ (checks $checks)}" ;;
+        *)
+            result=could_not_run
+            what="could not run (exit $rrc, no complete report)"
+            ;;
+    esac
+    record_incident "$result" "$rrc" "$checks"
+    RECONCILE_PENDING=
+    tail -n 3 "$REC/reconcile.log" >&2 2>/dev/null || true
+    say "INCIDENT — the reconcile after the purge of run ${RUN_ID:-?} $what: $REC/reconcile.json. Stop requesting runs and follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge): the purge receipt is $ARCHIVE_DIR/${ARCHIVE_NAME:-<archive name>}.purged.json${BACKUP_NAME:+ and the pre-purge backup $BACKUP_NAME}; $INCIDENT_FILE records the incident, and no start works on a run until you remove it after the investigation."
+}
+
+# pre_purge_backup RECORD: the pre-purge backup of run RUN_ID that `next` (report RECORD) asked for: backup.sh --kind
+# pre-purge, which publishes and verifies it like every backup and waits up to --backup-wait-minutes for a backup that
+# holds the backup lock. Sets BACKUP_NAME and BACKUP_STARTED (its dump start, from its backup-verify report). On a
+# failure it sets EXIT, says why and returns 1: nothing was deleted, and the run stays RUNNING for the next start's
+# recover, which fails it.
+pre_purge_backup() {
+    kind=$(json_nested "$REC/$1.json" backup kind)
+    label=$(json_nested "$REC/$1.json" backup label)
+    if [ "$kind" != pre-purge ] || ! printf '%s' "$label" | grep -Eq "$ARCHIVE_NAME_PATTERN"; then
+        EXIT=2
+        say "history-archive next asked for a backup of run ${RUN_ID:-?} without the pre-purge kind and archive name ($REC/$1.json). Nothing was deleted; the run stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+        return 1
+    fi
+    ARCHIVE_NAME=$label
+    say "run ${RUN_ID:-?}: the pre-purge backup (backup.sh --kind pre-purge --label $label; it waits up to $BACKUP_WAIT_MINUTES min for a backup that is running)."
+    CURRENT_STEP=backup
+    brc=0
+    sh "$SCRIPT_DIR/backup.sh" --kind pre-purge --label "$label" --operator archive.sh \
+        --reason "pre-purge backup for $label" --env-file "$ENV_FILE" --lock-wait-minutes "$BACKUP_WAIT_MINUTES" \
+        >"$REC/backup.out" 2>"$REC/backup.log" || brc=$?
+    CURRENT_STEP=
+    line=$(sed -n '/^BACKUP /p' "$REC/backup.out" 2>/dev/null | tail -n 1)
+    BACKUP_NAME=$(printf '%s\n' "$line" | awk 'NF == 4 { print $2 }')
+    BACKUP_STARTED=$(printf '%s\n' "$line" | awk 'NF == 4 { print $4 }')
+    if [ "$brc" -eq 0 ] && printf '%s' "$BACKUP_NAME" | grep -Eq "^[0-9]{8}T[0-9]{6}Z-pre-purge-$label\$" \
+        && printf '%s' "$BACKUP_STARTED" | grep -Eq "$UTC_PATTERN"; then
+        say "run ${RUN_ID:-?}: the pre-purge backup $BACKUP_NAME is published and verified (its dump started at $BACKUP_STARTED)."
+        return 0
+    fi
+    EXIT=2
+    tail -n 3 "$REC/backup.log" >&2 2>/dev/null || true
+    if [ "$brc" -eq 0 ]; then
+        why="backup.sh did not name the pre-purge backup with its dump start ($REC/backup.out)"
+    else
+        why="the pre-purge backup failed (backup.sh exit $brc; $REC/backup.log)"
+    fi
+    BACKUP_NAME=
+    say "run ${RUN_ID:-?}: $why. Nothing was deleted. The run stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
+    return 1
+}
+
+# purge_run [--backup NAME --backup-started-at UTC]: purge --run RUN_ID (with the pre-purge backup just taken, or alone
+# to resume a run left PURGING), then the reconcile when the purge ended after deleting something: exit 0, or exit 3
+# once the run was purging (the report names its pre-purge backup). Exit 2 while PURGING (a transient database error)
+# leaves the run PURGING: the next start resumes it and reconciles then, so no reconcile runs now.
+purge_run() {
+    step purge purge --run "$RUN_ID" "$@"
+    name=$(json_field "$REC/purge.json" archive_name)
+    [ -z "$name" ] || ARCHIVE_NAME=$name
+    PURGE_STARTED=
+    if [ -n "$VALID" ]; then
+        recorded=$(json_nested "$REC/purge.json" backup name)
+        if [ -n "$recorded" ]; then
+            PURGE_STARTED=1
+            BACKUP_NAME=$recorded
+        fi
+    fi
+    if [ "$RC" -eq 0 ] && [ -n "$VALID" ]; then
+        OUTCOME=$RESULT
+        RECONCILE_PENDING=1
+        receipt=$(json_nested "$REC/purge.json" receipt name)
+        say "run $RUN_ID: $(json_nested_number "$REC/purge.json" purged components) components ($(json_nested_number "$REC/purge.json" purged flows) flows, $(json_nested_number "$REC/purge.json" purged movements) Movements) purged, $(json_nested_number "$REC/purge.json" skipped components) components ($(json_nested_number "$REC/purge.json" skipped flows) flows) skipped; batches this start: $(json_number "$REC/purge.json" batches); purge receipt $ARCHIVE_DIR/${receipt:-?} (SHA-256 $(json_nested "$REC/purge.json" receipt sha256))."
+        problem=$(json_nested "$REC/purge.json" receipt copy_problem)
+        [ -z "$problem" ] || say "$problem"
+        reconcile_after_purge
+        return 0
+    fi
+    failed
+    if [ "$RC" -eq 3 ] && [ -n "$VALID" ] && [ -n "$PURGE_STARTED" ]; then
+        RECONCILE_PENDING=1
+        reconcile_after_purge
+    fi
+    return 0
+}
+
 step recover recover
 if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-    failed recover
+    # Without a recover, no run is worked on: a run left RUNNING (also one restored from its pre-purge backup) must be
+    # failed before `next` could hand out its backup and purge again.
+    failed
 else
     if [ "$RESULT" = recovered ]; then
         KEEP=1
         for path in $(json_list "$REC/recover.json" kept_partial); do
             say "kept the unfinished folder $path: its name belongs to no finished run (OPERATIONS_RUNBOOK §11)."
         done
+        for path in $(json_list "$REC/recover.json" copied_receipts); do
+            say "copied the purge receipt $path into the copy folder (it was missing there or differed)."
+        done
         stale=$(json_list "$REC/recover.json" failed_run_ids | tr '\n' ' ' | sed 's/ *$//')
         if [ -n "$stale" ]; then
-            # An earlier start stopped while its run was RUNNING: that run is FAILED now.
+            # A start stopped, or its pre-purge backup failed, while its run was RUNNING: that run is FAILED now.
             EXIT=3
-            say "run(s) $stale stopped while RUNNING and are FAILED now. Nothing was deleted. Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+            say "run(s) $stale stopped while RUNNING and are FAILED now (an interrupted job, a pre-purge backup that failed, or a database restored from a pre-purge backup). Nothing was deleted in this database. $REQUEST_NEW"
         fi
     fi
-    step next next
-    if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-        failed next
-    else
-        RUN_ID=$(json_number "$REC/next.json" run_id)
-        OUTCOME=$RESULT
-        case "$RESULT" in
+    problems=$(json_list "$REC/recover.json" receipt_problems)
+    if [ -n "$problems" ]; then
+        KEEP=1
+        printf '%s\n' "$problems" | while IFS= read -r problem; do
+            say "a purge receipt was not copied: $problem (the next start tries again; status reports receipt_not_copied meanwhile, OPERATIONS_RUNBOOK §11)."
+        done
+    fi
+
+    # Fail closed (design §10): while the incident record of a reconcile after a purge exists, a start runs recover and
+    # status only. `next` is not asked, so no step that changes data runs: no export, verify, copy, pre-purge backup or
+    # purge, also no resumed purge of a run left PURGING. Exit 1, unless recover already set a code (3: it failed a run,
+    # as after a restore of a pre-purge backup). Only the operator removes the record (OPERATIONS_RUNBOOK §8).
+    INCIDENT_OPEN=
+    if [ -e "$INCIDENT_FILE" ]; then
+        INCIDENT_OPEN=1
+        [ "$EXIT" -ne 0 ] || EXIT=1
+        incident_run=$(sed -n 's/^run=//p' "$INCIDENT_FILE" 2>/dev/null | head -n 1)
+        incident_result=$(sed -n 's/^result=//p' "$INCIDENT_FILE" 2>/dev/null | head -n 1)
+        say "refused — the incident record $INCIDENT_FILE of a reconcile after a purge exists (run ${incident_run:-?}, result ${incident_result:-unknown}): no run is worked on while it exists, no export, verification, copy, pre-purge backup or purge, not even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); once the investigation is done and the reconciliation is clean, remove the record (rm $INCIDENT_FILE), and the next start goes on."
+    fi
+
+    # The steps that `next` names, until it answers wait, running or none, a run finishes, or a step fails (contract
+    # §3.1): export → verify → copy → backup → purge in one start. After a purge no further run starts in this start.
+    # Each step runs at most once per run in one start: `next` naming a step again means that a step made no progress,
+    # and the start ends instead of looping. With the incident record (above), the loop does not run at all.
+    NEXT_COUNT=0
+    DONE_STEPS=' '
+    while [ -z "$INCIDENT_OPEN" ]; do
+        NEXT_COUNT=$((NEXT_COUNT + 1))
+        if [ "$NEXT_COUNT" -eq 1 ]; then record=next; else record=next-$NEXT_COUNT; fi
+        step "$record" next
+        run=$(json_number "$REC/$record.json" run_id)
+        [ -z "$run" ] || RUN_ID=$run
+        if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
+            # Exit 3: the requester re-check failed the run before its backup (contract §2).
+            failed
+            break
+        fi
+        action=$RESULT
+        case "$DONE_STEPS" in
+            *" $action:${RUN_ID:-} "*)
+                EXIT=2
+                KEEP=1
+                say "history-archive next answered $action again for run ${RUN_ID:-?}: a step of this start made no progress ($REC/$record.json). The next start tries again."
+                break
+                ;;
+        esac
+        DONE_STEPS="$DONE_STEPS$action:${RUN_ID:-} "
+        OUTCOME=$action
+        case "$action" in
             export)
                 KEEP=1
                 step export export --run "$RUN_ID"
-                if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-                    failed export
-                elif [ "$RESULT" = nothing_eligible ]; then
+                if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then failed; break; fi
+                if [ "$RESULT" = nothing_eligible ]; then
                     OUTCOME=nothing_eligible
-                else
-                    step verify verify --run "$RUN_ID"
-                    if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-                        failed verify
-                    else
-                        step copy copy --run "$RUN_ID"
-                        if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then failed copy; else OUTCOME=$RESULT; fi
-                    fi
+                    break
+                fi
+                ;;
+            verify)
+                KEEP=1
+                step verify verify --run "$RUN_ID"
+                if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then failed; break; fi
+                if [ "$RESULT" = nothing_to_purge ]; then
+                    OUTCOME=nothing_to_purge
+                    say "run $RUN_ID: every component changed after its export, so nothing is left to purge: the run is COMPLETED_WITH_SKIPS (NOTHING_PURGED), with its receipt, and needs no copy and no pre-purge backup."
+                    break
                 fi
                 ;;
             copy)
+                # A waiting run whose copy still waits (no usable copy folder) changes nothing: no record each hour.
+                [ "$STATE" = WAITING_FOR_COPY ] || KEEP=1
                 step copy copy --run "$RUN_ID"
-                if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
-                    failed copy
-                else
-                    OUTCOME=$RESULT
-                    # A copy that still waits (the copy folder is unavailable) changed nothing: no record each hour.
-                    [ "$RESULT" != completed ] || KEEP=1
+                if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then failed; break; fi
+                if [ "$RESULT" = waiting_for_copy ]; then
+                    OUTCOME=waiting_for_copy
+                    problem=$(json_field "$REC/copy.json" copy_problem)
+                    [ -z "$problem" ] || say "$problem"
+                    say "run $RUN_ID waits for its off-host copy: copy the archive folder off the host and confirm it in Administration (OPERATIONS_RUNBOOK §11)."
+                    break
                 fi
+                KEEP=1
                 ;;
-            wait) say "run $RUN_ID waits for its off-host copy to be confirmed in Administration → History archival & purge." ;;
-            running) say "run $RUN_ID is RUNNING in another history-archive command." ;;
-            none) ;;
+            backup)
+                KEEP=1
+                if pre_purge_backup "$record"; then
+                    purge_run --backup "$BACKUP_NAME" --backup-started-at "$BACKUP_STARTED"
+                fi
+                break
+                ;;
+            purge)
+                KEEP=1
+                say "run $RUN_ID was left PURGING by an earlier start: its purge resumes without a new backup (whole components only were deleted)."
+                purge_run
+                break
+                ;;
+            wait)
+                say "run $RUN_ID waits for its off-host copy to be confirmed in Administration → History archival & purge."
+                break
+                ;;
+            running)
+                say "run $RUN_ID is RUNNING in another history-archive command."
+                break
+                ;;
+            none) break ;;
             *)
                 EXIT=2
                 KEEP=1
-                say "history-archive next answered an unknown result ${RESULT:-(none)} ($REC/next.json)."
+                say "history-archive next answered an unknown result ${action:-(none)} ($REC/$record.json)."
+                break
                 ;;
         esac
-        if [ "$OUTCOME" = waiting_for_copy ]; then
-            problem=$(json_field "$REC/copy.json" copy_problem)
-            [ -z "$problem" ] || say "$problem"
-            say "run $RUN_ID waits for its off-host copy: copy the archive folder off the host and confirm it in Administration (OPERATIONS_RUNBOOK §11)."
-        fi
-    fi
+    done
 fi
 
 # status for the monitoring line (its findings never change the exit status; check.sh reports them)
