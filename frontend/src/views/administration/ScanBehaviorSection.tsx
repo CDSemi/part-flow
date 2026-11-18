@@ -1,4 +1,4 @@
-import { SectionHeader } from './section-widgets';
+import { SectionHeader, SettingsCard } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 import { ScanBehaviorPreviews } from './SettingPreviews';
 
@@ -15,12 +15,13 @@ export function ScanBehaviorSection() {
   return (
     <>
       <SectionHeader title="Scan behavior" subtitle={SUBTITLE} />
-      <div className="admin-config">
-        <p className="admin-confighelp">
-          These settings are not available yet. Each control shows what the Scan
-          Stations do today; none of them can be changed here.
-        </p>
-        <ScanBehaviorPreviews />
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Scan settings"
+          description="How Scan Stations read and accept scans. These settings are not available yet: each control shows what the Scan Stations do today, and none of them can be changed here."
+        >
+          <ScanBehaviorPreviews />
+        </SettingsCard>
       </div>
     </>
   );

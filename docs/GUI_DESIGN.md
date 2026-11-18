@@ -2626,6 +2626,16 @@ Worker ID mode (Disabled / Fixed Worker / Scanned session), Terminal flag, Activ
 table shows an Area by its color and name (the Areas, Operations and Worker sessions tables), the two stay on one line:
 the column grows to hold them, and only the stacked presentation lets a long name wrap.
 
+Every Administration section that holds settings rather than a table of entries shows **each group of settings as its
+own card**, as Security does: the group's title, a one-sentence description anyone can understand, and its compact
+actions at the top right, then the stored values, the inline form or the table, and an optional footnote for the
+details that matter. A group's action that opens a dialog is a compact button (`Edit…`, or its own label such as
+`Send test email…`) with a full accessible name; a form that saves in the card has a compact `Save` aligned to the
+right of its own row. Only the dialogs use the big buttons, and no full-width green bar sits in a card. Cards of
+values and switches flow in equal columns as described under Security; a card that holds a table or a wide form takes
+the full width of the page, and the cards of such a section are stacked in one column. A table inside a card has no
+frame of its own, and below 800 px it stacks its rows as before.
+
 Operations are managed as described in PROJECT_PROFILE §8.5: each Operation belongs to an Area, and the Areas table
 lists the Operations an Area supports.
 
@@ -2741,8 +2751,8 @@ never a template engine.
   input (1–8; the digit count is a minimum width, and longer sequences never truncate).
 - It shows a live preview of the resulting tags (`CD-0001, CD-0002, …`), the **Next Asset Tag** against the current
   Machines, and the resulting **Scanned barcode**.
-- A closing note states that a format change applies only to Machines created afterwards: existing Asset Tags are never
-  renamed or regenerated.
+- The card's footnote states that a format change applies only to Machines created afterwards: existing Asset Tags are
+  never renamed or regenerated.
 - It is a settings form, not an entry table, so the section shows no `+ New entry` action.
 - The panel is persisted configuration backed by the `/api/barcode-configuration` surface. It reads and saves the live
   format; the **Next Asset Tag** preview follows the server's persisted never-reuse counter (a format change never
@@ -2767,10 +2777,10 @@ sign in with a login name and password and which permissions are checked so far.
 Everything else presents itself honestly: nothing that is not available yet is made to appear functional.
 
 - **Setting previews.** Scan behavior, and **Other settings** in the Settings section, show their candidate settings as
-  disabled controls, each tagged `Not available yet`, under a line stating that these settings are not available yet,
-  that each control shows what PartFlow does today, and that none of them can be changed there. Nothing is read from or
-  saved to the server, neither shows an entry action, and the previews look the same to every signed-in user, with or
-  without the section's permission.
+  disabled controls, each tagged `Not available yet`, in a card whose description states that these settings are not
+  available yet, that each control shows what PartFlow does today, and that none of them can be changed there. Nothing
+  is read from or saved to the server, neither shows an entry action, and the previews look the same to every
+  signed-in user, with or without the section's permission.
   - Scan behavior: Success sound and Error sound (Off; PartFlow plays no sound), Ignore a repeated scan (0 s: never),
     Typed entry at Scan Stations (On), Scanner ending key (Enter), Prefix to strip and Suffix to strip (None), Confirm a
     single match automatically (Off: a single match still opens its quantity and confirmation steps) and Default
@@ -4129,7 +4139,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: the Security cards fill the page width in equal columns, each at least as wide as its widest label and value need. |
+| 2026-11-17 | uncommitted | §9: every Administration settings section shows each group of settings as its own card, as Security does. |
+| 2026-11-17 | 932473a | §9: the Security cards fill the page width in equal columns, each at least as wide as its widest label and value need. |
 | 2026-11-17 | c31f061 | §9: each group of Security settings is its own card with a short description and an `Edit…` button, and the sidebar groups become Organization, Production setup, Production rules, Access and Data & system. |
 | 2026-11-17 | 2d7c9f0 | §12.3, §12.6 and §14.3: every label print uses one print sheet that never adds a blank page. |
 | 2026-11-17 | 4539a2b | §1.2 and §9: Administration → Security gathers User sign-in, Remember me, Password rules and Two-step sign-in; the Sign in dialog offers Remember me and the password dialogs list the password rules. |

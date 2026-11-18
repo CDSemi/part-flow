@@ -22,6 +22,7 @@ import {
   ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
@@ -85,36 +86,33 @@ export function BackupsSection() {
   return (
     <>
       {header}
-      <div className="admin-config">
-        <h2>Scheduled backups</h2>
-        <p className="admin-confighelp">
-          The backup task on the server runs every hour. It takes a backup when
-          the interval below has passed since the newest scheduled backup, then
-          keeps the newest scheduled backup of each of the last hours, days and
-          weeks set below (counted in UTC) and removes the other scheduled
-          backups. Backups taken by hand or before an update are never removed.
-          A change applies from the task&apos;s next run.
-        </p>
-        {canWrite ? (
-          <BackupPolicyForm
-            saved={saved}
-            writeBlocked={writeBlocked}
-            onSaved={policyData.reload}
-            onOutcomeUnknown={policyData.revalidate}
-          />
-        ) : (
-          <ReadOnlyValues
-            rows={[
-              {
-                label: 'Scheduled backup',
-                value: formatBackupInterval(saved.intervalHours),
-              },
-              { label: 'Hourly backups kept', value: saved.keepHourly },
-              { label: 'Daily backups kept', value: saved.keepDaily },
-              { label: 'Weekly backups kept', value: saved.keepWeekly },
-            ]}
-          />
-        )}
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Scheduled backups"
+          description="How often the server takes a backup on its own, and how many of those backups it keeps."
+          note="The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Backups taken by hand or before an update are never removed. A change applies from the task's next run."
+        >
+          {canWrite ? (
+            <BackupPolicyForm
+              saved={saved}
+              writeBlocked={writeBlocked}
+              onSaved={policyData.reload}
+              onOutcomeUnknown={policyData.revalidate}
+            />
+          ) : (
+            <ReadOnlyValues
+              rows={[
+                {
+                  label: 'Scheduled backup',
+                  value: formatBackupInterval(saved.intervalHours),
+                },
+                { label: 'Hourly backups kept', value: saved.keepHourly },
+                { label: 'Daily backups kept', value: saved.keepDaily },
+                { label: 'Weekly backups kept', value: saved.keepWeekly },
+              ]}
+            />
+          )}
+        </SettingsCard>
       </div>
     </>
   );
@@ -184,7 +182,7 @@ function BackupPolicyForm({
   };
 
   return (
-    <>
+    <div className="admin-cardform">
       <div className="admin-configgrid">
         <div>
           <label>
@@ -236,16 +234,16 @@ function BackupPolicyForm({
           ✓ Backup settings saved.
         </div>
       ) : null}
-      <div className="row">
+      <div className="admin-cardactionrow">
         <button
-          className="bigbtn primary"
+          className="admin-btn primary"
           disabled={writeBlocked || busy || policy === null || !dirty}
           onClick={() => void submit()}
         >
           Save
         </button>
       </div>
-    </>
+    </div>
   );
 }
 

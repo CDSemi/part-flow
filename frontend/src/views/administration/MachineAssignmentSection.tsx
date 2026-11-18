@@ -1,4 +1,4 @@
-import { SectionHeader } from './section-widgets';
+import { SectionHeader, SettingsCard } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Machine assignment (Phase 13; GUI_DESIGN §9
@@ -32,39 +32,41 @@ export function MachineAssignmentSection() {
   return (
     <>
       <SectionHeader title="Machine assignment" subtitle={SUBTITLE} />
-      <div className="admin-config">
-        <h2>Machine assignment follows from the Area&apos;s Machines</h2>
-        <p className="admin-confighelp">
-          Machine assignment is not configured per Area. Each Area works in one
-          of two modes, decided only by whether it has Machines.
-        </p>
-        <table className="admin-table">
-          <thead>
-            <tr>
-              <th>Area has</th>
-              <th>Mode</th>
-              <th>At the Scan Station</th>
-            </tr>
-          </thead>
-          <tbody>
-            {MODES.map((row) => (
-              <tr key={row.areaHas}>
-                <td data-label="Area has">
-                  <b>{row.areaHas}</b>
-                </td>
-                <td className="modecell" data-label="Mode">
-                  {row.mode}
-                </td>
-                <td data-label="At the Scan Station">{row.atStation}</td>
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Machine assignment follows from the Area's Machines"
+          description="Machine assignment is not configured per Area: each Area works in one of two modes, decided only by whether it has Machines."
+          note={
+            <>
+              Machines are managed in Management → Machines; an Area&apos;s mode
+              changes only when its Machines change. The Areas section shows
+              each Area&apos;s current mode.
+            </>
+          }
+        >
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Area has</th>
+                <th>Mode</th>
+                <th>At the Scan Station</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="admin-confighelp">
-          Machines are managed in Management → Machines; an Area&apos;s mode
-          changes only when its Machines change. The Areas section shows each
-          Area&apos;s current mode.
-        </p>
+            </thead>
+            <tbody>
+              {MODES.map((row) => (
+                <tr key={row.areaHas}>
+                  <td data-label="Area has">
+                    <b>{row.areaHas}</b>
+                  </td>
+                  <td className="modecell" data-label="Mode">
+                    {row.mode}
+                  </td>
+                  <td data-label="At the Scan Station">{row.atStation}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </SettingsCard>
       </div>
     </>
   );

@@ -25,6 +25,7 @@ import {
   ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
@@ -103,7 +104,7 @@ export function WorkerSessionsSection() {
     <>
       <SectionHeader
         title="Worker sessions"
-        subtitle="Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)"
+        subtitle="When a scanned Worker Session ends, and which actions need a badge scan"
       />
       {canWrite ? null : (
         <ViewOnlyNote permission="MANAGE_WORKER_SESSION_POLICIES" />
@@ -169,113 +170,110 @@ export function WorkerSessionsSection() {
   return (
     <>
       {header}
-      <div className="admin-config">
-        <h2>Sliding inactivity timeout</h2>
-        <p className="admin-confighelp">
-          A scanned Worker Session ends after this period without a valid
-          production interaction — never at a shift boundary. One default value
-          with optional per-Area overrides.
-        </p>
-        {canWrite ? (
-          <DefaultTimeoutForm
-            savedMinutes={defaultMinutes}
-            writeBlocked={writeBlocked || switchBusy}
-            onBusyChange={setTimeoutBusy}
-            onSaved={policyData.reload}
-          />
-        ) : (
-          <ReadOnlyValues
-            rows={[
-              {
-                label: 'Default timeout',
-                value: `${defaultMinutes} minutes`,
-              },
-            ]}
-          />
-        )}
-        <h2>Per-Area overrides</h2>
-        <table className="admin-table">
-          <thead>
-            <tr>
-              <th>Area</th>
-              <th>Worker ID mode</th>
-              <th>Session timeout</th>
-              {canWrite ? <th aria-label="Actions" /> : null}
-            </tr>
-          </thead>
-          <tbody>
-            {areas.map((area) => (
-              <tr key={area.id}>
-                <td className="admin-areacell">
-                  <AreaDot colorVar={areaColor(area)} size={14} />{' '}
-                  <b>{area.name}</b>
-                  {area.isActive ? null : ' (inactive)'}
-                </td>
-                <td className="modecell" data-label="Worker ID mode">
-                  {WORKER_ID_MODE_LABELS[area.workerIdentificationMode]}
-                </td>
-                <td data-label="Session timeout">
-                  {area.workerSessionTimeoutMinutes !== null
-                    ? `${area.workerSessionTimeoutMinutes} min`
-                    : `Default · ${defaultMinutes} min`}
-                </td>
-                {canWrite ? (
-                  <td>
-                    <button
-                      className="btn"
-                      aria-label={`Edit session timeout — ${area.name}`}
-                      onClick={() => setEditing(area)}
-                    >
-                      Edit
-                    </button>
-                  </td>
-                ) : null}
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Sliding inactivity timeout"
+          description="A scanned Worker Session ends after this long without a valid production interaction, never at a shift boundary."
+          note="One default value for every Area, with optional per-Area overrides below."
+        >
+          {canWrite ? (
+            <DefaultTimeoutForm
+              savedMinutes={defaultMinutes}
+              writeBlocked={writeBlocked || switchBusy}
+              onBusyChange={setTimeoutBusy}
+              onSaved={policyData.reload}
+            />
+          ) : (
+            <ReadOnlyValues
+              rows={[
+                {
+                  label: 'Default timeout',
+                  value: `${defaultMinutes} minutes`,
+                },
+              ]}
+            />
+          )}
+        </SettingsCard>
+        <SettingsCard
+          title="Per-Area overrides"
+          description="An Area can use its own timeout instead of the default."
+          note="The timeout applies at Scan Stations of Areas in Scanned session mode. A change takes effect at each session's next valid production interaction or badge scan."
+        >
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Worker ID mode</th>
+                <th>Session timeout</th>
+                {canWrite ? <th aria-label="Actions" /> : null}
               </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="admin-confighelp">
-          The timeout applies at Scan Stations of Areas in Scanned session mode.
-          A change takes effect at each session's next valid production
-          interaction or badge scan.
-        </p>
-        <h2>Badge confirmation for sensitive actions</h2>
-        <p className="admin-confighelp">
-          Every sensitive action always ends in a final confirmation question
-          restating the key facts. Each option below upgrades that final step to
-          a required Worker badge scan in Areas with scanned Worker Sessions —
-          the badge records the confirming Worker and completes the action.
-          Areas with a fixed or disabled Worker always keep the question; no
-          badge exists there.
-        </p>
-        {canWrite ? (
-          <div className="admin-switchlist">
-            {BADGE_CONFIRMATION_OPTIONS.map(
-              ({ action, key, label, description }) => {
-                const on = policy.badgeConfirmation[key];
-                return (
-                  <PolicySwitch
-                    key={action}
-                    label={label}
-                    description={description}
-                    ariaLabel={`Require badge scan — ${label}`}
-                    on={on}
-                    disabled={writeBlocked || switchBusy || timeoutBusy}
-                    onToggle={() => void toggle(action, key)}
-                  />
-                );
-              },
-            )}
-          </div>
-        ) : (
-          <ReadOnlyValues
-            rows={BADGE_CONFIRMATION_OPTIONS.map(({ key, label }) => ({
-              label,
-              value: policy.badgeConfirmation[key] ? 'On' : 'Off',
-            }))}
-          />
-        )}
-        <ServerErrorNote message={switchError} />
+            </thead>
+            <tbody>
+              {areas.map((area) => (
+                <tr key={area.id}>
+                  <td className="admin-areacell">
+                    <AreaDot colorVar={areaColor(area)} size={14} />{' '}
+                    <b>{area.name}</b>
+                    {area.isActive ? null : ' (inactive)'}
+                  </td>
+                  <td className="modecell" data-label="Worker ID mode">
+                    {WORKER_ID_MODE_LABELS[area.workerIdentificationMode]}
+                  </td>
+                  <td data-label="Session timeout">
+                    {area.workerSessionTimeoutMinutes !== null
+                      ? `${area.workerSessionTimeoutMinutes} min`
+                      : `Default · ${defaultMinutes} min`}
+                  </td>
+                  {canWrite ? (
+                    <td>
+                      <button
+                        className="btn"
+                        aria-label={`Edit session timeout — ${area.name}`}
+                        onClick={() => setEditing(area)}
+                      >
+                        Edit
+                      </button>
+                    </td>
+                  ) : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </SettingsCard>
+        <SettingsCard
+          title="Badge confirmation for sensitive actions"
+          description="Choose which sensitive actions must end with a Worker badge scan instead of a confirmation question."
+          note="Every sensitive action always ends in a final confirmation question restating the key facts. An option upgrades that step to a required Worker badge scan in Areas with scanned Worker Sessions: the badge records the confirming Worker and completes the action. Areas with a fixed or disabled Worker always keep the question, because no badge exists there."
+        >
+          {canWrite ? (
+            <div className="admin-switchlist">
+              {BADGE_CONFIRMATION_OPTIONS.map(
+                ({ action, key, label, description }) => {
+                  const on = policy.badgeConfirmation[key];
+                  return (
+                    <PolicySwitch
+                      key={action}
+                      label={label}
+                      description={description}
+                      ariaLabel={`Require badge scan — ${label}`}
+                      on={on}
+                      disabled={writeBlocked || switchBusy || timeoutBusy}
+                      onToggle={() => void toggle(action, key)}
+                    />
+                  );
+                },
+              )}
+            </div>
+          ) : (
+            <ReadOnlyValues
+              rows={BADGE_CONFIRMATION_OPTIONS.map(({ key, label }) => ({
+                label,
+                value: policy.badgeConfirmation[key] ? 'On' : 'Off',
+              }))}
+            />
+          )}
+          <ServerErrorNote message={switchError} />
+        </SettingsCard>
       </div>
       {editing ? (
         <AreaTimeoutDialog
@@ -333,7 +331,7 @@ function DefaultTimeoutForm({
   };
 
   return (
-    <>
+    <div className="admin-cardform">
       <div className="admin-configgrid">
         <label>
           Default timeout (minutes)
@@ -362,16 +360,16 @@ function DefaultTimeoutForm({
           ✓ Default timeout saved.
         </div>
       ) : null}
-      <div className="row">
+      <div className="admin-cardactionrow">
         <button
-          className="bigbtn primary"
+          className="admin-btn primary"
           disabled={writeBlocked || busy || !dirty || minutes === null}
           onClick={() => void submit()}
         >
           Save
         </button>
       </div>
-    </>
+    </div>
   );
 }
 

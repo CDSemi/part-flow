@@ -334,7 +334,8 @@
 
 /* The card's compact edit control: the settings dialog it opens keeps
    the big buttons. */
-.admin-editbtn {
+.admin-editbtn,
+.admin-btn {
   flex: none;
   min-height: 40px;
   padding: 0 18px;
@@ -346,24 +347,67 @@
   font-weight: 750;
 }
 
-.admin-editbtn:hover:not(:disabled) {
+.admin-editbtn:hover:not(:disabled),
+.admin-btn:hover:not(:disabled) {
   border-color: var(--info-t);
   color: var(--info-t);
 }
 
-.admin-editbtn:focus-visible {
+.admin-editbtn:focus-visible,
+.admin-btn:focus-visible {
   outline: 2px solid var(--info-t);
   outline-offset: 2px;
 }
 
-.admin-editbtn:disabled {
+.admin-editbtn:disabled,
+.admin-btn:disabled {
   opacity: 0.45;
 }
 
+/* The compact primary action of an inline form (its Save); the dialogs
+   keep their own big buttons. */
+.admin-btn.primary {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--on-ok);
+}
+
+.admin-btn.primary:hover:not(:disabled) {
+  border-color: var(--ok);
+  color: var(--on-ok);
+  filter: brightness(1.08);
+}
+
+.admin-btn.primary:focus-visible {
+  outline-color: var(--ok);
+}
+
 @media (pointer: coarse) {
-  .admin-editbtn {
+  .admin-editbtn,
+  .admin-btn {
     min-height: var(--touch-min);
   }
+}
+
+/* One or more compact buttons at the top right of a card. */
+.admin-cardactions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* A section whose cards hold a table or a wide form: one full-width
+   column instead of the equal columns. */
+.admin-cards.admin-cards-stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  columns: auto;
+  gap: 18px;
+}
+
+.admin-cards-stack .admin-card {
+  margin-bottom: 0;
 }
 
 /* The values (or their loading and error states) under a hairline. */
@@ -407,6 +451,66 @@
   color: var(--muted);
   font-size: 12.5px;
   line-height: 1.55;
+}
+
+/* A table inside a card: no frame of its own, the card is the frame. */
+.admin-cardbody > .admin-table {
+  margin: 8px 0 6px;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* A switch list inside a card: the full card width, one row per switch. */
+.admin-cardbody > .admin-switchlist {
+  max-width: none;
+  margin: 12px 0 8px;
+}
+
+/* An inline form of a card: its fields, messages and the compact,
+   right-aligned Save. */
+.admin-cardform {
+  padding: 12px 0 6px;
+}
+
+.admin-cardform .admin-configgrid {
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 20rem));
+}
+
+.admin-cardform .admin-configgrid .err,
+.admin-cardform > .err {
+  color: var(--err-t);
+  font-size: 13px;
+  margin-top: 6px;
+}
+
+.admin-cardform > .err {
+  margin-bottom: 12px;
+}
+
+.admin-cardform .admin-confighelp {
+  margin-bottom: 10px;
+}
+
+.admin-cardactionrow {
+  display: flex;
+  justify-content: flex-end;
+  margin: 4px 0 8px;
+}
+
+.admin-cardbody > .admin-confighelp {
+  margin: 12px 0 6px;
+  max-width: none;
+}
+
+.admin-cardbody > .admin-notice {
+  margin: 12px 0 4px;
+}
+
+.admin-cardbody > .err {
+  color: var(--err-t);
+  font-size: 13px;
+  margin: 8px 0;
 }
 
 /* A titled group of fields in a settings dialog (Two-step sign-in). */

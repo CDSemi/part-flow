@@ -22,6 +22,7 @@ import {
   ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
@@ -64,31 +65,36 @@ export function CorrectionPermissionsSection() {
       {canWrite ? null : (
         <ViewOnlyNote permission="MANAGE_CORRECTION_PERMISSIONS" />
       )}
-      <div className="admin-config">
-        <h2>Undo reason</h2>
-        <p className="admin-confighelp">
-          When On, every Undo at a Scan Station asks for a reason before the
-          reversal can be confirmed, and a reversal without a reason is refused.
-          The reason is recorded with the reversal and shown in Tracking. When
-          Off, Undo asks for no reason.
-        </p>
-        <UndoReasonPanel canWrite={canWrite} writeBlocked={writeBlocked} />
-        <h2>Who may undo or correct</h2>
-        <p className="admin-confighelp">
-          Choose which roles hold each correction permission. Edit Work Order
-          Allocation controls allocating stocked quantity from Management and
-          reversing allocations; the Stockroom station&apos;s receiving
-          allocation does not need it. Undo recent eligible scans applies at the
-          Scan Stations through the role marked Applied at Scan Stations;
-          Perform quantity corrections and Perform authorized historical
-          corrections are reserved: PartFlow has no such correction yet, so they
-          cannot be chosen.
-        </p>
-        <CorrectionRoleTable canWrite={canWrite} writeBlocked={writeBlocked} />
-        <p className="admin-confighelp">
-          Undo recent eligible scans covers exactly the actions the Scan
-          Station&apos;s Undo offers — there is no extra time limit.
-        </p>
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Undo reason"
+          description="Whether an Undo at a Scan Station must say why."
+          note="When On, every Undo asks for a reason before the reversal can be confirmed, and a reversal without a reason is refused. The reason is recorded with the reversal and shown in Tracking. When Off, Undo asks for no reason."
+        >
+          <UndoReasonPanel canWrite={canWrite} writeBlocked={writeBlocked} />
+        </SettingsCard>
+        <SettingsCard
+          title="Who may undo or correct"
+          description="Choose which roles hold each correction permission."
+          note={
+            <>
+              Edit Work Order Allocation controls allocating stocked quantity
+              from Management and reversing allocations; the Stockroom
+              station&apos;s receiving allocation does not need it. Undo recent
+              eligible scans applies at the Scan Stations through the role
+              marked Applied at Scan Stations, and covers exactly the actions
+              the Scan Station&apos;s Undo offers — there is no extra time
+              limit. Perform quantity corrections and Perform authorized
+              historical corrections are reserved: PartFlow has no such
+              correction yet, so they cannot be chosen.
+            </>
+          }
+        >
+          <CorrectionRoleTable
+            canWrite={canWrite}
+            writeBlocked={writeBlocked}
+          />
+        </SettingsCard>
       </div>
     </>
   );

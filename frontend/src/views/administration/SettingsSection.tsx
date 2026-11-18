@@ -20,6 +20,7 @@ import {
   ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
@@ -108,48 +109,54 @@ export function SettingsSection() {
   return (
     <>
       {header}
-      <div className="admin-config">
-        <h2>Due Soon warning</h2>
-        <p className="admin-confighelp">
-          A due date reads as due soon when its days left fall within this
-          window: the lead-time percentage of the Work Order&apos;s received →
-          due lead time, never fewer than the minimum and never more than the
-          maximum warning days. Without a known lead time the minimum applies.
-          Used by every due countdown — Production Board, Area Board, Scan
-          Station, Priority and Work Orders.
-        </p>
-        {canWrite ? (
-          <DueSoonForm
-            saved={policyData.state.data}
-            writeBlocked={writeBlocked}
-            onSaved={policyData.reload}
-            onOutcomeUnknown={policyData.revalidate}
-          />
-        ) : (
-          <ReadOnlyValues
-            rows={[
-              {
-                label: 'Minimum warning days',
-                value: policyData.state.data.minDays,
-              },
-              {
-                label: 'Lead-time warning percentage (%)',
-                value: policyData.state.data.leadTimePercent,
-              },
-              {
-                label: 'Maximum warning days',
-                value: policyData.state.data.maxDays,
-              },
-            ]}
-          />
-        )}
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Due Soon warning"
+          description="How early a due date is flagged as due soon on every due countdown in PartFlow."
+          note={
+            <>
+              A due date reads as due soon when its days left fall within this
+              window: the lead-time percentage of the Work Order&apos;s received
+              → due lead time, never fewer than the minimum and never more than
+              the maximum warning days. Without a known lead time the minimum
+              applies. Used by the Production Board, Area Board, Scan Station,
+              Priority and Work Orders.
+            </>
+          }
+        >
+          {canWrite ? (
+            <DueSoonForm
+              saved={policyData.state.data}
+              writeBlocked={writeBlocked}
+              onSaved={policyData.reload}
+              onOutcomeUnknown={policyData.revalidate}
+            />
+          ) : (
+            <ReadOnlyValues
+              rows={[
+                {
+                  label: 'Minimum warning days',
+                  value: policyData.state.data.minDays,
+                },
+                {
+                  label: 'Lead-time warning percentage (%)',
+                  value: policyData.state.data.leadTimePercent,
+                },
+                {
+                  label: 'Maximum warning days',
+                  value: policyData.state.data.maxDays,
+                },
+              ]}
+            />
+          )}
+        </SettingsCard>
         <MailServerPanel />
-        <h2>Other settings</h2>
-        <p className="admin-confighelp">
-          These settings are not available yet. Each control shows what PartFlow
-          does today; none of them can be changed here.
-        </p>
-        <GeneralSettingsPreviews />
+        <SettingsCard
+          title="Other settings"
+          description="General PartFlow settings. They are not available yet: each control shows what PartFlow does today, and none of them can be changed here."
+        >
+          <GeneralSettingsPreviews />
+        </SettingsCard>
       </div>
     </>
   );
@@ -219,7 +226,7 @@ function DueSoonForm({
   };
 
   return (
-    <>
+    <div className="admin-cardform">
       <div className="admin-configgrid">
         <DayField
           label="Minimum warning days"
@@ -266,16 +273,16 @@ function DueSoonForm({
           ✓ Due Soon warning saved.
         </div>
       ) : null}
-      <div className="row">
+      <div className="admin-cardactionrow">
         <button
-          className="bigbtn primary"
+          className="admin-btn primary"
           disabled={writeBlocked || busy || !valid || !dirty}
           onClick={() => void submit()}
         >
           Save
         </button>
       </div>
-    </>
+    </div>
   );
 }
 

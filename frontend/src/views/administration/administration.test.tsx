@@ -2617,7 +2617,7 @@ test('FS-11: the role applied at Scan Stations is marked; no Administration copy
   }
   await openLoadedSection('Correction permissions');
   expect(document.body.textContent).toContain(
-    'Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations;',
+    'Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations,',
   );
   await openLoadedSection('Users');
   expect(document.body.textContent).toContain(
@@ -3275,7 +3275,7 @@ test('FA-S1: Scan behavior shows its candidate settings as disabled previews of 
   const main = document.querySelector('.admin-main') as HTMLElement;
   expect(
     within(main).getByText(
-      'These settings are not available yet. Each control shows what the Scan Stations do today; none of them can be changed here.',
+      'How Scan Stations read and accept scans. These settings are not available yet: each control shows what the Scan Stations do today, and none of them can be changed here.',
     ),
   ).toBeInTheDocument();
   expect(previewLabels(main)).toEqual([
@@ -3319,8 +3319,7 @@ test('FA-S1: Scan behavior shows its candidate settings as disabled previews of 
   expect(document.body.textContent).not.toMatch(/Phase \d/);
 });
 
-const MACHINE_ASSIGNMENT_SUBTITLE =
-  "Two Area modes that follow from the Area's Machines: no Machines → direct processing; one or more Machines → queue and one-shot assignment (one Machine behaves like several) — never a per-Area setting";
+const MACHINE_ASSIGNMENT_SUBTITLE = 'How an Area works with its Machines';
 
 test('FA-M1: Machine assignment is a read-only statement of the two Area modes', async () => {
   renderAdmin();
@@ -3357,7 +3356,7 @@ test('FA-M1: Machine assignment is a read-only statement of the two Area modes',
   ).toEqual(['Area has', 'Mode', 'At the Scan Station']);
   const main = document.querySelector('.admin-main') as HTMLElement;
   expect(main.textContent).toContain(
-    'Machine assignment is not configured per Area. Each Area works in one of two modes, decided only by whether it has Machines.',
+    'Machine assignment is not configured per Area: each Area works in one of two modes, decided only by whether it has Machines.',
   );
   expect(main.textContent).toContain(
     "Machines are managed in Management → Machines; an Area's mode changes only when its Machines change. The Areas section shows each Area's current mode.",
@@ -3444,7 +3443,7 @@ test('Worker sessions loads the policy and the Areas, with the three real badge-
     screen.getByText('Badge confirmation for sensitive actions'),
   ).toBeInTheDocument();
   expect(document.body.textContent).toContain(
-    'Every sensitive action always ends in a final confirmation question restating the key facts. Each option below upgrades that final step to a required Worker badge scan in Areas with scanned Worker Sessions — the badge records the confirming Worker and completes the action. Areas with a fixed or disabled Worker always keep the question; no badge exists there.',
+    'Every sensitive action always ends in a final confirmation question restating the key facts. An option upgrades that step to a required Worker badge scan in Areas with scanned Worker Sessions: the badge records the confirming Worker and completes the action. Areas with a fixed or disabled Worker always keep the question, because no badge exists there.',
   );
   expect(document.body.textContent).not.toContain('not available yet');
   const switches = screen.getAllByRole('switch');
@@ -3755,7 +3754,7 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
   );
   expect(screen.getByRole('heading', { name: 'Undo reason' })).toBeVisible();
   expect(document.body.textContent).toContain(
-    'When On, every Undo at a Scan Station asks for a reason before the reversal can be confirmed, and a reversal without a reason is refused. The reason is recorded with the reversal and shown in Tracking. When Off, Undo asks for no reason.',
+    'When On, every Undo asks for a reason before the reversal can be confirmed, and a reversal without a reason is refused. The reason is recorded with the reversal and shown in Tracking. When Off, Undo asks for no reason.',
   );
   expect(
     screen.getByRole('heading', { name: 'Who may undo or correct' }),
@@ -3815,10 +3814,10 @@ test('FA-C5: Correction permissions shows the real Undo reason switch first, the
   expect(operatorHistorical).not.toBeChecked();
   expect(operatorHistorical).toBeDisabled();
   expect(document.body.textContent).toContain(
-    "Choose which roles hold each correction permission. Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations; Perform quantity corrections and Perform authorized historical corrections are reserved: PartFlow has no such correction yet, so they cannot be chosen.",
+    'Choose which roles hold each correction permission.',
   );
   expect(document.body.textContent).toContain(
-    "Undo recent eligible scans covers exactly the actions the Scan Station's Undo offers — there is no extra time limit.",
+    "Edit Work Order Allocation controls allocating stocked quantity from Management and reversing allocations; the Stockroom station's receiving allocation does not need it. Undo recent eligible scans applies at the Scan Stations through the role marked Applied at Scan Stations, and covers exactly the actions the Scan Station's Undo offers — there is no extra time limit. Perform quantity corrections and Perform authorized historical corrections are reserved: PartFlow has no such correction yet, so they cannot be chosen.",
   );
   expect(screen.getAllByRole('switch')).toHaveLength(1);
   expect(screen.queryByRole('button', { name: /New entry/ })).toBeNull();
@@ -4176,7 +4175,7 @@ test('AD-5: the Due Soon warning panel loads, explains, validates and PUTs exact
   ).toBeInTheDocument();
   expect(
     screen.getByText(
-      'These settings are not available yet. Each control shows what PartFlow does today; none of them can be changed here.',
+      'General PartFlow settings. They are not available yet: each control shows what PartFlow does today, and none of them can be changed here.',
     ),
   ).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '+ New entry' })).toBeNull();
@@ -4291,7 +4290,7 @@ test('AD-5: offline the Due Soon warning cannot be saved; a failed load offers R
 
 test('Settings shows the other general settings as disabled previews of what PartFlow does today', async () => {
   await openSettings();
-  const config = document.querySelector('.admin-config') as HTMLElement;
+  const config = document.querySelector('.admin-main') as HTMLElement;
   expect(previewLabels(config)).toEqual([
     'Site name',
     'Logo',
@@ -4543,7 +4542,7 @@ test('FA-R7: a failed load of the retention period offers Retry', async () => {
 
 const BACKUP_PATH = '/api/policies/backups';
 const BACKUP_HELP =
-  "The backup task on the server runs every hour. It takes a backup when the interval below has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set below (counted in UTC) and removes the other scheduled backups. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
+  "The backup task on the server runs every hour. It takes a backup when the scheduled backup interval has passed since the newest scheduled backup, then keeps the newest scheduled backup of each of the last hours, days and weeks set here (counted in UTC) and removes the other scheduled backups. Backups taken by hand or before an update are never removed. A change applies from the task's next run.";
 const BACKUP_UNKNOWN_OUTCOME =
   'The server did not answer — this change may or may not have been saved. Check the backup settings before trying again; saving the same values again is safe.';
 

@@ -19,6 +19,7 @@ import {
   ReadOnlyValues,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 
@@ -156,121 +157,127 @@ function FormatPanel({
   };
 
   return (
-    <div className="admin-config">
-      <h2>Machine Asset Tag format</h2>
-      {saved === null ? (
-        <div className="admin-notice">
-          The Machine Asset Tag format has not been configured yet. Machines
-          cannot be created until it is saved here.
-        </div>
-      ) : null}
-      <p className="admin-confighelp">
-        Every Machine receives its Asset Tag automatically when it is created in
-        Management → Machines: the configured prefix followed by the next number
-        in sequence, zero-padded to the configured length. Asset Tags are
-        unique, are never reused — retired Machines keep theirs — and never
-        change after creation. The Machine barcode is the Asset Tag in the{' '}
-        <code>{MACHINE_BARCODE_NAMESPACE}</code> namespace.
-      </p>
-      {canWrite ? null : (
-        <ReadOnlyValues
-          rows={[
-            { label: 'Prefix', value: saved?.prefix || '—' },
-            {
-              label: 'Number length (digits)',
-              value: saved === null ? '—' : saved.digits,
-            },
-          ]}
-        />
-      )}
-      {canWrite ? (
-        <div className="admin-configgrid">
-          <label>
-            Prefix
-            <input
-              className="field mono"
-              value={prefix}
-              onChange={(event) => {
-                setPrefix(event.target.value);
-                setSavedNote(false);
-              }}
-              placeholder="e.g. CD-"
+    <div className="admin-cards admin-cards-stack">
+      <SettingsCard
+        title="Machine Asset Tag format"
+        description="How each new Machine gets its Asset Tag: a prefix followed by the next number in sequence."
+        note={
+          <>
+            Every Machine receives its Asset Tag automatically when it is
+            created in Management → Machines: the configured prefix followed by
+            the next number in sequence, zero-padded to the configured length.
+            Asset Tags are unique, are never reused — retired Machines keep
+            theirs — and never change after creation. The Machine barcode is the
+            Asset Tag in the <code>{MACHINE_BARCODE_NAMESPACE}</code> namespace.
+            A format change applies to Machines created afterwards only —
+            existing Asset Tags are never renamed or regenerated.
+          </>
+        }
+      >
+        {saved === null ? (
+          <div className="admin-notice">
+            The Machine Asset Tag format has not been configured yet. Machines
+            cannot be created until it is saved here.
+          </div>
+        ) : null}
+        <div className="admin-cardform">
+          {canWrite ? null : (
+            <ReadOnlyValues
+              rows={[
+                { label: 'Prefix', value: saved?.prefix || '—' },
+                {
+                  label: 'Number length (digits)',
+                  value: saved === null ? '—' : saved.digits,
+                },
+              ]}
             />
-          </label>
-          <label>
-            Number length (digits)
-            <input
-              className="field mono"
-              type="number"
-              min={1}
-              max={8}
-              value={digitsText}
-              onChange={(event) => {
-                setDigitsText(event.target.value);
-                setSavedNote(false);
-              }}
-            />
-          </label>
+          )}
+          {canWrite ? (
+            <div className="admin-configgrid">
+              <label>
+                Prefix
+                <input
+                  className="field mono"
+                  value={prefix}
+                  onChange={(event) => {
+                    setPrefix(event.target.value);
+                    setSavedNote(false);
+                  }}
+                  placeholder="e.g. CD-"
+                />
+              </label>
+              <label>
+                Number length (digits)
+                <input
+                  className="field mono"
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={digitsText}
+                  onChange={(event) => {
+                    setDigitsText(event.target.value);
+                    setSavedNote(false);
+                  }}
+                />
+              </label>
+            </div>
+          ) : null}
+          {canWrite && prefixError ? (
+            <div className="err" role="alert">
+              {prefixError}
+            </div>
+          ) : null}
+          {canWrite && digitsError ? (
+            <div className="err" role="alert">
+              {digitsError}
+            </div>
+          ) : null}
+          <div className="admin-configpreview">
+            <div className="prow">
+              <span className="k">Asset Tags</span>
+              <span className="v">
+                {format
+                  ? `${formatAssetTag(format, 1)}, ${formatAssetTag(format, 2)}, …`
+                  : '—'}
+              </span>
+            </div>
+            <div className="prow">
+              <span className="k">Next Asset Tag</span>
+              <span className="v">{next ?? '—'}</span>
+            </div>
+            <div className="prow">
+              <span className="k">Scanned barcode</span>
+              {/* Shared app-wide barcode reading tone (global .barcodeval). */}
+              <span className="v barcodeval">
+                {next ? machineBarcode(next) : '—'}
+              </span>
+            </div>
+          </div>
+          <ServerErrorNote message={serverError} />
+          {savedNote ? (
+            <div className="admin-savednote" role="status">
+              ✓ Format saved.
+            </div>
+          ) : null}
+          {canWrite ? (
+            <div className="admin-cardactionrow">
+              <button
+                className="admin-btn primary"
+                disabled={
+                  writeBlocked ||
+                  busy ||
+                  !dirty ||
+                  prefixError !== null ||
+                  !digitsValid
+                }
+                onClick={() => void submit()}
+              >
+                Save format
+              </button>
+            </div>
+          ) : null}
         </div>
-      ) : null}
-      {canWrite && prefixError ? (
-        <div className="err" role="alert">
-          {prefixError}
-        </div>
-      ) : null}
-      {canWrite && digitsError ? (
-        <div className="err" role="alert">
-          {digitsError}
-        </div>
-      ) : null}
-      <div className="admin-configpreview">
-        <div className="prow">
-          <span className="k">Asset Tags</span>
-          <span className="v">
-            {format
-              ? `${formatAssetTag(format, 1)}, ${formatAssetTag(format, 2)}, …`
-              : '—'}
-          </span>
-        </div>
-        <div className="prow">
-          <span className="k">Next Asset Tag</span>
-          <span className="v">{next ?? '—'}</span>
-        </div>
-        <div className="prow">
-          <span className="k">Scanned barcode</span>
-          {/* Shared app-wide barcode reading tone (global .barcodeval). */}
-          <span className="v barcodeval">
-            {next ? machineBarcode(next) : '—'}
-          </span>
-        </div>
-      </div>
-      <p className="admin-confighelp">
-        A format change applies to Machines created afterwards only — existing
-        Asset Tags are never renamed or regenerated.
-      </p>
-      <ServerErrorNote message={serverError} />
-      {savedNote ? (
-        <div className="admin-savednote" role="status">
-          ✓ Format saved.
-        </div>
-      ) : null}
-      {canWrite ? (
-        <div className="row">
-          <button
-            className="bigbtn primary"
-            disabled={
-              writeBlocked ||
-              busy ||
-              !dirty ||
-              prefixError !== null ||
-              !digitsValid
-            }
-            onClick={() => void submit()}
-          >
-            Save format
-          </button>
-        </div>
-      ) : null}
+      </SettingsCard>
     </div>
   );
 }

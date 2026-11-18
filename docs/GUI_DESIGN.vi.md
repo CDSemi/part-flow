@@ -2655,6 +2655,16 @@ không, một Machine hoạt động như nhiều Machine, không bao giờ từ
 Area bằng màu và tên của nó (các bảng Areas, Operations và Worker sessions), màu và tên luôn nằm trên một dòng: cột nới
 rộng để chứa cả hai, và chỉ cách trình bày xếp chồng mới cho một tên dài xuống dòng.
 
+Mọi section Administration chứa các thiết lập thay vì một bảng các mục đều hiển thị **mỗi nhóm thiết lập thành một thẻ
+riêng**, như Security: tiêu đề của nhóm, một mô tả một câu mà ai cũng hiểu, và các hành động gọn của nó ở góc trên bên
+phải, rồi đến các giá trị đã lưu, form inline hoặc bảng, và một chú thích cuối tùy chọn cho các chi tiết quan trọng.
+Hành động của một nhóm mở ra dialog là một nút gọn (`Edit…`, hoặc nhãn riêng như `Send test email…`) có tên truy cập
+đầy đủ; form lưu ngay trong thẻ có nút `Save` gọn, căn phải trên hàng riêng của nó. Chỉ các dialog dùng nút lớn, và
+không có thanh xanh rộng toàn chiều ngang nào nằm trong thẻ. Các thẻ giá trị và công tắc chảy theo các cột rộng bằng
+nhau như mô tả ở mục Security; thẻ chứa bảng hoặc form rộng chiếm toàn bộ bề rộng trang, và các thẻ của một section như
+vậy được xếp chồng thành một cột. Bảng trong thẻ không có khung riêng, và dưới 800 px các hàng của nó vẫn xếp chồng như
+trước.
+
 Operations được quản lý như mô tả trong PROJECT_PROFILE §8.5: mỗi Operation thuộc về một Area, và bảng Areas liệt kê các
 Operation mà một Area hỗ trợ.
 
@@ -2771,7 +2781,7 @@ một template engine.
   length (digits)** (1–8; số chữ số là độ rộng tối thiểu, và các dãy số dài hơn không bao giờ bị cắt bớt).
 - Nó hiển thị preview trực tiếp các tag kết quả (`CD-0001, CD-0002, …`), **Next Asset Tag** so với các Machine hiện có,
   và **Scanned barcode** kết quả.
-- Một ghi chú kết thúc nêu rằng việc đổi định dạng chỉ áp dụng cho các Machine được tạo sau đó: các Asset Tag hiện có
+- Chú thích cuối của thẻ nêu rằng việc đổi định dạng chỉ áp dụng cho các Machine được tạo sau đó: các Asset Tag hiện có
   không bao giờ bị đổi tên hay tạo lại.
 - Đây là một form setting, không phải một bảng entry, nên section không hiển thị action `+ New entry`.
 - Panel là cấu hình được lưu, dựa trên surface `/api/barcode-configuration`. Nó đọc và lưu định dạng đang dùng; preview
@@ -2798,8 +2808,8 @@ nay.
 Mọi thứ khác tự trình bày một cách trung thực: không gì chưa khả dụng được làm cho trông như đang hoạt động.
 
 - **Bản xem trước setting.** Scan behavior, và **Other settings** trong section Settings, hiển thị các setting ứng viên
-  của chúng thành control bị vô hiệu hóa, mỗi cái gắn nhãn `Not available yet`, bên dưới một dòng nêu rằng các setting
-  này chưa khả dụng, rằng mỗi control cho thấy PartFlow đang làm gì hiện nay, và rằng không cái nào thay đổi được ở đó.
+  của chúng thành control bị vô hiệu hóa, mỗi cái gắn nhãn `Not available yet`, trong một thẻ có mô tả nêu rằng các
+  setting này chưa khả dụng, rằng mỗi control cho thấy PartFlow đang làm gì hiện nay, và rằng không cái nào thay đổi được ở đó.
   Không gì được đọc từ hay lưu vào server, không cái nào có entry action, và các bản xem trước trông như nhau với mọi
   người dùng đã đăng nhập, dù có hay không có permission của section.
   - Scan behavior: Success sound và Error sound (Off; PartFlow không phát âm thanh nào), Ignore a repeated scan (0 s:
@@ -4175,7 +4185,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: các thẻ Security lấp đầy bề rộng trang theo các cột rộng bằng nhau, mỗi thẻ ít nhất đủ rộng cho nhãn và giá trị rộng nhất của nó. |
+| 2026-11-17 | uncommitted | §9: mọi section thiết lập của Administration hiển thị mỗi nhóm thiết lập thành một thẻ riêng, như Security. |
+| 2026-11-17 | 932473a | §9: các thẻ Security lấp đầy bề rộng trang theo các cột rộng bằng nhau, mỗi thẻ ít nhất đủ rộng cho nhãn và giá trị rộng nhất của nó. |
 | 2026-11-17 | c31f061 | §9: mỗi nhóm thiết lập của Security là một thẻ riêng với mô tả ngắn và nút `Edit…`, và các nhóm của sidebar thành Organization, Production setup, Production rules, Access và Data & system. |
 | 2026-11-17 | 2d7c9f0 | §12.3, §12.6 và §14.3: mọi lần in nhãn dùng một tờ in không bao giờ thêm trang trắng. |
 | 2026-11-17 | 4539a2b | §1.2 và §9: Administration → Security gom User sign-in, Remember me, Password rules và Two-step sign-in; dialog Sign in đưa ra Remember me và các dialog mật khẩu liệt kê quy tắc mật khẩu. |

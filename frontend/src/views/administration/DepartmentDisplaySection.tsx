@@ -22,6 +22,7 @@ import {
   AdminField,
   SectionHeader,
   ServerErrorNote,
+  SettingsCard,
   ViewOnlyNote,
 } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
@@ -99,57 +100,56 @@ export function DepartmentDisplaySection() {
   return (
     <>
       {header}
-      <div className="admin-config">
-        <h2>Production Board rotation</h2>
-        <p className="admin-confighelp">
-          Each page of a Department&apos;s Production Board stays on screen for
-          a time proportional to the rows it shows, and never shorter than the
-          minimum page dwell. Configured per Department; a running board applies
-          a change at its next refresh.
-        </p>
-        {departments.length === 0 ? (
-          <p className="admin-confighelp">
-            No Departments yet. Create one in Departments.
-          </p>
-        ) : (
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>Department</th>
-                <th>Seconds per displayed row</th>
-                <th>Minimum page dwell</th>
-                {canWrite ? <th aria-label="Actions" /> : null}
-              </tr>
-            </thead>
-            <tbody>
-              {departments.map((department) => (
-                <tr key={department.id}>
-                  <td>
-                    <b>{department.name}</b>
-                    {department.isActive ? null : ' (inactive)'}
-                  </td>
-                  <td className="mono" data-label="Seconds per displayed row">
-                    {department.boardSecondsPerRow} s
-                  </td>
-                  <td className="mono" data-label="Minimum page dwell">
-                    {department.boardMinPageSeconds} s
-                  </td>
-                  {canWrite ? (
-                    <td>
-                      <button
-                        className="btn"
-                        aria-label={`Edit rotation timing — ${department.name}`}
-                        onClick={() => setEditing(department)}
-                      >
-                        Edit
-                      </button>
-                    </td>
-                  ) : null}
+      <div className="admin-cards admin-cards-stack">
+        <SettingsCard
+          title="Production Board rotation"
+          description="How long each page of a Department's Production Board stays on screen."
+          note="Each page stays on screen for a time proportional to the rows it shows, and never shorter than the minimum page dwell. The timing is set per Department; a running board applies a change at its next refresh."
+        >
+          {departments.length === 0 ? (
+            <p className="admin-confighelp">
+              No Departments yet. Create one in Departments.
+            </p>
+          ) : (
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Department</th>
+                  <th>Seconds per displayed row</th>
+                  <th>Minimum page dwell</th>
+                  {canWrite ? <th aria-label="Actions" /> : null}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {departments.map((department) => (
+                  <tr key={department.id}>
+                    <td>
+                      <b>{department.name}</b>
+                      {department.isActive ? null : ' (inactive)'}
+                    </td>
+                    <td className="mono" data-label="Seconds per displayed row">
+                      {department.boardSecondsPerRow} s
+                    </td>
+                    <td className="mono" data-label="Minimum page dwell">
+                      {department.boardMinPageSeconds} s
+                    </td>
+                    {canWrite ? (
+                      <td>
+                        <button
+                          className="btn"
+                          aria-label={`Edit rotation timing — ${department.name}`}
+                          onClick={() => setEditing(department)}
+                        >
+                          Edit
+                        </button>
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </SettingsCard>
       </div>
       {editing ? (
         <RotationTimingDialog

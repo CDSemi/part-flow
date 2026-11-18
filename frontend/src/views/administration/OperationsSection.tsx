@@ -56,7 +56,7 @@ export function OperationsSection() {
     <>
       <SectionHeader
         title="Operations"
-        subtitle="Work performed within an Area (§8.5)"
+        subtitle="Work performed within an Area"
         action={
           canWrite ? (
             <button

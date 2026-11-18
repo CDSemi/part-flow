@@ -17,7 +17,7 @@ import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { canonicalEmail, EMAIL_ADDRESS_ERROR } from './email-address';
-import { AdminField, ServerErrorNote } from './section-widgets';
+import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
 // Administration → Settings → Outgoing mail server (Phase 17, owner
 // decision of 2026-11-13): the mail server PartFlow sends its messages
@@ -66,98 +66,58 @@ function parseWhole(text: string, min: number, max: number): number | null {
 }
 
 export function MailServerPanel() {
-  const session = useSession();
-  return (
-    <>
-      <h2>Outgoing mail server</h2>
-      <p className="admin-confighelp">
-        The mail server PartFlow sends email through: a one-time sign-in code to
-        a user who has lost their other ways to sign in. Without one, PartFlow
-        sends no email.
-      </p>
-      <MailServerView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
-    </>
-  );
-}
-
-function MailServerView({ canEdit }: { canEdit: boolean }) {
+  const canEdit = useSession().can('CONFIGURE_SYSTEM_SETTINGS');
   const { status } = useConnectivity();
   const serverData = useApiData(getMailServerPolicy);
   const [dialog, setDialog] = useState<'edit' | 'test' | null>(null);
-
-  if (serverData.state.status === 'loading') {
-    return <LoadingState label="Loading the outgoing mail server" />;
-  }
-  if (serverData.state.status === 'error') {
-    return (
-      <ErrorState
-        message="The outgoing mail server could not be loaded."
-        detail={serverData.state.message}
-        onRetry={serverData.reload}
-      />
-    );
-  }
-  const server = serverData.state.data;
+  const { state } = serverData;
+  const server = state.status === 'ready' ? state.data : null;
   const writeBlocked = status !== 'connected';
+
   return (
-    <>
-      <div className="admin-configpreview">
-        <div className="prow">
-          <span className="k">Mail server</span>
-          <span className="v">
-            {server.host === null
-              ? 'Not set up'
-              : `${server.host}, port ${server.port}`}
-          </span>
-        </div>
-        {server.host === null ? null : (
+    <SettingsCard
+      title="Outgoing mail server"
+      description="The mail server PartFlow sends its email through. Without one, PartFlow sends no email."
+      note="PartFlow uses it to send a one-time sign-in code to a user who has lost their other ways to sign in."
+      action={
+        canEdit && server ? (
           <>
-            <div className="prow">
-              <span className="k">Connection security</span>
-              <span className="v">{SECURITY_LABELS[server.security]}</span>
-            </div>
-            <div className="prow">
-              <span className="k">Sign-in</span>
-              <span className="v">
-                {server.username === null
-                  ? 'None'
-                  : `${server.username}${server.passwordSet ? ', password stored' : ', no password'}`}
-              </span>
-            </div>
-            <div className="prow">
-              <span className="k">Sender address</span>
-              <span className="v">{server.sender}</span>
-            </div>
-            <div className="prow">
-              <span className="k">Timeout</span>
-              <span className="v">{`${server.timeoutSeconds} seconds`}</span>
-            </div>
-          </>
-        )}
-      </div>
-      {canEdit ? (
-        <div className="row">
-          <button
-            className="bigbtn primary"
-            disabled={writeBlocked}
-            onClick={() => setDialog('edit')}
-          >
-            {server.host === null
-              ? 'Set up the outgoing mail server…'
-              : 'Edit outgoing mail server…'}
-          </button>
-          {server.host === null ? null : (
             <button
-              className="bigbtn"
+              type="button"
+              className="admin-editbtn"
               disabled={writeBlocked}
-              onClick={() => setDialog('test')}
+              onClick={() => setDialog('edit')}
             >
-              Send test email…
+              {server.host === null
+                ? 'Set up the outgoing mail server…'
+                : 'Edit outgoing mail server…'}
             </button>
-          )}
-        </div>
+            {server.host === null ? null : (
+              <button
+                type="button"
+                className="admin-editbtn"
+                disabled={writeBlocked}
+                onClick={() => setDialog('test')}
+              >
+                Send test email…
+              </button>
+            )}
+          </>
+        ) : undefined
+      }
+    >
+      {state.status === 'loading' ? (
+        <LoadingState label="Loading the outgoing mail server" />
       ) : null}
-      {dialog === 'edit' ? (
+      {state.status === 'error' ? (
+        <ErrorState
+          message="The outgoing mail server could not be loaded."
+          detail={state.message}
+          onRetry={serverData.reload}
+        />
+      ) : null}
+      {server ? <MailServerValues server={server} /> : null}
+      {dialog === 'edit' && server ? (
         <MailServerDialog
           saved={server}
           writeBlocked={writeBlocked}
@@ -173,7 +133,46 @@ function MailServerView({ canEdit }: { canEdit: boolean }) {
           onClose={() => setDialog(null)}
         />
       ) : null}
-    </>
+    </SettingsCard>
+  );
+}
+
+function MailServerValues({ server }: { server: MailServerPolicy }) {
+  return (
+    <div className="admin-configpreview">
+      <div className="prow">
+        <span className="k">Mail server</span>
+        <span className="v">
+          {server.host === null
+            ? 'Not set up'
+            : `${server.host}, port ${server.port}`}
+        </span>
+      </div>
+      {server.host === null ? null : (
+        <>
+          <div className="prow">
+            <span className="k">Connection security</span>
+            <span className="v">{SECURITY_LABELS[server.security]}</span>
+          </div>
+          <div className="prow">
+            <span className="k">Sign-in</span>
+            <span className="v">
+              {server.username === null
+                ? 'None'
+                : `${server.username}${server.passwordSet ? ', password stored' : ', no password'}`}
+            </span>
+          </div>
+          <div className="prow">
+            <span className="k">Sender address</span>
+            <span className="v">{server.sender}</span>
+          </div>
+          <div className="prow">
+            <span className="k">Timeout</span>
+            <span className="v">{`${server.timeoutSeconds} seconds`}</span>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

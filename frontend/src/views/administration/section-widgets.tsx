@@ -56,18 +56,23 @@ export function ViewOnlyNote({ permission }: { permission: Permission }) {
  * at the top right, then the stored values (or their loading or error
  * state) and an optional footnote. The button's accessible name names
  * the group (`Edit password rules…`); it is absent for a user who may
- * not change the settings and until the values have loaded.
+ * not change the settings and until the values have loaded. `action`
+ * adds other compact buttons whose label is not `Edit…`.
  */
 export function SettingsCard({
   title,
   description,
   edit,
+  action,
   note,
   children,
 }: {
   title: string;
   description: ReactNode;
   edit?: { label: string; disabled: boolean; onClick: () => void };
+  /** Other compact buttons of the card (`admin-editbtn`), each with a
+   * full accessible name; shown after `edit`. */
+  action?: ReactNode;
   /** A short line under the values. */
   note?: ReactNode;
   children: ReactNode;
@@ -80,16 +85,21 @@ export function SettingsCard({
           <h2 id={titleId}>{title}</h2>
           <p>{description}</p>
         </div>
-        {edit ? (
-          <button
-            type="button"
-            className="admin-editbtn"
-            aria-label={edit.label}
-            disabled={edit.disabled}
-            onClick={edit.onClick}
-          >
-            Edit…
-          </button>
+        {edit || action ? (
+          <div className="admin-cardactions">
+            {edit ? (
+              <button
+                type="button"
+                className="admin-editbtn"
+                aria-label={edit.label}
+                disabled={edit.disabled}
+                onClick={edit.onClick}
+              >
+                Edit…
+              </button>
+            ) : null}
+            {action}
+          </div>
         ) : null}
       </div>
       <div className="admin-cardbody">{children}</div>

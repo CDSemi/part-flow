@@ -59,7 +59,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     phase: 'minimum',
     group: 'Organization',
     label: 'Operations',
-    subtitle: 'Work performed within an Area (§8.5)',
+    subtitle: 'Work performed within an Area',
   },
   // Machines, Planned Routes (Route Templates) and PartNumber master
   // metadata are production master data owned by authorized production
@@ -74,7 +74,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     group: 'Organization',
     label: 'Workers',
     subtitle:
-      'Worker profiles — name, badge barcode (existing employee badge), avatar, active status; separate from Users (§8.13)',
+      'The people who scan their badge at the Scan Stations; separate from Users',
   },
   {
     id: 'scan-stations',
@@ -105,8 +105,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     phase: 'full',
     group: 'Production setup',
     label: 'Department display settings',
-    subtitle:
-      'Per-Department display configuration — Production Board rotation timing: seconds per displayed row and minimum page dwell (§21)',
+    subtitle: "How each Department's Production Board pages rotate",
   },
   {
     id: 'worker-sessions',
@@ -115,15 +114,14 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     group: 'Production rules',
     label: 'Worker sessions',
     subtitle:
-      'Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)',
+      'When a scanned Worker Session ends, and which actions need a badge scan',
   },
   {
     id: 'machine-assignment',
     phase: 'full',
     group: 'Production rules',
     label: 'Machine assignment',
-    subtitle:
-      "Two Area modes that follow from the Area's Machines: no Machines → direct processing; one or more Machines → queue and one-shot assignment (one Machine behaves like several) — never a per-Area setting",
+    subtitle: 'How an Area works with its Machines',
   },
   {
     id: 'correction-permissions',
@@ -131,7 +129,7 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     phase: 'full',
     group: 'Production rules',
     label: 'Correction permissions',
-    subtitle: 'Who may correct, with reasons (§16)',
+    subtitle: 'Who may undo and correct, and whether an Undo needs a reason',
   },
   {
     id: 'users',
