@@ -282,15 +282,23 @@
 
 /* --- Settings cards (Security) ------------------------------------------ */
 
-/* Each group of settings is its own card, one under the other. */
+/* Each group of settings is its own card. The cards fill the width in
+   equal columns — as many as fit cards at least --admin-card-min wide,
+   the narrowest card whose widest label-and-value row ("A remembered
+   sign-in lasts — Until the user signs out", 373px measured) stays on
+   one line — and at most three: Two-step sign-in is as tall as two other
+   cards, so a fourth column would stay empty. The cards flow down one
+   column, then the next, so cards of different heights leave no holes;
+   a narrow screen shows one full-width column. */
 .admin-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  max-width: 720px;
+  --admin-card-min: 24rem;
+  columns: var(--admin-card-min) 3;
+  column-gap: 18px;
 }
 
 .admin-card {
+  break-inside: avoid;
+  margin-bottom: 18px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);

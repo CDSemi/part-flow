@@ -2687,7 +2687,10 @@ under the header names that permission and no edit control is shown. Each group 
 with a one-sentence description, an `Edit…` button at the top right whose accessible name names the group (for example
 `Edit password rules…`), and the stored values below, each yes-or-no value shown as a status pill. The button opens
 the group's dialog (`Save changes`, `Cancel (Esc)`, the shared unsaved-changes question), and a save sends only the
-changed values. The rules themselves are PROJECT_PROFILE §20 User Sign-in. The cards, in order:
+changed values. The cards fill the width of the page in equal columns: as many as fit cards wide enough to keep every
+label and its value on one line (24rem, for the widest pair `A remembered sign-in lasts` — `Until the user signs
+out`), at most three, with the cards flowing down one column and then the next; a narrow screen shows one column. The
+rules themselves are PROJECT_PROFILE §20 User Sign-in. The cards, in order:
 
 - **User sign-in** — `How long users stay signed in, and how many wrong passwords lock an account.` For application
   Users only and distinct from **Worker sessions**: the user sign-in expiry in days or never (initially 30 days), the
@@ -4126,7 +4129,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: each group of Security settings is its own card with a short description and an `Edit…` button, and the sidebar groups become Organization, Production setup, Production rules, Access and Data & system. |
+| 2026-11-17 | uncommitted | §9: the Security cards fill the page width in equal columns, each at least as wide as its widest label and value need. |
+| 2026-11-17 | c31f061 | §9: each group of Security settings is its own card with a short description and an `Edit…` button, and the sidebar groups become Organization, Production setup, Production rules, Access and Data & system. |
 | 2026-11-17 | 2d7c9f0 | §12.3, §12.6 and §14.3: every label print uses one print sheet that never adds a blank page. |
 | 2026-11-17 | 4539a2b | §1.2 and §9: Administration → Security gathers User sign-in, Remember me, Password rules and Two-step sign-in; the Sign in dialog offers Remember me and the password dialogs list the password rules. |
 | 2026-11-17 | 4be2389 | §1.2, §4.1 and §4.13: a User who may manage Scan Stations views a station without an enrolled device, with every action unavailable and a way to enroll the device. |

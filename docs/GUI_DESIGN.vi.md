@@ -2716,7 +2716,10 @@ người dùng đã đăng nhập đều đọc được; thay đổi cần perm
 thẻ riêng: tiêu đề kèm một câu mô tả, một nút `Edit…` ở góc trên bên phải có tên truy cập (accessible name) nêu tên nhóm
 (ví dụ `Edit password rules…`), và các giá trị đã lưu bên dưới, mỗi giá trị có/không hiển thị bằng một status pill. Nút
 này mở dialog của nhóm (`Save changes`, `Cancel (Esc)`, câu hỏi dùng chung về thay đổi chưa lưu), và một lần lưu chỉ gửi
-các giá trị đã thay đổi. Bản thân các quy tắc nằm ở PROJECT_PROFILE §20 Đăng nhập của User. Các thẻ, theo thứ tự:
+các giá trị đã thay đổi. Các thẻ lấp đầy bề rộng trang theo các cột rộng bằng nhau: nhiều cột nhất mà mỗi thẻ vẫn đủ
+rộng để mọi nhãn và giá trị của nó nằm trên một dòng (24rem, cho cặp rộng nhất `A remembered sign-in lasts` — `Until
+the user signs out`), tối đa ba cột, các thẻ chảy xuống hết một cột rồi sang cột kế tiếp; màn hình hẹp hiện một cột.
+Bản thân các quy tắc nằm ở PROJECT_PROFILE §20 Đăng nhập của User. Các thẻ, theo thứ tự:
 
 - **User sign-in** — `How long users stay signed in, and how many wrong passwords lock an account.` Chỉ dành cho các
   application User và tách biệt khỏi **Worker sessions**: thời hạn đăng nhập của người dùng tính theo ngày hoặc không
@@ -4172,7 +4175,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §9: mỗi nhóm thiết lập của Security là một thẻ riêng với mô tả ngắn và nút `Edit…`, và các nhóm của sidebar thành Organization, Production setup, Production rules, Access và Data & system. |
+| 2026-11-17 | uncommitted | §9: các thẻ Security lấp đầy bề rộng trang theo các cột rộng bằng nhau, mỗi thẻ ít nhất đủ rộng cho nhãn và giá trị rộng nhất của nó. |
+| 2026-11-17 | c31f061 | §9: mỗi nhóm thiết lập của Security là một thẻ riêng với mô tả ngắn và nút `Edit…`, và các nhóm của sidebar thành Organization, Production setup, Production rules, Access và Data & system. |
 | 2026-11-17 | 2d7c9f0 | §12.3, §12.6 và §14.3: mọi lần in nhãn dùng một tờ in không bao giờ thêm trang trắng. |
 | 2026-11-17 | 4539a2b | §1.2 và §9: Administration → Security gom User sign-in, Remember me, Password rules và Two-step sign-in; dialog Sign in đưa ra Remember me và các dialog mật khẩu liệt kê quy tắc mật khẩu. |
 | 2026-11-17 | 4be2389 | §1.2, §4.1 và §4.13: một User có quyền quản lý Scan Station xem một station mà không cần thiết bị đã enroll, với mọi action không khả dụng và một cách để enroll thiết bị. |
