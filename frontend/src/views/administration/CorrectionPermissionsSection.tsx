@@ -27,7 +27,7 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Correction permissions (Phase 13; GUI_DESIGN §9
-// Policies, PROJECT_PROFILE §16 "require a reason when configured"):
+// Production rules, PROJECT_PROFILE §16 "require a reason when configured"):
 // the real Undo reason policy — one global On/Off switch (default Off)
 // stored in the server's application policy
 // (`/api/policies/correction-permissions`), audited and enforced by the

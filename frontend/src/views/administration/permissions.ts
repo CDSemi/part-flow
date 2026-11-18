@@ -111,7 +111,7 @@ export const ROLE_PERMISSION_GROUPS: readonly PermissionGroup[] = [
 ];
 
 /**
- * The correction permissions, edited only in Policies → Correction
+ * The correction permissions, edited only in Production rules → Correction
  * permissions (the Roles editor shows them read-only and never sends
  * them, so the two editors never revert each other).
  */

@@ -14,7 +14,13 @@ import { useCloseGuard } from '../../components/close-guard';
 import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { AdminField, PolicySwitch, ServerErrorNote } from './section-widgets';
+import {
+  AdminField,
+  OnOffValue,
+  PolicySwitch,
+  ServerErrorNote,
+  SettingsCard,
+} from './section-widgets';
 
 // Administration → Security → Password rules (owner request of
 // 2026-11-17): the rules every new password must satisfy — set at
@@ -78,64 +84,54 @@ function parseLength(text: string): number | null {
 
 export function PasswordRulesPanel() {
   const session = useSession();
-  return (
-    <>
-      <h2>Password rules</h2>
-      <p className="admin-confighelp">
-        The rules every new password must meet — at first-run setup, with Change
-        password, when an administrator sets a password, or with the recovery
-        command. Passwords people already have keep working when the rules
-        change; the new rules apply the next time a password is set.
-      </p>
-      <PasswordRulesView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
-    </>
-  );
-}
-
-function PasswordRulesView({ canEdit }: { canEdit: boolean }) {
+  const canEdit = session.can('CONFIGURE_SYSTEM_SETTINGS');
   const { status } = useConnectivity();
   const policyData = useApiData(getPasswordRulesPolicy);
   const [editing, setEditing] = useState(false);
+  const { state } = policyData;
+  const policy = state.status === 'ready' ? state.data : null;
 
-  if (policyData.state.status === 'loading') {
-    return <LoadingState label="Loading password rules" />;
-  }
-  if (policyData.state.status === 'error') {
-    return (
-      <ErrorState
-        message="The password rules could not be loaded."
-        detail={policyData.state.message}
-        onRetry={policyData.reload}
-      />
-    );
-  }
-  const policy = policyData.state.data;
   return (
-    <>
-      <div className="admin-configpreview">
-        <div className="prow">
-          <span className="k">Password length</span>
-          <span className="v">{`${policy.minLength} to ${policy.maxLength} characters`}</span>
-        </div>
-        {REQUIREMENTS.map((requirement) => (
-          <div className="prow" key={requirement.key}>
-            <span className="k">{requirement.label}</span>
-            <span className="v">{policy[requirement.key] ? 'On' : 'Off'}</span>
+    <SettingsCard
+      title="Password rules"
+      description="What a new password must contain. Passwords already in use keep working until they are changed."
+      edit={
+        canEdit && policy
+          ? {
+              label: 'Edit password rules…',
+              disabled: status !== 'connected',
+              onClick: () => setEditing(true),
+            }
+          : undefined
+      }
+    >
+      {state.status === 'loading' ? (
+        <LoadingState label="Loading password rules" />
+      ) : null}
+      {state.status === 'error' ? (
+        <ErrorState
+          message="The password rules could not be loaded."
+          detail={state.message}
+          onRetry={policyData.reload}
+        />
+      ) : null}
+      {policy ? (
+        <div className="admin-configpreview">
+          <div className="prow">
+            <span className="k">Password length</span>
+            <span className="v">{`${policy.minLength} to ${policy.maxLength} characters`}</span>
           </div>
-        ))}
-      </div>
-      {canEdit ? (
-        <div className="row">
-          <button
-            className="bigbtn primary"
-            disabled={status !== 'connected'}
-            onClick={() => setEditing(true)}
-          >
-            Edit password rules…
-          </button>
+          {REQUIREMENTS.map((requirement) => (
+            <div className="prow" key={requirement.key}>
+              <span className="k">{requirement.label}</span>
+              <span className="v">
+                <OnOffValue on={policy[requirement.key]} />
+              </span>
+            </div>
+          ))}
         </div>
       ) : null}
-      {editing ? (
+      {editing && policy ? (
         <PasswordRulesDialog
           saved={policy}
           writeBlocked={status !== 'connected'}
@@ -145,7 +141,7 @@ function PasswordRulesView({ canEdit }: { canEdit: boolean }) {
           }}
         />
       ) : null}
-    </>
+    </SettingsCard>
   );
 }
 
@@ -225,6 +221,11 @@ function PasswordRulesDialog({
   return (
     <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
+      <div className="sub">
+        The rules apply each time a password is set: at first-run setup, with
+        Change password, when an administrator sets one, and with the recovery
+        command. Passwords already in use keep working.
+      </div>
       <div className="admin-form">
         <AdminField label="Minimum length (characters)">
           <input

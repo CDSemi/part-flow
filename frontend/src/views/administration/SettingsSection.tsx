@@ -26,7 +26,7 @@ import { ADMIN_SECTIONS } from './sections';
 import { MailServerPanel } from './MailServerPanel';
 import { GeneralSettingsPreviews } from './SettingPreviews';
 
-// Administration → Settings (Phase 13; GUI_DESIGN §9 Policies and
+// Administration → Settings (Phase 13; GUI_DESIGN §9 Data & system and
 // §3.12): the Due Soon warning panel — the one global policy behind
 // every derived due countdown (Production Board, Area Board, Scan
 // Station, Priority and Work Orders), stored in the server's

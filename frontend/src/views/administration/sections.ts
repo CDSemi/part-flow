@@ -8,8 +8,9 @@ import type { Permission } from '../../api/roles';
 export const ADMIN_GROUPS = [
   'Organization',
   'Production setup',
+  'Production rules',
   'Access',
-  'Policies',
+  'Data & system',
 ] as const;
 
 export interface AdminSection {
@@ -99,6 +100,40 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     subtitle: 'Station scan-resolution policies',
   },
   {
+    id: 'department-display',
+    writePermission: 'MANAGE_DEPARTMENTS',
+    phase: 'full',
+    group: 'Production setup',
+    label: 'Department display settings',
+    subtitle:
+      'Per-Department display configuration — Production Board rotation timing: seconds per displayed row and minimum page dwell (§21)',
+  },
+  {
+    id: 'worker-sessions',
+    writePermission: 'MANAGE_WORKER_SESSION_POLICIES',
+    phase: 'full',
+    group: 'Production rules',
+    label: 'Worker sessions',
+    subtitle:
+      'Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)',
+  },
+  {
+    id: 'machine-assignment',
+    phase: 'full',
+    group: 'Production rules',
+    label: 'Machine assignment',
+    subtitle:
+      "Two Area modes that follow from the Area's Machines: no Machines → direct processing; one or more Machines → queue and one-shot assignment (one Machine behaves like several) — never a per-Area setting",
+  },
+  {
+    id: 'correction-permissions',
+    writePermission: 'MANAGE_CORRECTION_PERMISSIONS',
+    phase: 'full',
+    group: 'Production rules',
+    label: 'Correction permissions',
+    subtitle: 'Who may correct, with reasons (§16)',
+  },
+  {
     id: 'users',
     writePermission: 'MANAGE_USERS_AND_ROLES',
     phase: 'full',
@@ -121,66 +156,31 @@ export const ADMIN_SECTIONS: AdminSection[] = [
     phase: 'full',
     group: 'Access',
     label: 'Security',
-    subtitle:
-      'How users sign in — how long a sign-in lasts, account locks, Remember me, password rules and two-step sign-in',
-  },
-  {
-    id: 'worker-sessions',
-    writePermission: 'MANAGE_WORKER_SESSION_POLICIES',
-    phase: 'full',
-    group: 'Policies',
-    label: 'Worker sessions',
-    subtitle:
-      'Scanned-session sliding inactivity timeout and badge confirmation of sensitive actions — DONE, QUEUE and UNDO (§19)',
-  },
-  {
-    id: 'machine-assignment',
-    phase: 'full',
-    group: 'Policies',
-    label: 'Machine assignment',
-    subtitle:
-      "Two Area modes that follow from the Area's Machines: no Machines → direct processing; one or more Machines → queue and one-shot assignment (one Machine behaves like several) — never a per-Area setting",
-  },
-  {
-    id: 'correction-permissions',
-    writePermission: 'MANAGE_CORRECTION_PERMISSIONS',
-    phase: 'full',
-    group: 'Policies',
-    label: 'Correction permissions',
-    subtitle: 'Who may correct, with reasons (§16)',
-  },
-  {
-    id: 'data-retention',
-    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
-    phase: 'full',
-    group: 'Policies',
-    label: 'History archival & purge',
-    subtitle:
-      'Admin-only Movement-history retention maintenance: configurable retention period, size threshold or manual request — lossless archive export, verification, then purge exactly the archived rows, with scope preview, reason and full audit; normal workflows never delete history',
+    subtitle: 'How users sign in and how their accounts stay protected',
   },
   {
     id: 'backups',
     writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
     phase: 'full',
-    group: 'Policies',
+    group: 'Data & system',
     label: 'Backups',
     subtitle:
       'How often the server takes a scheduled backup, and how many hourly, daily and weekly backups it keeps',
   },
   {
-    id: 'department-display',
-    writePermission: 'MANAGE_DEPARTMENTS',
+    id: 'data-retention',
+    writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
     phase: 'full',
-    group: 'Policies',
-    label: 'Department display settings',
+    group: 'Data & system',
+    label: 'History archival & purge',
     subtitle:
-      'Per-Department display configuration — Production Board rotation timing: seconds per displayed row and minimum page dwell (§21)',
+      'Admin-only Movement-history retention maintenance: configurable retention period, size threshold or manual request — lossless archive export, verification, then purge exactly the archived rows, with scope preview, reason and full audit; normal workflows never delete history',
   },
   {
     id: 'settings',
     writePermission: 'CONFIGURE_SYSTEM_SETTINGS',
     phase: 'full',
-    group: 'Policies',
+    group: 'Data & system',
     label: 'Settings',
     subtitle: 'General application settings',
   },

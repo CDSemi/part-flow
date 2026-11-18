@@ -14,7 +14,13 @@ import { useCloseGuard } from '../../components/close-guard';
 import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { AdminField, PolicySwitch, ServerErrorNote } from './section-widgets';
+import {
+  AdminField,
+  OnOffValue,
+  PolicySwitch,
+  ServerErrorNote,
+  SettingsCard,
+} from './section-widgets';
 
 // Administration → Security → Remember me (owner request of 2026-11-17):
 // whether the Sign in dialog offers Remember me and how long a remembered
@@ -53,63 +59,52 @@ function lasts(policy: RememberMePolicy): string {
 
 export function RememberMePanel() {
   const session = useSession();
-  return (
-    <>
-      <h2>Remember me</h2>
-      <p className="admin-confighelp">
-        Whether the Sign in dialog offers Remember me, and how long a remembered
-        sign-in lasts. While it is offered, a sign-in without Remember me ends
-        when the browser closes, or earlier when User sign-in says so. A sign-in
-        remembered until the user signs out stays as long as PartFlow is opened
-        at least once every 400 days.
-      </p>
-      <RememberMeView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
-    </>
-  );
-}
-
-function RememberMeView({ canEdit }: { canEdit: boolean }) {
+  const canEdit = session.can('CONFIGURE_SYSTEM_SETTINGS');
   const { status } = useConnectivity();
   const policyData = useApiData(getRememberMePolicy);
   const [editing, setEditing] = useState(false);
+  const { state } = policyData;
+  const policy = state.status === 'ready' ? state.data : null;
 
-  if (policyData.state.status === 'loading') {
-    return <LoadingState label="Loading Remember me settings" />;
-  }
-  if (policyData.state.status === 'error') {
-    return (
-      <ErrorState
-        message="The Remember me settings could not be loaded."
-        detail={policyData.state.message}
-        onRetry={policyData.reload}
-      />
-    );
-  }
-  const policy = policyData.state.data;
   return (
-    <>
-      <div className="admin-configpreview">
-        <div className="prow">
-          <span className="k">Offer Remember me</span>
-          <span className="v">{policy.offered ? 'On' : 'Off'}</span>
-        </div>
-        <div className="prow">
-          <span className="k">A remembered sign-in lasts</span>
-          <span className="v">{lasts(policy)}</span>
-        </div>
-      </div>
-      {canEdit ? (
-        <div className="row">
-          <button
-            className="bigbtn primary"
-            disabled={status !== 'connected'}
-            onClick={() => setEditing(true)}
-          >
-            Edit Remember me settings…
-          </button>
+    <SettingsCard
+      title="Remember me"
+      description="A Remember me checkbox on the Sign in screen keeps users signed in after they close the browser."
+      edit={
+        canEdit && policy
+          ? {
+              label: 'Edit Remember me settings…',
+              disabled: status !== 'connected',
+              onClick: () => setEditing(true),
+            }
+          : undefined
+      }
+    >
+      {state.status === 'loading' ? (
+        <LoadingState label="Loading Remember me settings" />
+      ) : null}
+      {state.status === 'error' ? (
+        <ErrorState
+          message="The Remember me settings could not be loaded."
+          detail={state.message}
+          onRetry={policyData.reload}
+        />
+      ) : null}
+      {policy ? (
+        <div className="admin-configpreview">
+          <div className="prow">
+            <span className="k">Offer Remember me</span>
+            <span className="v">
+              <OnOffValue on={policy.offered} />
+            </span>
+          </div>
+          <div className="prow">
+            <span className="k">A remembered sign-in lasts</span>
+            <span className="v">{lasts(policy)}</span>
+          </div>
         </div>
       ) : null}
-      {editing ? (
+      {editing && policy ? (
         <RememberMeDialog
           saved={policy}
           writeBlocked={status !== 'connected'}
@@ -119,7 +114,7 @@ function RememberMeView({ canEdit }: { canEdit: boolean }) {
           }}
         />
       ) : null}
-    </>
+    </SettingsCard>
   );
 }
 
@@ -186,7 +181,7 @@ function RememberMeDialog({
         <div className="admin-switchlist">
           <PolicySwitch
             label="Offer Remember me"
-            description="Show a Remember me checkbox in the Sign in dialog."
+            description="Show a Remember me checkbox in the Sign in dialog. While it shows, users who leave it unticked are signed out when they close the browser."
             ariaLabel="Offer Remember me"
             on={offered}
             disabled={busy}
@@ -194,7 +189,7 @@ function RememberMeDialog({
           />
           <PolicySwitch
             label="Remember until the user signs out"
-            description="When Off, a remembered sign-in ends after the days below."
+            description="When On, a remembered sign-in lasts as long as PartFlow is opened at least once every 400 days. When Off, it ends after the days below."
             ariaLabel="Remember until the user signs out"
             on={untilSignOut}
             disabled={busy}

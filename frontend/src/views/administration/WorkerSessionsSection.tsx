@@ -29,7 +29,7 @@ import {
 } from './section-widgets';
 import { WORKER_ID_MODE_LABELS } from './worker-id-modes';
 
-// Administration → Worker sessions (Phase 13; GUI_DESIGN §9 Policies,
+// Administration → Worker sessions (Phase 13; GUI_DESIGN §9 Production rules,
 // PROJECT_PROFILE §19): the sliding inactivity timeout of scanned
 // Worker Sessions — one persisted default plus optional per-Area
 // overrides, all in whole minutes from 1 to 720. The default lives in

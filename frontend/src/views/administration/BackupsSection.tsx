@@ -27,7 +27,7 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Backups (Phase 16, owner decision of 2026-11-13;
-// GUI_DESIGN §9 Policies): the real backup policy stored in the server's
+// GUI_DESIGN §9 Data & system): the real backup policy stored in the server's
 // application policy (`/api/policies/backups`), audited and re-validated
 // by the server — how often the server's hourly backup task takes a
 // scheduled backup (every 1, 2, 3, 4, 6, 8, 12 or 24 hours) and how many

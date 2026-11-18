@@ -5127,7 +5127,7 @@ test('FA-U5: an unanswered save is an unknown outcome; offline blocks writes; a 
 /* ============ Roles & permissions (Phase 13 — named roles) ============ */
 
 const ROLES_NOTE =
-  'Each user holds one role. PartFlow checks the Administration and Management permissions; what an enrolled Scan Station may do follows the role marked Applied at Scan Stations. Correction permissions are set in Policies → Correction permissions. Roles are renamed, never deleted.';
+  'Each user holds one role. PartFlow checks the Administration and Management permissions; what an enrolled Scan Station may do follows the role marked Applied at Scan Stations. Correction permissions are set in Production rules → Correction permissions. Roles are renamed, never deleted.';
 
 async function openRoles(status: 'connected' | 'unavailable' = 'connected') {
   renderAdmin(status);
@@ -5205,7 +5205,7 @@ test('FA-RO2: editing a role sends one delta over the four editable groups only'
     expect(within(dialog).queryByRole('checkbox', { name: label })).toBeNull();
   }
   expect(dialog.textContent).toContain(
-    'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Policies → Correction permissions.',
+    'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Production rules → Correction permissions.',
   );
   // A reserved grant the role already holds stays shown and cannot be
   // changed.
@@ -5835,10 +5835,21 @@ test('FA-S2: signed in without the permission, the settings read without an edit
   ]) {
     expect(screen.queryByRole('button', { name })).toBeNull();
   }
-  // Security never says "sessions" (those are Worker Sessions).
-  expect(document.querySelector('.admin-config')?.textContent).not.toMatch(
-    /session/i,
-  );
+  // Security never says "sessions" (those are Worker Sessions), and each
+  // group of settings is its own card.
+  const cards = document.querySelector('.admin-cards') as HTMLElement;
+  expect(cards.textContent).not.toMatch(/session/i);
+  expect(
+    Array.from(
+      cards.querySelectorAll(':scope > .admin-card h2'),
+      (h) => h.textContent,
+    ),
+  ).toEqual([
+    'User sign-in',
+    'Remember me',
+    'Password rules',
+    'Two-step sign-in',
+  ]);
 
   // Settings keeps the Due Soon warning and the outgoing mail server, which
   // reads without an edit or test control too.
@@ -6621,7 +6632,7 @@ test('FA-4: the Roles editor hides Manage correction permissions from a user who
   expect(
     screen.getByRole('dialog', { name: 'Edit role' }).textContent,
   ).toContain(
-    'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Policies → Correction permissions.',
+    'Correction permissions: Perform quantity corrections, Edit Work Order Allocation — set in Production rules → Correction permissions.',
   );
 });
 

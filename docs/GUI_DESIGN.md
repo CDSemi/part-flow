@@ -2614,9 +2614,10 @@ as follows:
 | Group                | Sections |
 |----------------------|----------|
 | **Organization**     | Departments, Areas, Operations, Workers |
-| **Production setup** | Scan Stations, Barcode configuration, Scan behavior |
+| **Production setup** | Scan Stations, Barcode configuration, Scan behavior, Department display settings |
+| **Production rules** | Worker sessions, Machine assignment, Correction permissions |
 | **Access**           | Users, Roles & permissions, Security |
-| **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Backups, Department display settings, Settings |
+| **Data & system**    | Backups, History archival & purge, Settings |
 
 Each section is a standard table-plus-editor pattern. The Areas table is the reference example: Area (color and name),
 Operations, Machine assignment (Direct processing — no Machines / Queue → assign (one-shot); the mode follows from
@@ -2632,7 +2633,7 @@ Editing an Area's display properties shows an inline note that identity and barc
 unaffected. Destructive operations (deactivating an Area with active quantities) are blocked with an explanation, not
 confirmed through.
 
-### Policies
+### Production rules
 
 - **Worker sessions** owns the Scanned-session **sliding inactivity timeout** (§4.12): one default value with optional
   per-Area overrides, in whole minutes from 1 to 720 (default 15), with no shift schedules. It also owns the
@@ -2650,11 +2651,17 @@ confirmed through.
   reason switch. The section states which correction permissions are checked so far: Edit Work Order Allocation is
   checked for Management allocation and allocation reversal, and Undo recent eligible scans applies at the Scan
   Stations through the role marked Applied at Scan Stations; the other correction permissions are not checked yet.
-- **History archival & purge** (Admin-only) is described under its own heading below.
+
+### Department display settings
+
+**Department display settings** (Production setup) are configured **per Department, never globally**: a table of
+Departments with an editor for the Production Board rotation timing (seconds per displayed row 1–60, minimum page
+dwell 1–300 s; defaults 3 and 6).
+
+### Data & system
+
 - **Backups** (Configure system settings) is described under its own heading below.
-- **Department display settings** are configured **per Department, never globally**: a table of Departments with an
-  editor for the Production Board rotation timing (seconds per displayed row 1–60, minimum page dwell 1–300 s; defaults
-  3 and 6).
+- **History archival & purge** (Admin-only) is described under its own heading below.
 - **Settings** hosts two panels:
   - the **Due Soon warning** panel owns the configuration behind every derived due countdown (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) and **Maximum warning days** (0–365, never below
@@ -2676,31 +2683,39 @@ confirmed through.
 
 The **Security** section (Access; owner request of 2026-11-17) gathers every setting of how users sign in. Every
 signed-in user reads it; changes need the Configure system settings permission, and without it one `View only` line
-under the header names that permission and no edit control is shown. Each panel shows its values as a list and edits
-them in a dialog (`Edit … settings…`, `Save changes`, `Cancel (Esc)`, the shared unsaved-changes question); a save
-sends only the changed values. The rules themselves are PROJECT_PROFILE §20 User Sign-in. The panels, in order:
+under the header names that permission and no edit control is shown. Each group of settings is its own card: the title
+with a one-sentence description, an `Edit…` button at the top right whose accessible name names the group (for example
+`Edit password rules…`), and the stored values below, each yes-or-no value shown as a status pill. The button opens
+the group's dialog (`Save changes`, `Cancel (Esc)`, the shared unsaved-changes question), and a save sends only the
+changed values. The rules themselves are PROJECT_PROFILE §20 User Sign-in. The cards, in order:
 
-- **User sign-in**, for application Users only and distinct from **Worker sessions**: the user sign-in expiry in days
-  or never (initially 30 days), the number of failed sign-ins before a lock (10) and the lock duration (15 minutes),
-  and whether users must replace an administrator-set password at their next sign-in (On). A change applies to open
-  sign-ins at their next request;
-- **Remember me**: `Offer Remember me` (Off) and how long a remembered sign-in lasts — `Remember for (days)` (1–365,
-  30) or `Remember until the user signs out`, which disables the days field and keeps its value. The panel explains
-  that, while it is offered, a sign-in without Remember me ends when the browser closes, and that a sign-in remembered
-  until the user signs out stays while PartFlow is opened at least once every 400 days;
-- **Password rules**: the password length (`6 to 256 characters`; the minimum and maximum each 4–256, the minimum
-  never above the maximum) and four switches, initially Off — `Require a digit`, `Require a special character` (a
-  punctuation mark or a symbol; a space does not count), `Require an uppercase letter` and `Require a lowercase
-  letter`. The panel explains that the rules apply the next time a password is set and that existing passwords keep
-  working;
-- **Two-step sign-in**: every number of two-step sign-in, each a whole number in its range (initial value in brackets)
-  — the time to finish the second step (1–60 minutes, 15), the wrong codes per sign-in (1–20, 5), the wrong codes
-  before a lock (3–100, 10; the lock lasts as long as in User sign-in), the emailed codes per sign-in (1–10, 3), the
-  wait between emailed codes (0–3600 seconds, 60), the digits of an emailed code (6–10, 8), the recovery codes per set
-  (5–20, 10) and their characters (8–20, 12), the time to set up an authenticator app or a passkey (1–60 minutes, 15)
-  and the clock drift allowed (0–2 steps of 30 seconds, 1). Authenticator app codes stay 6 digits and change every 30
-  seconds, the standard the apps rely on. The panel says that emailed codes are sent through the outgoing mail server
-  set up in Administration → Settings → Outgoing mail server. A change applies from the next sign-in step.
+- **User sign-in** — `How long users stay signed in, and how many wrong passwords lock an account.` For application
+  Users only and distinct from **Worker sessions**: the user sign-in expiry in days or never (initially 30 days), the
+  number of failed sign-ins before a lock (10) and the lock duration (15 minutes), and whether users must replace an
+  administrator-set password at their next sign-in (Required). A change applies to open sign-ins at their next request;
+- **Remember me** — `A Remember me checkbox on the Sign in screen keeps users signed in after they close the browser.`
+  `Offer Remember me` (Off) and how long a remembered sign-in lasts — `Remember for (days)` (1–365, 30) or
+  `Remember until the user signs out`, which disables the days field and keeps its value. The dialog's switches explain
+  that, while it is offered, users who leave it unticked are signed out when they close the browser, and that a sign-in
+  remembered until the user signs out lasts as long as PartFlow is opened at least once every 400 days;
+- **Password rules** — `What a new password must contain. Passwords already in use keep working until they are
+  changed.` The password length (`6 to 256 characters`; the minimum and maximum each 4–256, the minimum never above the
+  maximum) and four switches, initially Off — `Require a digit`, `Require a special character` (a punctuation mark or a
+  symbol; a space does not count), `Require an uppercase letter` and `Require a lowercase letter`. The dialog says that
+  the rules apply each time a password is set: at first-run setup, with Change password, when an administrator sets
+  one, and with the recovery command;
+- **Two-step sign-in** — `Limits for the extra step after the password: codes from an authenticator app, passkeys,
+  emailed codes and recovery codes.` Every number of two-step sign-in, each a whole number in its range (initial value
+  in brackets), in four groups that the card and its dialog both show: **During sign-in** — the time to finish the
+  second step (1–60 minutes, 15), the wrong codes per sign-in (1–20, 5) and the wrong codes before a lock (3–100, 10);
+  **Emailed codes** — the emailed codes per sign-in (1–10, 3), the wait between emailed codes (0–3600 seconds, 60) and
+  the digits of an emailed code (6–10, 8); **Recovery codes** — the recovery codes per set (5–20, 10) and their
+  characters (8–20, 12); **Authenticator apps and passkeys** — the time to set up an authenticator app or a passkey
+  (1–60 minutes, 15) and the clock drift allowed (0–2 steps of 30 seconds, 1). The dialog says that authenticator app
+  codes always have 6 digits and change every 30 seconds, the standard the apps rely on, and that a lock lasts as long as
+  the lock duration under User sign-in. A footnote under the values says that emailed codes are sent through the
+  outgoing mail server set up in Administration → Settings → Outgoing mail server. A change applies from the next
+  sign-in step.
 
 ### No Machines, no Route Templates and no PartNumbers sections
 
@@ -2785,7 +2800,7 @@ Routes and Part Numbers stay managed in Management by authorized production role
   view-only: its controls are hidden and a `View only` line names the permission. The server checks these permissions.
 - Worker badges are shown only to users who may manage Workers.
 - **Correction permissions guard.** Changing correction permissions, the permission to manage them, or users whose role
-  holds them needs the permission to manage correction permissions. The correction permissions in Policies →
+  holds them needs the permission to manage correction permissions. The correction permissions in Production rules →
   Correction permissions are edited with that permission.
 - **Last-holder rule.** PartFlow refuses a change that would leave no active user with a password who may manage users
   and roles, or who may manage correction permissions.
@@ -2850,8 +2865,8 @@ entity (§4.12, PROJECT_PROFILE §8.13).
   capabilities PROJECT_PROFILE §20 lists as initial grants) and edits each role's name and its permissions, grouped as
   Administration, Production master data, Work Orders, priority and reports, and Scan Station. The four correction
   permissions (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform authorized
-  historical corrections) are edited only in Policies → **Correction permissions**, as a role × permission table below
-  the Undo reason switch.
+  historical corrections) are edited only in Production rules → **Correction permissions**, as a role × permission
+  table below the Undo reason switch.
 
 ### History archival & purge
 
@@ -4111,7 +4126,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §12.3, §12.6 and §14.3: every label print uses one print sheet that never adds a blank page. |
+| 2026-11-17 | uncommitted | §9: each group of Security settings is its own card with a short description and an `Edit…` button, and the sidebar groups become Organization, Production setup, Production rules, Access and Data & system. |
+| 2026-11-17 | 2d7c9f0 | §12.3, §12.6 and §14.3: every label print uses one print sheet that never adds a blank page. |
 | 2026-11-17 | 4539a2b | §1.2 and §9: Administration → Security gathers User sign-in, Remember me, Password rules and Two-step sign-in; the Sign in dialog offers Remember me and the password dialogs list the password rules. |
 | 2026-11-17 | 4be2389 | §1.2, §4.1 and §4.13: a User who may manage Scan Stations views a station without an enrolled device, with every action unavailable and a way to enroll the device. |
 | 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` on Machines and Part Numbers prints many labels at once from one shared dialog, and both toolbars move the search to its own row when the buttons no longer fit. |

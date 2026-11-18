@@ -2643,9 +2643,10 @@ sau:
 | Nhóm                 | Các section |
 |----------------------|-------------|
 | **Organization**     | Departments, Areas, Operations, Workers |
-| **Production setup** | Scan Stations, Barcode configuration, Scan behavior |
+| **Production setup** | Scan Stations, Barcode configuration, Scan behavior, Department display settings |
+| **Production rules** | Worker sessions, Machine assignment, Correction permissions |
 | **Access**           | Users, Roles & permissions, Security |
-| **Policies**         | Worker sessions, Machine assignment, Correction permissions, History archival & purge, Backups, Department display settings, Settings |
+| **Data & system**    | Backups, History archival & purge, Settings |
 
 Mỗi section là một mẫu bảng-cộng-editor chuẩn. Bảng Areas là ví dụ tham chiếu: Area (màu và tên), Operations, Machine
 assignment (Direct processing — no Machines / Queue → assign (one-shot); mode suy ra từ việc Area có Machine nào hay
@@ -2661,7 +2662,7 @@ Việc sửa các thuộc tính hiển thị của một Area hiển thị một
 không bị ảnh hưởng. Các thao tác phá hủy (deactivate một Area còn quantity đang hoạt động) bị chặn kèm giải thích, chứ
 không phải xác nhận cho qua.
 
-### Policies
+### Production rules
 
 - **Worker sessions** sở hữu **sliding inactivity timeout** của Scanned-session (§4.12): một giá trị mặc định với các
   override tùy chọn theo Area, tính bằng số phút nguyên từ 1 đến 720 (mặc định 15), không có lịch ca. Nó cũng sở hữu
@@ -2679,11 +2680,17 @@ không phải xác nhận cho qua.
   nêu những correction permission nào đã được kiểm tra cho đến nay: Edit Work Order Allocation được kiểm tra cho
   allocation từ Management và việc đảo ngược allocation, còn Undo recent eligible scans áp dụng tại các Scan Station qua
   role được đánh dấu Applied at Scan Stations; các correction permission khác chưa được kiểm tra.
-- **History archival & purge** (Admin-only) được mô tả dưới heading riêng của nó bên dưới.
+
+### Department display settings
+
+**Department display settings** (Production setup) được cấu hình **theo Department, không bao giờ toàn cục**: một bảng
+các Department với một editor cho thời gian rotation của Production Board (số giây cho mỗi dòng hiển thị 1–60, thời gian
+dừng tối thiểu mỗi trang 1–300 s; mặc định 3 và 6).
+
+### Data & system
+
 - **Backups** (Configure system settings) được mô tả dưới heading riêng của nó bên dưới.
-- **Department display settings** được cấu hình **theo Department, không bao giờ toàn cục**: một bảng các Department
-  với một editor cho thời gian rotation của Production Board (số giây cho mỗi dòng hiển thị 1–60, thời gian dừng tối
-  thiểu mỗi trang 1–300 s; mặc định 3 và 6).
+- **History archival & purge** (Admin-only) được mô tả dưới heading riêng của nó bên dưới.
 - **Settings** chứa hai panel:
   - panel **Due Soon warning** sở hữu cấu hình đứng sau mọi due countdown được suy ra (§3 rule 12): **Minimum
     warning days** (0–365), **Lead-time warning percentage** (1–100) và **Maximum warning days** (0–365, không bao giờ
@@ -2703,34 +2710,42 @@ không phải xác nhận cho qua.
 
 ### Security
 
-Section **Security** (Access; yêu cầu của chủ dự án ngày 2026-11-17) gom mọi thiết lập về cách người dùng đăng nhập.
-Mọi người dùng đã đăng nhập đều đọc được; thay đổi cần permission Configure system settings, và khi không có nó, một
-dòng `View only` dưới tiêu đề nêu permission đó và không có control chỉnh sửa nào được hiển thị. Mỗi panel hiển thị
-giá trị của nó dưới dạng danh sách và sửa chúng trong một dialog (`Edit … settings…`, `Save changes`, `Cancel (Esc)`,
-câu hỏi dùng chung về thay đổi chưa lưu); một lần lưu chỉ gửi các giá trị đã thay đổi. Bản thân các quy tắc nằm ở
-PROJECT_PROFILE §20 Đăng nhập của User. Các panel, theo thứ tự:
+Section **Security** (Access; yêu cầu của chủ dự án ngày 2026-11-17) gom mọi thiết lập về cách người dùng đăng nhập. Mọi
+người dùng đã đăng nhập đều đọc được; thay đổi cần permission Configure system settings, và khi không có nó, một dòng
+`View only` dưới tiêu đề nêu permission đó và không có control chỉnh sửa nào được hiển thị. Mỗi nhóm thiết lập là một
+thẻ riêng: tiêu đề kèm một câu mô tả, một nút `Edit…` ở góc trên bên phải có tên truy cập (accessible name) nêu tên nhóm
+(ví dụ `Edit password rules…`), và các giá trị đã lưu bên dưới, mỗi giá trị có/không hiển thị bằng một status pill. Nút
+này mở dialog của nhóm (`Save changes`, `Cancel (Esc)`, câu hỏi dùng chung về thay đổi chưa lưu), và một lần lưu chỉ gửi
+các giá trị đã thay đổi. Bản thân các quy tắc nằm ở PROJECT_PROFILE §20 Đăng nhập của User. Các thẻ, theo thứ tự:
 
-- **User sign-in**, chỉ dành cho các application User và tách biệt khỏi **Worker sessions**: thời hạn đăng nhập của
-  người dùng tính theo ngày hoặc không bao giờ (ban đầu 30 ngày), số lần đăng nhập thất bại trước khi khóa (10) và
-  thời gian khóa (15 phút), và việc người dùng có phải thay mật khẩu do administrator đặt ở lần đăng nhập kế tiếp hay
-  không (On). Một thay đổi áp dụng cho các lần đăng nhập đang mở ở request kế tiếp của chúng;
-- **Remember me**: `Offer Remember me` (Off) và một lần đăng nhập được ghi nhớ kéo dài bao lâu — `Remember for (days)`
-  (1–365, 30) hoặc `Remember until the user signs out`, lựa chọn này vô hiệu hóa ô số ngày và giữ nguyên giá trị của
-  nó. Panel giải thích rằng, khi lựa chọn được đưa ra, một lần đăng nhập không chọn Remember me kết thúc khi trình
-  duyệt đóng, và một lần đăng nhập được ghi nhớ cho đến khi người dùng đăng xuất vẫn còn chừng nào PartFlow được mở ít
-  nhất một lần mỗi 400 ngày;
-- **Password rules**: độ dài mật khẩu (`6 to 256 characters`; tối thiểu và tối đa mỗi giá trị 4–256, tối thiểu không
-  bao giờ lớn hơn tối đa) và bốn công tắc, ban đầu Off — `Require a digit`, `Require a special character` (một dấu câu
-  hoặc một ký hiệu; dấu cách không tính), `Require an uppercase letter` và `Require a lowercase letter`. Panel giải
-  thích rằng các quy tắc áp dụng ở lần đặt mật khẩu kế tiếp và các mật khẩu hiện có vẫn dùng được;
-- **Two-step sign-in**: mọi con số của xác thực hai bước, mỗi số là một số nguyên trong khoảng của nó (giá trị ban đầu
-  trong ngoặc) — thời gian để hoàn tất bước thứ hai (1–60 phút, 15), số mã sai mỗi lần đăng nhập (1–20, 5), số mã sai
-  trước khi khóa (3–100, 10; thời gian khóa bằng thời gian khóa trong User sign-in), số mã gửi qua email mỗi lần đăng
-  nhập (1–10, 3), thời gian chờ giữa các mã gửi qua email (0–3600 giây, 60), số chữ số của một mã gửi qua email (6–10,
-  8), số mã khôi phục mỗi bộ (5–20, 10) và số ký tự của chúng (8–20, 12), thời gian để thiết lập một app xác thực hoặc
-  một passkey (1–60 phút, 15) và độ lệch đồng hồ cho phép (0–2 bước 30 giây, 1). Mã của app xác thực vẫn có 6 chữ số
-  và đổi mỗi 30 giây, theo chuẩn mà các app dựa vào. Panel nói rằng mã gửi qua email đi qua outgoing mail server được
-  thiết lập trong Administration → Settings → Outgoing mail server. Một thay đổi có hiệu lực từ bước đăng nhập kế tiếp.
+- **User sign-in** — `How long users stay signed in, and how many wrong passwords lock an account.` Chỉ dành cho các
+  application User và tách biệt khỏi **Worker sessions**: thời hạn đăng nhập của người dùng tính theo ngày hoặc không
+  bao giờ (ban đầu 30 ngày), số lần đăng nhập thất bại trước khi khóa (10) và thời gian khóa (15 phút), và việc người
+  dùng có phải thay mật khẩu do administrator đặt ở lần đăng nhập kế tiếp hay không (Required). Một thay đổi áp dụng cho
+  các lần đăng nhập đang mở ở request kế tiếp của chúng;
+- **Remember me** — `A Remember me checkbox on the Sign in screen keeps users signed in after they close the browser.`
+  `Offer Remember me` (Off) và một lần đăng nhập được ghi nhớ kéo dài bao lâu — `Remember for (days)` (1–365, 30) hoặc
+  `Remember until the user signs out`, lựa chọn này vô hiệu hóa ô số ngày và giữ nguyên giá trị của nó. Các công tắc
+  trong dialog giải thích rằng, khi lựa chọn được đưa ra, người dùng không đánh dấu nó sẽ bị đăng xuất khi đóng trình
+  duyệt, và một lần đăng nhập được ghi nhớ cho đến khi người dùng đăng xuất kéo dài chừng nào PartFlow được mở ít nhất
+  một lần mỗi 400 ngày;
+- **Password rules** — `What a new password must contain. Passwords already in use keep working until they are changed.`
+  Độ dài mật khẩu (`6 to 256 characters`; tối thiểu và tối đa mỗi giá trị 4–256, tối thiểu không bao giờ lớn hơn tối đa)
+  và bốn công tắc, ban đầu Off — `Require a digit`, `Require a special character` (một dấu câu hoặc một ký hiệu; dấu
+  cách không tính), `Require an uppercase letter` và `Require a lowercase letter`. Dialog nói rằng các quy tắc áp dụng
+  mỗi lần một mật khẩu được đặt: khi thiết lập lần đầu (first-run setup), với Change password, khi một administrator đặt
+  mật khẩu, và với lệnh khôi phục;
+- **Two-step sign-in** — `Limits for the extra step after the password: codes from an authenticator app, passkeys,
+  emailed codes and recovery codes.` Mọi con số của xác thực hai bước, mỗi số là một số nguyên trong khoảng của nó (giá
+  trị ban đầu trong ngoặc), chia thành bốn nhóm mà cả thẻ lẫn dialog của nó đều hiển thị: **During sign-in** — thời gian
+  để hoàn tất bước thứ hai (1–60 phút, 15), số mã sai mỗi lần đăng nhập (1–20, 5) và số mã sai trước khi khóa (3–100,
+  10); **Emailed codes** — số mã gửi qua email mỗi lần đăng nhập (1–10, 3), thời gian chờ giữa các mã gửi qua email
+  (0–3600 giây, 60) và số chữ số của một mã gửi qua email (6–10, 8); **Recovery codes** — số mã khôi phục mỗi bộ (5–20,
+  10) và số ký tự của chúng (8–20, 12); **Authenticator apps and passkeys** — thời gian để thiết lập một app xác thực
+  hoặc một passkey (1–60 phút, 15) và độ lệch đồng hồ cho phép (0–2 bước 30 giây, 1). Dialog nói rằng mã của app xác
+  thực luôn có 6 chữ số và đổi mỗi 30 giây, theo chuẩn mà các app dựa vào, và thời gian khóa bằng thời gian khóa trong
+  User sign-in. Một chú thích dưới các giá trị nói rằng mã gửi qua email đi qua outgoing mail server được thiết lập
+  trong Administration → Settings → Outgoing mail server. Một thay đổi có hiệu lực từ bước đăng nhập kế tiếp.
 
 ### Không có section Machines, Route Templates hay PartNumbers
 
@@ -2817,8 +2832,8 @@ quyền.
   là view-only: các control của nó bị ẩn và một dòng `View only` nêu permission. Server kiểm tra các permission này.
 - Badge của Worker chỉ được hiển thị cho người dùng được quản lý Workers.
 - **Bảo vệ Correction permissions.** Việc thay đổi các correction permission, permission quản lý chúng, hoặc người dùng có
-  role giữ chúng cần permission quản lý correction permission. Các correction permission trong Policies → Correction
-  permissions được sửa bằng permission đó.
+  role giữ chúng cần permission quản lý correction permission. Các correction permission trong Production rules →
+  Correction permissions được sửa bằng permission đó.
 - **Quy tắc người giữ cuối cùng.** PartFlow từ chối một thay đổi khiến không còn người dùng active nào có mật khẩu được quản
   lý người dùng và role, hoặc được quản lý correction permission.
 - Các permission chưa thao tác nào của PartFlow cần tới hiển thị `(reserved)` cạnh tên và không chọn được, trong Roles &
@@ -2883,8 +2898,8 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
   các capability mà PROJECT_PROFILE §20 liệt kê là quyền cấp ban đầu) và sửa tên của từng role cùng các permission của
   nó, nhóm thành Administration, Production master data, Work Orders, priority and reports, và Scan Station. Bốn
   correction permission (Undo recent eligible scans, Perform quantity corrections, Edit Work Order Allocation, Perform
-  authorized historical corrections) chỉ được sửa trong Policies → **Correction permissions**, dưới dạng một bảng role ×
-  permission bên dưới công tắc Undo reason.
+  authorized historical corrections) chỉ được sửa trong Production rules → **Correction permissions**, dưới dạng một
+  bảng role × permission bên dưới công tắc Undo reason.
 
 ### History archival & purge
 
@@ -4157,7 +4172,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §12.3, §12.6 và §14.3: mọi lần in nhãn dùng một tờ in không bao giờ thêm trang trắng. |
+| 2026-11-17 | uncommitted | §9: mỗi nhóm thiết lập của Security là một thẻ riêng với mô tả ngắn và nút `Edit…`, và các nhóm của sidebar thành Organization, Production setup, Production rules, Access và Data & system. |
+| 2026-11-17 | 2d7c9f0 | §12.3, §12.6 và §14.3: mọi lần in nhãn dùng một tờ in không bao giờ thêm trang trắng. |
 | 2026-11-17 | 4539a2b | §1.2 và §9: Administration → Security gom User sign-in, Remember me, Password rules và Two-step sign-in; dialog Sign in đưa ra Remember me và các dialog mật khẩu liệt kê quy tắc mật khẩu. |
 | 2026-11-17 | 4be2389 | §1.2, §4.1 và §4.13: một User có quyền quản lý Scan Station xem một station mà không cần thiết bị đã enroll, với mọi action không khả dụng và một cách để enroll thiết bị. |
 | 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` trên Machines và Part Numbers in nhiều nhãn cùng lúc từ một dialog dùng chung, và cả hai toolbar chuyển ô tìm kiếm xuống hàng riêng khi các nút không còn vừa. |

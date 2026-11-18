@@ -270,6 +270,155 @@
   font-weight: 700;
 }
 
+/* A caption over the value rows that follow it (Two-step sign-in). */
+.admin-configpreview .pcap {
+  padding: 14px 0 2px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* --- Settings cards (Security) ------------------------------------------ */
+
+/* Each group of settings is its own card, one under the other. */
+.admin-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 720px;
+}
+
+.admin-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* Title and description on the left, the Edit… button on the right; on
+   a narrow card the button moves under the text. */
+.admin-cardhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px 18px;
+  padding: 18px 20px 16px;
+}
+
+.admin-cardtitle {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.admin-cardtitle h2 {
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+.admin-cardtitle p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 60ch;
+}
+
+/* The card's compact edit control: the settings dialog it opens keeps
+   the big buttons. */
+.admin-editbtn {
+  flex: none;
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.admin-editbtn:hover:not(:disabled) {
+  border-color: var(--info-t);
+  color: var(--info-t);
+}
+
+.admin-editbtn:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+.admin-editbtn:disabled {
+  opacity: 0.45;
+}
+
+@media (pointer: coarse) {
+  .admin-editbtn {
+    min-height: var(--touch-min);
+  }
+}
+
+/* The values (or their loading and error states) under a hairline. */
+.admin-cardbody {
+  border-top: 1px solid var(--hair);
+  padding: 4px 20px 10px;
+}
+
+.admin-cardbody .state-loading {
+  padding: 12px 0 6px;
+}
+
+.admin-card .admin-configpreview {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.admin-card .admin-configpreview .prow {
+  align-items: center;
+  padding: 10px 0;
+}
+
+.admin-card .admin-configpreview .k {
+  font-size: 13.5px;
+}
+
+/* A value stays on one line; on a narrow card its label wraps. */
+.admin-card .admin-configpreview .v {
+  font-family: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.admin-cardnote {
+  border-top: 1px solid var(--hair);
+  padding: 12px 20px 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* A titled group of fields in a settings dialog (Two-step sign-in). */
+.admin-fieldgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 10px 14px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.admin-fieldgroup legend {
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+}
+
 .admin-placeholder {
   background: var(--panel);
   border: 1px dashed var(--border);

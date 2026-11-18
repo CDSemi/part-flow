@@ -11,11 +11,17 @@ import { useCloseGuard } from '../../components/close-guard';
 import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { AdminField, PolicySwitch, ServerErrorNote } from './section-widgets';
+import {
+  AdminField,
+  OnOffValue,
+  PolicySwitch,
+  ServerErrorNote,
+  SettingsCard,
+} from './section-widgets';
 
 // Administration → Security → User sign-in (application Users — never the
-// Worker Sessions of the Scan Stations, which live in Policies → Worker
-// sessions): how long a user's sign-in lasts (or that it never expires),
+// Worker Sessions of the Scan Stations, which live in Production rules →
+// Worker sessions): how long a user's sign-in lasts (or that it never expires),
 // how many failed sign-ins lock an account and for how long, and whether
 // a password an administrator set must be replaced. Administration is
 // shown only to signed-in users, who all read it; users whose role may
@@ -44,75 +50,68 @@ function parseWhole(text: string, min: number, max: number): number | null {
 
 export function SignInSettingsPanel() {
   const session = useSession();
-  return (
-    <>
-      <h2>User sign-in</h2>
-      <p className="admin-confighelp">
-        How long a user&apos;s sign-in lasts, when repeated failed sign-ins lock
-        a user&apos;s account, and whether users must replace a password an
-        administrator set.
-      </p>
-      <SignInPolicyView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
-    </>
-  );
-}
-
-function SignInPolicyView({ canEdit }: { canEdit: boolean }) {
+  const canEdit = session.can('CONFIGURE_SYSTEM_SETTINGS');
   const { status } = useConnectivity();
   const policyData = useApiData(getSignInPolicy);
   const [editing, setEditing] = useState(false);
+  const { state } = policyData;
+  const policy = state.status === 'ready' ? state.data : null;
 
-  if (policyData.state.status === 'loading') {
-    return <LoadingState label="Loading user sign-in settings" />;
-  }
-  if (policyData.state.status === 'error') {
-    return (
-      <ErrorState
-        message="The user sign-in settings could not be loaded."
-        detail={policyData.state.message}
-        onRetry={policyData.reload}
-      />
-    );
-  }
-  const policy = policyData.state.data;
   return (
-    <>
-      <div className="admin-configpreview">
-        <div className="prow">
-          <span className="k">User sign-ins expire</span>
-          <span className="v">
-            {policy.sessionExpires
-              ? `After ${policy.sessionDays} days`
-              : 'Never'}
-          </span>
-        </div>
-        <div className="prow">
-          <span className="k">Failed sign-ins before a lock</span>
-          <span className="v">{policy.lockoutAttempts}</span>
-        </div>
-        <div className="prow">
-          <span className="k">Lock duration</span>
-          <span className="v">{`${policy.lockoutMinutes} minutes`}</span>
-        </div>
-        <div className="prow">
-          <span className="k">New password at first sign-in</span>
-          <span className="v">
-            {policy.requirePasswordChange ? 'Required' : 'Not required'}
-          </span>
-        </div>
-      </div>
-      {canEdit ? (
-        <div className="row">
-          <button
-            className="bigbtn primary"
-            disabled={status !== 'connected'}
-            onClick={() => setEditing(true)}
-          >
-            Edit user sign-in settings…
-          </button>
+    <SettingsCard
+      title="User sign-in"
+      description="How long users stay signed in, and how many wrong passwords lock an account."
+      edit={
+        canEdit && policy
+          ? {
+              label: 'Edit user sign-in settings…',
+              disabled: status !== 'connected',
+              onClick: () => setEditing(true),
+            }
+          : undefined
+      }
+    >
+      {state.status === 'loading' ? (
+        <LoadingState label="Loading user sign-in settings" />
+      ) : null}
+      {state.status === 'error' ? (
+        <ErrorState
+          message="The user sign-in settings could not be loaded."
+          detail={state.message}
+          onRetry={policyData.reload}
+        />
+      ) : null}
+      {policy ? (
+        <div className="admin-configpreview">
+          <div className="prow">
+            <span className="k">User sign-ins expire</span>
+            <span className="v">
+              {policy.sessionExpires
+                ? `After ${policy.sessionDays} days`
+                : 'Never'}
+            </span>
+          </div>
+          <div className="prow">
+            <span className="k">Failed sign-ins before a lock</span>
+            <span className="v">{policy.lockoutAttempts}</span>
+          </div>
+          <div className="prow">
+            <span className="k">Lock duration</span>
+            <span className="v">{`${policy.lockoutMinutes} minutes`}</span>
+          </div>
+          <div className="prow">
+            <span className="k">New password at first sign-in</span>
+            <span className="v">
+              <OnOffValue
+                on={policy.requirePasswordChange}
+                onText="Required"
+                offText="Not required"
+              />
+            </span>
+          </div>
         </div>
       ) : null}
-      {editing ? (
+      {editing && policy ? (
         <SignInPolicyDialog
           saved={policy}
           writeBlocked={status !== 'connected'}
@@ -122,7 +121,7 @@ function SignInPolicyView({ canEdit }: { canEdit: boolean }) {
           }}
         />
       ) : null}
-    </>
+    </SettingsCard>
   );
 }
 

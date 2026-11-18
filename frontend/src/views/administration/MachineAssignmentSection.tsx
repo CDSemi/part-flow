@@ -2,7 +2,7 @@ import { SectionHeader } from './section-widgets';
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Machine assignment (Phase 13; GUI_DESIGN §9
-// Policies, PROJECT_PROFILE §8.4 / §12): a read-only policy statement
+// Production rules, PROJECT_PROFILE §8.4 / §12): a read-only policy statement
 // of the two Area ownership modes, never a Machine registry and never a
 // per-Area setting. An Area's mode follows only from whether it has
 // Machines, so there is nothing to read or write here — the Areas

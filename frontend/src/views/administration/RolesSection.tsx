@@ -52,7 +52,7 @@ import { ADMIN_SECTIONS } from './sections';
 //
 // The editor edits the four permission groups only and sends grant /
 // revoke deltas computed over those groups: the correction permissions
-// are shown read-only and edited only in Policies → Correction
+// are shown read-only and edited only in Production rules → Correction
 // permissions, so this editor never grants or revokes one and never
 // reverts a concurrent change made there.
 
@@ -145,8 +145,8 @@ export function RolesSection() {
           Each user holds one role. PartFlow checks the Administration and
           Management permissions; what an enrolled Scan Station may do follows
           the role marked Applied at Scan Stations. Correction permissions are
-          set in Policies → Correction permissions. Roles are renamed, never
-          deleted.
+          set in Production rules → Correction permissions. Roles are renamed,
+          never deleted.
         </div>
       </>
     );
@@ -355,8 +355,8 @@ function RoleDialog({
           </p>
         ) : role ? (
           <p className="admin-fieldhelp">
-            Correction permissions: {heldCorrectionLabels} — set in Policies →
-            Correction permissions.
+            Correction permissions: {heldCorrectionLabels} — set in Production
+            rules → Correction permissions.
           </p>
         ) : null}
         <ServerErrorNote message={serverError} />

@@ -23,7 +23,7 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → History archival & purge (Phase 13; GUI_DESIGN §9
-// Policies, PROJECT_PROFILE §28): the real Movement-history retention
+// Data & system, PROJECT_PROFILE §28): the real Movement-history retention
 // period — no retention period, or whole months from 12 to 1200 —
 // stored in the server's application policy
 // (`/api/policies/data-retention`), audited and re-validated by the

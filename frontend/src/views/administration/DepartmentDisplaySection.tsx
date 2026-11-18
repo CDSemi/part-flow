@@ -27,7 +27,7 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → Department display settings (Phase 13; GUI_DESIGN §9
-// Policies, PROJECT_PROFILE §21): the Production Board rotation timing
+// Department display settings, PROJECT_PROFILE §21): the Production Board rotation timing
 // of each Department — whole seconds per displayed row and the minimum
 // page dwell — configured per Department, never globally. Stored on the
 // Department (`PATCH /api/departments/{id}`), audited and re-validated

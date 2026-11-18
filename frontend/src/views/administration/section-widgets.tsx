@@ -1,13 +1,14 @@
+import { useId } from 'react';
 import type { ReactNode } from 'react';
 
 import type { Permission } from '../../api/roles';
 import { PERMISSION_LABELS } from './permissions';
 
 // Small shared presentation pieces of the Administration sections —
-// the section header row, the view-only note, the table + editor form
-// primitives, the status pill, the policy switch and its read-only
-// form. Components only (React Fast Refresh), no data fetching and no
-// business rules.
+// the section header row, the view-only note, the settings card, the
+// table + editor form primitives, the status pill, the policy switch
+// and its read-only form. Components only (React Fast Refresh), no data
+// fetching and no business rules.
 
 /**
  * One section's heading row: title, subtitle, and the section-owned
@@ -46,6 +47,71 @@ export function ViewOnlyNote({ permission }: { permission: Permission }) {
       View only — changing this needs the {PERMISSION_LABELS[permission]}{' '}
       permission.
     </p>
+  );
+}
+
+/**
+ * One group of settings as its own card (Administration → Security):
+ * the title with a one-sentence description, the group's `Edit…` button
+ * at the top right, then the stored values (or their loading or error
+ * state) and an optional footnote. The button's accessible name names
+ * the group (`Edit password rules…`); it is absent for a user who may
+ * not change the settings and until the values have loaded.
+ */
+export function SettingsCard({
+  title,
+  description,
+  edit,
+  note,
+  children,
+}: {
+  title: string;
+  description: ReactNode;
+  edit?: { label: string; disabled: boolean; onClick: () => void };
+  /** A short line under the values. */
+  note?: ReactNode;
+  children: ReactNode;
+}) {
+  const titleId = useId();
+  return (
+    <section className="admin-card" aria-labelledby={titleId}>
+      <div className="admin-cardhead">
+        <div className="admin-cardtitle">
+          <h2 id={titleId}>{title}</h2>
+          <p>{description}</p>
+        </div>
+        {edit ? (
+          <button
+            type="button"
+            className="admin-editbtn"
+            aria-label={edit.label}
+            disabled={edit.disabled}
+            onClick={edit.onClick}
+          >
+            Edit…
+          </button>
+        ) : null}
+      </div>
+      <div className="admin-cardbody">{children}</div>
+      {note ? <p className="admin-cardnote">{note}</p> : null}
+    </section>
+  );
+}
+
+/** A yes/no value of a settings card, as the shared status pill. */
+export function OnOffValue({
+  on,
+  onText = 'On',
+  offText = 'Off',
+}: {
+  on: boolean;
+  onText?: string;
+  offText?: string;
+}) {
+  return (
+    <span className={`pillnav ${on ? 'on' : 'off'}`}>
+      {on ? onText : offText}
+    </span>
   );
 }
 

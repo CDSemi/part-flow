@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 
 import { ApiError } from '../../api/client';
 import {
@@ -15,7 +15,7 @@ import { useCloseGuard } from '../../components/close-guard';
 import { UnsavedChangesDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
-import { AdminField, ServerErrorNote } from './section-widgets';
+import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
 // Administration → Security → Two-step sign-in (Phase 17, owner decisions
 // of 2026-11-17): every number of two-step sign-in — how long a second
@@ -28,7 +28,15 @@ import { AdminField, ServerErrorNote } from './section-widgets';
 // (the server merges them); the server validates and applies every value
 // from the next sign-in step.
 
+/** The groups of the settings, in the card and in the dialog. */
+type SettingGroup =
+  | 'During sign-in'
+  | 'Emailed codes'
+  | 'Recovery codes'
+  | 'Authenticator apps and passkeys';
+
 interface SettingSpec {
+  group: SettingGroup;
   /** The preview row. */
   label: string;
   /** The form field, with its unit. */
@@ -48,6 +56,7 @@ const seconds = (value: number) =>
 
 const SPECS: Record<TwoStepSetting, SettingSpec> = {
   windowMinutes: {
+    group: 'During sign-in',
     label: 'Time to finish the second step',
     field: 'Time to finish the second step (minutes)',
     min: 1,
@@ -57,6 +66,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The time to finish the second step must be a whole number of minutes from 1 to 60.',
   },
   maxCodes: {
+    group: 'During sign-in',
     label: 'Wrong codes per sign-in',
     field: 'Wrong codes per sign-in',
     min: 1,
@@ -66,6 +76,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The wrong codes one sign-in may take must be a whole number from 1 to 20.',
   },
   lockoutCodes: {
+    group: 'During sign-in',
     label: 'Wrong codes before a lock',
     field: 'Wrong codes before a lock',
     min: 3,
@@ -75,6 +86,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The wrong codes before a lock must be a whole number from 3 to 100.',
   },
   emailCodes: {
+    group: 'Emailed codes',
     label: 'Emailed codes per sign-in',
     field: 'Emailed codes per sign-in',
     min: 1,
@@ -84,6 +96,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The codes one sign-in may email must be a whole number from 1 to 10.',
   },
   emailIntervalSeconds: {
+    group: 'Emailed codes',
     label: 'Wait between emailed codes',
     field: 'Wait between emailed codes (seconds)',
     min: 0,
@@ -93,6 +106,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The wait between two emailed codes must be a whole number of seconds from 0 to 3600.',
   },
   emailCodeDigits: {
+    group: 'Emailed codes',
     label: 'Digits of an emailed code',
     field: 'Digits of an emailed code',
     min: 6,
@@ -101,6 +115,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
     error: 'The digits of an emailed code must be a whole number from 6 to 10.',
   },
   recoveryCodes: {
+    group: 'Recovery codes',
     label: 'Recovery codes per set',
     field: 'Recovery codes per set',
     min: 5,
@@ -109,6 +124,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
     error: 'The number of recovery codes must be a whole number from 5 to 20.',
   },
   recoveryCodeLength: {
+    group: 'Recovery codes',
     label: 'Characters of a recovery code',
     field: 'Characters of a recovery code',
     min: 8,
@@ -118,6 +134,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The characters of a recovery code must be a whole number from 8 to 20.',
   },
   setupMinutes: {
+    group: 'Authenticator apps and passkeys',
     label: 'Time to set up an app or a passkey',
     field: 'Time to set up an app or a passkey (minutes)',
     min: 1,
@@ -127,6 +144,7 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The time to finish setting up an authenticator app or a passkey must be a whole number of minutes from 1 to 60.',
   },
   clockDriftSteps: {
+    group: 'Authenticator apps and passkeys',
     label: 'Clock drift allowed',
     field: 'Clock drift allowed (30-second steps)',
     min: 0,
@@ -136,6 +154,16 @@ const SPECS: Record<TwoStepSetting, SettingSpec> = {
       'The clock drift allowed must be a whole number of 30-second steps from 0 to 2.',
   },
 };
+
+/** The settings by group, in the order of TWO_STEP_SETTINGS. */
+const GROUPS = TWO_STEP_SETTINGS.reduce<
+  { group: SettingGroup; settings: TwoStepSetting[] }[]
+>((groups, setting) => {
+  const last = groups.at(-1);
+  if (last?.group === SPECS[setting].group) last.settings.push(setting);
+  else groups.push({ group: SPECS[setting].group, settings: [setting] });
+  return groups;
+}, []);
 
 const UNKNOWN_OUTCOME =
   'The server did not answer — the settings may or may not have been saved. Close this window to reload them before trying again.';
@@ -150,63 +178,56 @@ function parseWhole(text: string, min: number, max: number): number | null {
 
 export function TwoStepSettingsPanel() {
   const session = useSession();
-  return (
-    <>
-      <h2>Two-step sign-in</h2>
-      <p className="admin-confighelp">
-        The numbers of two-step sign-in: how long and how many tries the second
-        step allows, emailed codes, recovery codes and how far an authenticator
-        app&apos;s clock may be off. Authenticator app codes always have 6
-        digits and change every 30 seconds — the standard every app uses. A lock
-        lasts as long as User sign-in says. Emailed codes are sent through the
-        outgoing mail server, set up in Administration → Settings → Outgoing
-        mail server; without one, no code can be emailed.
-      </p>
-      <TwoStepPolicyView canEdit={session.can('CONFIGURE_SYSTEM_SETTINGS')} />
-    </>
-  );
-}
-
-function TwoStepPolicyView({ canEdit }: { canEdit: boolean }) {
+  const canEdit = session.can('CONFIGURE_SYSTEM_SETTINGS');
   const { status } = useConnectivity();
   const policyData = useApiData(getTwoStepPolicy);
   const [editing, setEditing] = useState(false);
+  const { state } = policyData;
+  const policy = state.status === 'ready' ? state.data : null;
 
-  if (policyData.state.status === 'loading') {
-    return <LoadingState label="Loading two-step sign-in settings" />;
-  }
-  if (policyData.state.status === 'error') {
-    return (
-      <ErrorState
-        message="The two-step sign-in settings could not be loaded."
-        detail={policyData.state.message}
-        onRetry={policyData.reload}
-      />
-    );
-  }
-  const policy = policyData.state.data;
   return (
-    <>
-      <div className="admin-configpreview">
-        {TWO_STEP_SETTINGS.map((setting) => (
-          <div className="prow" key={setting}>
-            <span className="k">{SPECS[setting].label}</span>
-            <span className="v">{SPECS[setting].show(policy[setting])}</span>
-          </div>
-        ))}
-      </div>
-      {canEdit ? (
-        <div className="row">
-          <button
-            className="bigbtn primary"
-            disabled={status !== 'connected'}
-            onClick={() => setEditing(true)}
-          >
-            Edit two-step sign-in settings…
-          </button>
+    <SettingsCard
+      title="Two-step sign-in"
+      description="Limits for the extra step after the password: codes from an authenticator app, passkeys, emailed codes and recovery codes."
+      edit={
+        canEdit && policy
+          ? {
+              label: 'Edit two-step sign-in settings…',
+              disabled: status !== 'connected',
+              onClick: () => setEditing(true),
+            }
+          : undefined
+      }
+      note="Emailed codes are sent through the outgoing mail server, set up in Administration → Settings → Outgoing mail server."
+    >
+      {state.status === 'loading' ? (
+        <LoadingState label="Loading two-step sign-in settings" />
+      ) : null}
+      {state.status === 'error' ? (
+        <ErrorState
+          message="The two-step sign-in settings could not be loaded."
+          detail={state.message}
+          onRetry={policyData.reload}
+        />
+      ) : null}
+      {policy ? (
+        <div className="admin-configpreview">
+          {GROUPS.map(({ group, settings }) => (
+            <Fragment key={group}>
+              <div className="pcap">{group}</div>
+              {settings.map((setting) => (
+                <div className="prow" key={setting}>
+                  <span className="k">{SPECS[setting].label}</span>
+                  <span className="v">
+                    {SPECS[setting].show(policy[setting])}
+                  </span>
+                </div>
+              ))}
+            </Fragment>
+          ))}
         </div>
       ) : null}
-      {editing ? (
+      {editing && policy ? (
         <TwoStepPolicyDialog
           saved={policy}
           writeBlocked={status !== 'connected'}
@@ -216,7 +237,7 @@ function TwoStepPolicyView({ canEdit }: { canEdit: boolean }) {
           }}
         />
       ) : null}
-    </>
+    </SettingsCard>
   );
 }
 
@@ -287,30 +308,40 @@ function TwoStepPolicyDialog({
   return (
     <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
+      <div className="sub">
+        Authenticator app codes always have 6 digits and change every 30 seconds
+        — the standard every app uses. A lock lasts as long as the lock duration
+        under User sign-in.
+      </div>
       <div className="admin-form">
-        {TWO_STEP_SETTINGS.map((setting) => (
-          <div key={setting}>
-            <AdminField label={SPECS[setting].field}>
-              <input
-                className="field mono"
-                type="number"
-                min={SPECS[setting].min}
-                max={SPECS[setting].max}
-                step={1}
-                value={texts[setting]}
-                disabled={busy}
-                onChange={(event) => {
-                  const text = event.target.value;
-                  setTexts((current) => ({ ...current, [setting]: text }));
-                }}
-              />
-            </AdminField>
-            {values[setting] === null ? (
-              <div className="err" role="alert">
-                {SPECS[setting].error}
+        {GROUPS.map(({ group, settings }) => (
+          <fieldset key={group} className="admin-fieldgroup">
+            <legend>{group}</legend>
+            {settings.map((setting) => (
+              <div key={setting}>
+                <AdminField label={SPECS[setting].field}>
+                  <input
+                    className="field mono"
+                    type="number"
+                    min={SPECS[setting].min}
+                    max={SPECS[setting].max}
+                    step={1}
+                    value={texts[setting]}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const text = event.target.value;
+                      setTexts((current) => ({ ...current, [setting]: text }));
+                    }}
+                  />
+                </AdminField>
+                {values[setting] === null ? (
+                  <div className="err" role="alert">
+                    {SPECS[setting].error}
+                  </div>
+                ) : null}
               </div>
-            ) : null}
-          </div>
+            ))}
+          </fieldset>
         ))}
         <ServerErrorNote message={serverError} />
       </div>
