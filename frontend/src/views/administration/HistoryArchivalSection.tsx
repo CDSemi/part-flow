@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { ApiError } from '../../api/client';
 import { listArchiveRuns } from '../../api/history-archive';
 import { getRetentionPolicy, updateRetentionPolicy } from '../../api/policies';
-import type { RetentionPolicy } from '../../api/policies';
+import type { RetentionPatch, RetentionPolicy } from '../../api/policies';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import { useApiData } from '../../api/use-api-data';
 import type { ApiData } from '../../api/use-api-data';
@@ -15,8 +15,14 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { ErrorState, LoadingState } from '../../components/view-states';
 import { ArchivePreviewCard } from './ArchivePreviewCard';
 import { ArchiveRunsCard } from './ArchiveRunsCard';
+import { AutomaticRunsCard } from './AutomaticRunsCard';
 import { DeletionRequestsCard } from './DeletionRequestsCard';
-import { formatRetentionPeriod } from './retention-period';
+import {
+  formatRetentionPeriod,
+  parseWhole,
+  SETTINGS_OUTCOME_UNKNOWN,
+  WHOLE_NUMBER_ERROR,
+} from './retention-period';
 import {
   AdminField,
   SectionHeader,
@@ -27,19 +33,27 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → History archival & purge (Phase 16, archival design B
-// steps 1 and 2; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings of the
-// Movement-history archival (`/api/policies/data-retention` — the
+// steps 1, 2 and 4; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings of
+// the Movement-history archival (`/api/policies/data-retention` — the
 // retention period, the shortest allowed period, the Start minute of the
 // server's archival job, the preview time limit, the wait limit and the
-// purge batch limits), the preview of what a run would archive at a
-// cutoff and the request of a run, and the table of runs with Cancel and
-// Confirm off-host copy. A run exports the history to archive files and,
-// after the off-host copy and a pre-purge backup, purges it from the
-// database. Every change needs the Run history archival and purge
-// permission (the server checks it); every signed-in user reads the
-// settings and the runs, with one view-only line under the header when
-// the user may not change them. The server validates every value and
-// owns every rule: the section shows its answers as given.
+// purge batch limits; the automatic runs have a card of their own), the
+// preview of what a run would archive at a cutoff and the request of a
+// run, and the table of runs with Approve, Dismiss, Cancel and Confirm
+// off-host copy. A run exports the history to archive files and, after
+// the off-host copy and a pre-purge backup, purges it from the database.
+// Every change needs the Run history archival and purge permission (the
+// server checks it); every signed-in user reads the settings and the
+// runs, with one view-only line under the header when the user may not
+// change them. The server validates every value and owns every rule: the
+// section shows its answers as given.
+//
+// The settings cards and the Preview stand in two columns when two fit,
+// each column a stack of its own: Retention and schedule with Automatic
+// runs under it, and the Preview beside them (without the permission
+// there is no Preview, and Automatic runs takes its place). A card that
+// grows — the Preview's result — so never moves a card of the other
+// column.
 //
 // Below the runs, the Permanent deletion requests card (archival design
 // D17, build step 3) lists the requests of Delete permanently… with
@@ -65,42 +79,56 @@ export function HistoryArchivalSection() {
   const runsData = useApiData(listArchiveRuns);
   const policy =
     policyData.state.status === 'ready' ? policyData.state.data : null;
+  const automaticRuns = (
+    <AutomaticRunsCard
+      policyData={policyData}
+      canWrite={canWrite}
+      writeBlocked={writeBlocked}
+    />
+  );
 
   return (
     <>
       <SectionHeader title="History archival & purge" subtitle={SUBTITLE} />
       {canWrite ? null : <ViewOnlyNote permission={PERMISSION} />}
-      <div className="admin-cards admin-cards-two">
-        <SettingsCard
-          title="Retention and schedule"
-          description="How long Movement history stays in the database, when the server's archival job does its work, and how much it purges at a time."
-          edit={
-            canWrite && policy
-              ? {
-                  label: 'Edit retention and schedule…',
-                  disabled: writeBlocked,
-                  onClick: () => setEditing(true),
-                }
-              : undefined
-          }
-        >
-          <RetentionSettingsBody
-            policyData={policyData}
-            editing={editing}
-            writeBlocked={writeBlocked}
-            onClose={(wrote) => {
-              setEditing(false);
-              if (wrote) policyData.reload();
-            }}
-          />
-        </SettingsCard>
-        {canWrite ? (
-          <ArchivePreviewCard
-            previewSeconds={policy?.previewSeconds ?? null}
-            writeBlocked={writeBlocked}
-            onRunsChanged={runsData.reload}
-          />
-        ) : null}
+      <div className="admin-cardcolumns">
+        <div className="admin-cardcolumn">
+          <SettingsCard
+            title="Retention and schedule"
+            description="How long Movement history stays in the database, when the server's archival job does its work, and how much it purges at a time."
+            edit={
+              canWrite && policy
+                ? {
+                    label: 'Edit retention and schedule…',
+                    disabled: writeBlocked,
+                    onClick: () => setEditing(true),
+                  }
+                : undefined
+            }
+          >
+            <RetentionSettingsBody
+              policyData={policyData}
+              editing={editing}
+              writeBlocked={writeBlocked}
+              onClose={(wrote) => {
+                setEditing(false);
+                if (wrote) policyData.reload();
+              }}
+            />
+          </SettingsCard>
+          {canWrite ? automaticRuns : null}
+        </div>
+        <div className="admin-cardcolumn">
+          {canWrite ? (
+            <ArchivePreviewCard
+              previewSeconds={policy?.previewSeconds ?? null}
+              writeBlocked={writeBlocked}
+              onRunsChanged={runsData.reload}
+            />
+          ) : (
+            automaticRuns
+          )}
+        </div>
       </div>
       <div className="admin-cards admin-cards-stack">
         <ArchiveRunsCard
@@ -201,18 +229,6 @@ function RetentionSettingsBody({
   );
 }
 
-const WHOLE_NUMBER_ERROR = 'Enter a whole number.';
-const UNKNOWN_OUTCOME =
-  'The server did not answer — the settings may or may not have been saved. Close this window to reload them before trying again.';
-
-/** The whole number in `text`, else null (never rounded; the server
- * checks the range and answers its own message). */
-function parseWhole(text: string): number | null {
-  if (text.trim() === '') return null;
-  const value = Number(text);
-  return Number.isInteger(value) ? value : null;
-}
-
 function RetentionSettingsDialog({
   saved,
   writeBlocked,
@@ -264,8 +280,15 @@ function RetentionSettingsDialog({
     batchPartNumbers === null;
   const shortestChanged =
     shortest !== null && shortest !== saved.shortestRetentionMonths;
+  // A cleared or a longer period while the approval step of automatic runs
+  // is off: the server stops a run started without approval whose cutoff
+  // the retention period no longer allows, before that run purges.
+  const stopsRunWithoutApproval =
+    !saved.approvalRequired &&
+    saved.retentionPeriodMonths !== null &&
+    (!keepPeriod || (period !== null && period > saved.retentionPeriodMonths));
   // Only the valid settings whose value differs from the stored ones.
-  const patch: Partial<Omit<RetentionPolicy, 'updatedAt'>> = {
+  const patch: RetentionPatch = {
     ...(!periodInvalid && period !== saved.retentionPeriodMonths
       ? { retentionPeriodMonths: period }
       : {}),
@@ -312,7 +335,7 @@ function RetentionSettingsDialog({
     } catch (error) {
       setServerError(
         writeOutcomeUnknown(error) || !(error instanceof ApiError)
-          ? UNKNOWN_OUTCOME
+          ? SETTINGS_OUTCOME_UNKNOWN
           : error.message,
       );
       setBusy(false);
@@ -371,6 +394,12 @@ function RetentionSettingsDialog({
             Nothing is eligible for archival without a retention period.
           </p>
         )}
+        {stopsRunWithoutApproval ? (
+          <p className="admin-fieldhelp">
+            A run started without approval stops before it purges any history
+            when the retention period no longer allows its cutoff.
+          </p>
+        ) : null}
         <AdminField label="Shortest allowed period (months)">
           <input
             className="field mono"
@@ -463,8 +492,9 @@ function RetentionSettingsDialog({
           </div>
         ) : (
           <p className="admin-fieldhelp">
-            When a run waits longer than this for its off-host copy to be
-            confirmed, the server's monitoring check reports it.
+            When a run waits longer than this for its approval or for its
+            off-host copy to be confirmed, the server's monitoring check reports
+            it.
           </p>
         )}
         <AdminField label="Movements per purge batch">

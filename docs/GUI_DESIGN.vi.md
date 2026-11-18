@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `d094f5e` cộng các thay đổi chưa commit ngày 2026-11-18.
+> Đồng bộ với bản tiếng Anh tại commit `1874636` cộng các thay đổi chưa commit ngày 2026-11-18.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -2887,7 +2887,8 @@ quyền.
   Station đã enroll được làm gì.
 - **History archival & purge** có permission riêng, **Run history archival and purge**, ban đầu được cấp cho role
   Administrator và cho Super User (role giữ mọi permission); Configure system settings không bảo vệ section này
-  (PROJECT_PROFILE §20).
+  (PROJECT_PROFILE §20). Người giữ nó xem preview, yêu cầu, phê duyệt, bác bỏ và hủy các lần chạy, xác nhận bản sao
+  ngoài server và thay đổi các thiết lập của section, kể cả việc tắt bước phê duyệt của các lần chạy tự động.
 - **Delete Work Orders and Part Numbers permanently** cũng là một permission riêng, ban đầu chỉ Super User giữ (role giữ
   mọi permission); role Administrator không giữ nó (PROJECT_PROFILE §20). Chỉ người giữ nó mới thấy **Delete
   permanently…** trong Work Order Details (§11.2) và trong dialog Part Number của Management → Part Numbers (§14.2), cùng
@@ -2957,16 +2958,21 @@ thành một thực thể (§4.12, PROJECT_PROFILE §8.13).
 
 History archival & purge xuất lịch sử Movement cũ ra các file archive trên server rồi purge nó khỏi database
 (PROJECT_PROFILE §28 Administrative Archival and Purge): sau bản sao archive ngoài server và một pre-purge backup, một
-lần chạy xóa các Movement đã archive theo từng batch gồm các component trọn vẹn. Sau đó Tracking hiển thị một mục đã
-archive, `History archived in run N`, cho mỗi flow đã archive (§7.2), và các command đã archive không thể undo được nữa
-(§4.5). Các lần chạy đã kết thúc trước khi lần chạy có purge giữ kết quả `Exported to files; nothing deleted.` Mọi người
-dùng đã đăng nhập đều đọc được các thiết lập và các lần chạy. Preview, việc yêu cầu một lần chạy và mọi thay đổi cần
-permission **Run history archival and purge**; không có nó thì một dòng `View only` nêu permission đó, thẻ Preview
-không hiển thị và không có thao tác nào trên các thiết lập hay các lần chạy được cung cấp. Section theo quy tắc thẻ, với
-tối đa hai cột: thẻ **Retention and schedule** và thẻ **Preview** nằm cạnh nhau theo hai cột rộng bằng nhau khi đủ chỗ
-cho hai cột (mỗi thẻ rộng ít nhất 25rem, bề rộng mà nhãn và giá trị rộng nhất của nó vẫn nằm trên một dòng), nếu không
-thì một cột rộng hết trang; rồi thẻ **Runs** rộng hết trang và, chỉ với người giữ **Delete Work Orders and Part Numbers
-permanently**, thẻ **Permanent deletion requests** bên dưới nó, cũng rộng hết trang.
+lần chạy xóa các Movement đã archive theo từng batch gồm các component trọn vẹn. Người giữ permission yêu cầu một lần
+chạy; khi **Automatic runs** bật, job archival của server cũng tự tạo một lần chạy khi lịch sử vượt một giới hạn, và
+hoặc đề xuất nó để một người giữ permission phê duyệt hay bác bỏ, hoặc, khi bước phê duyệt đã tắt, bắt đầu nó ngay theo
+ủy quyền thường trực (standing authorization) của người đã tắt bước đó. Sau đó Tracking hiển thị một mục đã archive,
+`History archived in run N`, cho mỗi flow đã archive (§7.2), và các command đã archive không thể undo được nữa (§4.5).
+Các lần chạy đã kết thúc trước khi lần chạy có purge giữ kết quả `Exported to files; nothing deleted.` Mọi người dùng đã
+đăng nhập đều đọc được các thiết lập và các lần chạy. Preview, việc yêu cầu một lần chạy và mọi thay đổi cần permission
+**Run history archival and purge**; không có nó thì một dòng `View only` nêu permission đó, thẻ Preview không hiển thị
+và không có thao tác nào trên các thiết lập hay các lần chạy được cung cấp. Section theo quy tắc thẻ, với tối đa hai
+cột, mỗi cột là một chồng thẻ riêng, để một thẻ lớn lên (kết quả của Preview) không bao giờ làm dịch chuyển một thẻ ở
+cột kia: **Retention and schedule** với **Automatic runs** bên dưới, và **Preview** bên cạnh (không có permission thì
+Automatic runs đứng ở chỗ của Preview), theo hai cột rộng bằng nhau khi đủ chỗ cho hai cột (mỗi cột rộng ít nhất
+25rem, bề rộng mà nhãn và giá trị rộng nhất của nó vẫn nằm trên một dòng), nếu không thì một cột rộng hết trang; rồi thẻ
+**Runs** rộng hết trang và, chỉ với người giữ **Delete Work Orders and Part Numbers permanently**, thẻ **Permanent
+deletion requests** bên dưới nó, cũng rộng hết trang.
 
 - **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
   its work, and how much it purges at a time.` Thẻ hiển thị **Retention period** (ban đầu `24 months (2 years)`;
@@ -2975,15 +2981,46 @@ permanently**, thẻ **Permanent deletion requests** bên dưới nó, cũng r�
   waiting run after** (7 ngày), **Movements per purge batch** (ban đầu 50,000) và **Part Numbers per purge batch** (ban
   đầu 20). Trường `Preview time limit (seconds)` của dialog giải thích: `Keep it below the wait of every proxy in front
   of PartFlow: through Cloudflare a request ends after 100 seconds.` Trường `Report a waiting run after (days)` giải
-  thích: `When a run waits longer than this for its off-host copy to be confirmed, the server's monitoring check
-  reports it.` (Một lần chạy gần nhất bị thất bại luôn được báo, bất kể thiết lập này.) Trường
+  thích: `When a run waits longer than this for its approval or for its off-host copy to be confirmed, the server's
+  monitoring check reports it.` (Một lần chạy gần nhất bị thất bại luôn được báo, bất kể thiết lập này.) Trường
   `Movements per purge batch` giải thích: `The purge deletes whole components, in batches of at most this many
   Movements; a larger component is a batch of its own.` Trường `Part Numbers per purge batch` giải thích: `A batch
   locks at most this many Part Numbers; work on them waits until the batch ends.` `Edit retention and schedule…` mở
   dialog: `No retention period` hoặc `Keep a set period of history` kèm số tháng, rồi một trường cho mỗi giá trị còn
-  lại của thẻ. Thay đổi shortest allowed period thêm một trường reason bắt buộc. Lưu chỉ gửi các giá trị đã đổi; server
-  kiểm tra mọi khoảng giá trị và thông báo của nó được hiển thị trong dialog, còn dialog chỉ tự từ chối một giá trị
-  không phải số nguyên.
+  lại của thẻ. Thay đổi shortest allowed period thêm một trường reason bắt buộc. Khi bước phê duyệt của các lần chạy
+  tự động tắt, một retention period dài hơn hoặc `No retention period` thêm dòng `A run started without approval stops
+  before it purges any history when the retention period no longer allows its cutoff.` Lưu chỉ gửi các giá trị đã đổi;
+  server kiểm tra mọi khoảng giá trị và thông báo của nó được hiển thị trong dialog, còn dialog chỉ tự từ chối một giá
+  trị không phải số nguyên.
+- **Automatic runs** — `When the server's archival job starts a run by itself, and whether a person approves each run
+  first.` Thẻ hiển thị **Automatic runs** (`On` hoặc `Off`, ban đầu Off); **Measure**, thước đo quyết định khi nào cần
+  một lần chạy — `Live Movement rows` (ban đầu), `Age of retained history` hoặc `Database size` — và **Limit**, giới hạn
+  riêng của thước đo đó (ban đầu `5,000,000 rows`, `1 month older than the cutoff` và `20 GiB`); **Days between
+  automatic runs** (ban đầu `7 days`); và **Approval step** (ban đầu `On`). Khi bước phê duyệt tắt, một dòng **Standing
+  authorization** hiển thị `Valid` hoặc `Not valid`, và một dòng bên dưới các giá trị nói ai đã cấp nó, khi nào và vì
+  sao (`Given by Ann Admin on Nov 18, 2026 09:12. Reason: …`); khi nó không còn hiệu lực, lời giải thích của server đi
+  theo sau, đúng như server diễn đạt (một lần chạy theo nó đã thất bại vì User đã tắt bước đó không còn chạy được lần
+  chạy ấy, hoặc User đó không còn active hay không còn giữ permission; không lần chạy tự động nào được tạo cho đến khi
+  có người lưu lại thiết lập phê duyệt). Chú thích cuối thẻ nói `The archival job checks the measure in its hourly
+  work; a run it proposes waits in the Runs table until someone with Run history archival and purge approves or
+  dismisses it.` `Edit automatic runs…` mở dialog: công tắc `Automatic runs`, `Measure`
+  và trường giới hạn của thước đo đang chọn — `Live Movement rows above`, `Retained history older than the cutoff by
+  more than (months)` hoặc `Database size above (GiB)`, mỗi thước đo giữ giới hạn riêng của nó, với một dòng dưới trường
+  nói khi nào cần một lần chạy (0 nghĩa là bất cứ khi nào có dữ liệu đủ điều kiện) —, `Days between automatic runs`
+  (tính từ lúc kết thúc lần chạy tự động gần nhất, kể cả một lần đã bị bác bỏ hoặc thất bại; các lần chạy được yêu cầu
+  thủ công không tính), và công tắc `Approval step`. Tắt bước phê duyệt mở một panel tông cảnh báo nói rõ `Without the
+  approval step, automatic runs archive and purge Movement history without anyone approving them first.`, nói rằng ủy
+  quyền thường trực được ghi dưới tên người dùng kèm lý do của họ và rằng các lần chạy tự động dừng lại nếu người dùng
+  đó bị deactivate hoặc mất permission, và hỏi một lý do bắt buộc cùng xác nhận gõ lại `RUN WITHOUT APPROVAL`. Khi bước
+  đó vẫn tắt, dialog hiển thị ủy quyền thường trực cùng vấn đề của nó, và `Renew the standing authorization under my
+  name` mở cùng panel đó. Một thay đổi làm dừng một lần chạy bắt đầu không cần phê duyệt sẽ nói điều đó ngay nơi nó được
+  thực hiện: bật lại bước phê duyệt ghi `Switching the approval step on withdraws the standing authorization: a run
+  started without approval stops before it purges any history, and each later automatic run waits for approval.`, và
+  tắt các lần chạy tự động khi bước phê duyệt đang tắt ghi `Switching automatic runs off also stops a run started
+  without approval before it purges any history.` Lưu chỉ gửi các giá trị đã đổi, và chỉ gửi lý do cùng xác nhận đúng
+  như đã gõ khi bước đó bị tắt hoặc ủy quyền được gia hạn; server kiểm tra mọi khoảng giá trị, xác nhận (không phân biệt
+  chữ hoa thường hay khoảng trắng) và lý do, và thông báo của nó được hiển thị trong dialog, còn dialog chỉ tự từ chối
+  một giá trị không phải số nguyên.
 - **Preview** — `What a run would archive and purge at a cutoff date, before you request it.` Trường **Cutoff date**
   ban đầu để trống, nghĩa là hỏi ngày mới nhất mà retention period cho phép; một lần chạy archive rồi purge lịch sử
   trước đầu ngày đó. Chú thích cuối thẻ nói điều xảy ra sau đó: `After the off-host copy and a pre-purge backup, a run
@@ -3000,20 +3037,35 @@ permanently**, thẻ **Permanent deletion requests** bên dưới nó, cũng r�
   files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database.`, tiếp theo là
   câu thứ hai trong chú thích cuối của thẻ Preview. `Request run` gửi reason và cutoff date đã preview; server kiểm tra
   lại các con số (tối đa preview time limit) và lưu chúng cùng lần chạy, rồi lần chạy chờ job. Một lần từ chối (một lần
-  chạy khác vẫn đang mở, không có gì đủ điều kiện) ở lại trong dialog và reason được giữ. Khi yêu cầu không nhận được
+  chạy khác vẫn đang mở, kể cả một lần chạy được đề xuất đang chờ phê duyệt, hoặc không có gì đủ điều kiện) ở lại trong
+  dialog và reason được giữ. Khi yêu cầu không nhận được
   câu trả lời rõ ràng (không có câu trả lời, hoặc lỗi gateway hay timeout như 502, 504 hoặc 524), dialog đóng lại, danh
   sách lần chạy được tải lại, và thẻ nói rằng lần chạy có thể đã hoặc chưa được yêu cầu và phải kiểm tra bảng các lần
   chạy trước khi yêu cầu lại.
 - **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server and, after the
   off-host copy and a pre-purge backup, purges it from the database.` Chú thích cuối của thẻ nói một lần
-  `Archived commands can no longer be undone.` Một nút `Reload`, rồi các lần chạy, mới nhất trước: số của lần chạy;
-  trạng thái bằng lời thường dưới dạng status pill (`Requested — waiting for the job`, `Running`, `Waiting for the
-  off-host copy`, `Copy confirmed — waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing
-  eligible`, `Cancelled`, `Failed`); cutoff date; các con số; ai đã yêu cầu, kèm reason; các mốc thời gian; tên và dung
-  lượng thư mục archive, kèm pre-purge backup và purge receipt; và kết quả hoặc lý do thất bại. Kết quả của một lần chạy
-  đã hoàn tất ghi `Archived and purged.`, `Nothing purged (every component changed).` hoặc, với một lần chạy đã kết
-  thúc trước khi lần chạy có purge, `Exported to files; nothing deleted.` Bảng rộng giữ một lần chạy điển hình trong
-  khoảng năm dòng:
+  `Archived commands can no longer be undone.` Một nút `Reload`, rồi các lần chạy, mới nhất trước, trong sáu cột để bảng
+  vẫn nằm gọn trong thẻ của nó xuống tới một cửa sổ 1024 px bên cạnh thanh bên của Administration:
+  - **Run**: số của lần chạy;
+  - **State**: trạng thái bằng lời thường dưới dạng status pill (`Proposed — waiting for approval`, `Approved —
+    waiting for the job` — cả một lần chạy được yêu cầu, vì yêu cầu là sự phê duyệt của nó —, `Running`, `Waiting for
+    the off-host copy`, `Copy confirmed — waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing
+    eligible`, `Dismissed`, `Cancelled`, `Failed`), với các thao tác của lần chạy bên dưới;
+  - **Cutoff and counts**: cutoff date, rồi các con số;
+  - **Requested by**: ai đã yêu cầu lần chạy, kèm reason. Một lần chạy tự động không có người yêu cầu: nó ghi
+    `Automatic` kèm lý do mà job đưa ra (ví dụ `Live Movement rows 5,120,334 above the limit 5,000,000; retention 24
+    months`), rồi người phê duyệt cùng thời điểm và lý do riêng của người phê duyệt (`Approved by Ann Admin, Nov 18,
+    2026 09:12`), hoặc, với một lần chạy bắt đầu theo ủy quyền thường trực, `Started without approval (authorization of
+    <name>, <date>)`;
+  - **Times**: các mốc thời gian của lần chạy;
+  - **Result**: kết quả hoặc lý do thất bại đúng như server đưa ra — kể cả khi job dừng lần chạy trước khi purge vì
+    User có thẩm quyền với nó (người yêu cầu, người phê duyệt hoặc User của ủy quyền thường trực) không còn được chạy
+    nó, hoặc vì một thay đổi thiết lập đã dừng một lần chạy bắt đầu không cần phê duyệt —, `Dismissed by <name>.` hoặc
+    `Cancelled by <name>.`, rồi tên và dung lượng thư mục archive, kèm pre-purge backup và purge receipt.
+
+  Kết quả của một lần chạy đã hoàn tất ghi `Archived and purged.`, `Nothing purged (every component changed).` hoặc, với
+  một lần chạy đã kết thúc trước khi lần chạy có purge, `Exported to files; nothing deleted.` Bảng rộng giữ một lần chạy
+  điển hình trong vài dòng:
   - **Các con số** hiển thị các con số đã xuất khi đã có, nếu không thì con số của preview: số Movement trước
     (`4,210 Movements`), rồi `120 components · 310 flows` trên một dòng nhỏ hơn. Thêm một dòng `From the preview` khi
     chưa xuất gì, hoặc các con số của preview khi con số đã xuất khác chúng. Khi purge đã bắt đầu, một dòng nêu những gì
@@ -3022,15 +3074,25 @@ permanently**, thẻ **Permanent deletion requests** bên dưới nó, cũng r�
     `Skipped (changed during the run)` chỉ xuất hiện khi có component bị bỏ qua, bởi bước verify hoặc bởi bước kiểm tra
     riêng của purge;
   - **Các mốc thời gian** chỉ hiển thị `Requested` và bước gần nhất (`Finished`, `Purge started`, `Verified`,
-    `Exported` hoặc `Started`), mỗi mốc giữ ngày và giờ đi liền nhau; toàn bộ dòng thời gian, với `Backup started`
-    (pre-purge backup) và `Purge started`, được gập dưới `All times`, một phần mở rộng mở được bằng bàn phím;
+    `Exported`, `Started` hoặc `Approved`), mỗi mốc giữ ngày và giờ đi liền nhau; toàn bộ dòng thời gian, với `Approved`
+    (việc phê duyệt một lần chạy được đề xuất), `Backup started` (pre-purge backup) và `Purge started`, được gập dưới
+    `All times`, một phần mở rộng mở được bằng bàn phím. Việc bác bỏ một lần chạy là mốc `Finished` của nó;
   - **tên thư mục archive** dùng font monospace nhỏ hơn, xuống dòng ở bất kỳ chỗ nào, với dung lượng ở bên dưới, rồi
     hai phần mở rộng mở được bằng bàn phím: `Pre-purge backup` với tên của backup, và `Purge receipt` với tên file của
     receipt (`<archive folder name>.purged.json`, nằm cạnh thư mục archive) và SHA-256 của nó.
 
-  Chữ trong bảng chỉ xuống dòng giữa các từ, nên một cửa sổ hẹp không bao giờ cắt đôi một từ: cột của lý do không bao
-  giờ hẹp hơn 6.5rem, và chỉ một từ dài hơn thế (một đường link được dán vào) mới xuống dòng ở bất kỳ chỗ nào, giống tên
-  thư mục archive, tên một backup và SHA-256. Dưới 800 px các dòng xếp chồng.
+  Chữ trong bảng chỉ xuống dòng giữa các từ, nên một cửa sổ hẹp không bao giờ cắt đôi một từ: cột của lý do và của kết
+  quả không bao giờ hẹp hơn 6.5rem, và chỉ một từ dài hơn thế (một đường link được dán vào) mới xuống dòng ở bất kỳ chỗ
+  nào, giống tên thư mục archive, tên một backup và SHA-256; số Movement chỉ xuống dòng giữa con số và chữ trong một cửa
+  sổ hẹp. Dưới 800 px các dòng xếp chồng.
+  - `Approve…` (tên truy cập `Approve run N…`) trên một lần chạy được đề xuất mở `Approve run N`, dialog nói lần chạy
+    làm gì như dialog yêu cầu, hiển thị lý do mà job đưa ra, cutoff date và các con số của preview, và hỏi một lý do bắt
+    buộc của riêng người phê duyệt. `Approve run` gửi lý do đó; job bắt đầu lần chạy ở Start minute kế tiếp, và trước
+    pre-purge backup cũng như trước khi purge, job kiểm tra rằng người phê duyệt vẫn active và vẫn giữ permission.
+  - `Dismiss…` (tên truy cập `Dismiss run N…`) trên một lần chạy được đề xuất hỏi trước và không cần lý do (`Dismiss run
+    N?`, nói rằng lần chạy sẽ không bắt đầu, lịch sử Movement vẫn ở lại trong database và số ngày giữa các lần chạy tự
+    động được tính từ lúc bác bỏ, với `Dismiss run` và `Keep run (Esc)`). Một lần chạy được đề xuất không có `Cancel…`,
+    và server từ chối hủy nó.
   - `Cancel…` trên một lần chạy đã được yêu cầu hoặc đang chờ bản sao ngoài server hỏi trước (`Cancel run N?`, với
     `Cancel run` và `Keep run (Esc)`); thư mục archive của một lần chạy đang chờ vẫn ở lại trên server. Một lần chạy mà
     job đang xử lý (`Running`, `Purging`) không có `Cancel…`, và server từ chối hủy nó.
@@ -3040,9 +3102,9 @@ permanently**, thẻ **Permanent deletion requests** bên dưới nó, cũng r�
     ngoài server, ví dụ bằng cách thêm thư mục archive vào task Hyper Backup. `Confirm copy` được bật khi đã đánh dấu
     `The archive folder is copied off the server` và gửi SHA-256 đang hiển thị; ở lần khởi động kế tiếp job sẽ tạo
     pre-purge backup rồi purge lịch sử đã archive.
-  - Một lần từ chối được hiển thị trong dialog đúng như server diễn đạt. Khi một lần hủy hay một lần xác nhận không nhận
-    được câu trả lời rõ ràng, danh sách lần chạy được tải lại và thẻ nhắc kiểm tra trạng thái của lần chạy; làm lại cả
-    hai thao tác đều an toàn.
+  - Một lần từ chối việc phê duyệt, bác bỏ, hủy hay xác nhận được hiển thị trong dialog đúng như server diễn đạt. Khi
+    một trong các thao tác đó không nhận được câu trả lời rõ ràng, danh sách lần chạy được tải lại và thẻ nhắc kiểm tra
+    trạng thái của lần chạy; làm lại thao tác nào cũng an toàn.
 - **Permanent deletion requests** — `Each request deletes Work Orders or a Part Number with all their data from the
   database, as if they had never been entered; the server carries it out after a pre-purge backup.` Chỉ người giữ
   **Delete Work Orders and Part Numbers permanently** mới thấy thẻ, và chỉ họ tạo các yêu cầu, bằng **Delete
@@ -4387,7 +4449,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-18 | uncommitted | §9, §11.2 và §14.2: permission mới Delete Work Orders and Part Numbers permanently đưa ra Delete permanently… trong Work Order Details và trong dialog Part Number, dialog yêu cầu việc xóa và theo dõi trạng thái của nó, cùng thẻ Permanent deletion requests của History archival & purge. |
+| 2026-11-18 | uncommitted | §9: History archival & purge có thêm thẻ Automatic runs — thước đo với giới hạn riêng của nó, số ngày giữa các lần chạy tự động và bước phê duyệt, được tắt kèm lý do và xác nhận gõ lại làm ủy quyền thường trực, hiển thị cùng hiệu lực của nó, và một ghi chú ở mọi nơi một thay đổi thiết lập làm dừng một lần chạy bắt đầu không cần phê duyệt (bật lại bước phê duyệt, tắt các lần chạy tự động, hoặc một retention period dài hơn hay bị bỏ đi đến mức không còn cho phép cutoff của lần chạy) — và bảng các lần chạy hiển thị các lần chạy được đề xuất và bị bác bỏ, `Approved — waiting for the job`, `Automatic` kèm việc phê duyệt hoặc ủy quyền thường trực, và `Approve…` cùng `Dismiss…`, trong sáu cột vừa một cửa sổ 1024 px. |
+| 2026-11-18 | 1874636 | §9, §11.2 và §14.2: permission mới Delete Work Orders and Part Numbers permanently đưa ra Delete permanently… trong Work Order Details và trong dialog Part Number, dialog yêu cầu việc xóa và theo dõi trạng thái của nó, cùng thẻ Permanent deletion requests của History archival & purge. |
 | 2026-11-18 | d094f5e | §4.5, §7.2, §7.3 và §9: một lần chạy archival purge lịch sử đã archive sau bản sao ngoài server và một pre-purge backup, Tracking hiển thị các mục đã archive và các bước route đã archive, các command đã archive không thể undo được nữa, và các giới hạn batch của purge cùng Pre-purge backups kept là các thiết lập. |
 | 2026-11-17 | 2f12d33 | §9: History archival & purge hiển thị các thiết lập, preview, việc yêu cầu một lần chạy và các lần chạy với Cancel và Confirm off-host copy; một lần chạy xuất lịch sử và không xóa gì, và permission mới Run history archival and purge bảo vệ section. |
 | 2026-11-17 | 1490927 | §11: Add Part đề xuất, xem trước và tạo dạng chuẩn của một PN mới mà server suy ra từ giá trị đã nhập. |

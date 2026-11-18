@@ -2,12 +2,16 @@ import { useState } from 'react';
 
 import { errorMessage } from '../../api/client';
 import {
+  approveArchiveRun,
   cancelArchiveRun,
   confirmArchiveCopy,
+  dismissArchiveRun,
 } from '../../api/history-archive';
 import type { ArchiveRun } from '../../api/history-archive';
 import { writeOutcomeUnknown } from '../../api/scan-station';
 import type { ApiData } from '../../api/use-api-data';
+import { useCloseGuard } from '../../components/close-guard';
+import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ModalDialog } from '../../components/ModalDialog';
 import {
@@ -18,37 +22,51 @@ import {
 import { formatIsoDate } from '../dates';
 import {
   componentsAndFlows,
+  countsLine,
+  eligibleRange,
   formatArchiveSize,
   formatInstant,
   latestRunStep,
   movementsText,
   PRE_PURGE_BACKUP_LABEL,
   purgedLine,
+  runAwaitsApproval,
   runAwaitsCopyConfirmation,
   runCanBeCancelled,
   runCounts,
+  runEffectText,
   runOutcome,
+  runRequester,
   runStateLabel,
   runStateTone,
   runTimes,
+  startedWithoutApprovalText,
 } from './archive-runs';
-import { ServerErrorNote, SettingsCard } from './section-widgets';
+import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
 // Administration → History archival & purge → Runs (archival design B
-// steps 1 and 2): every run, newest first, with its state in plain words,
-// the cutoff, the previewed, exported, purged and skipped counts, who
-// requested it and why, its times, its archive with the pre-purge backup
-// and the purge receipt, and what it came to. A user who may run history
-// archival cancels a requested run or one waiting for its off-host copy
-// (after a confirmation) — never one the job works on — and confirms the
-// off-host copy of a run waiting for it against the manifest SHA-256
-// shown; the job then takes the pre-purge backup and purges. The server
-// decides every transition and its refusals are shown as given; an action
-// whose answer was lost reloads the runs and says so (both actions are
-// safe to repeat).
+// steps 1, 2 and 4): every run, newest first, with its state in plain
+// words, the cutoff with the previewed, exported, purged and skipped
+// counts, who requested it and why — or Automatic, with the approval or
+// the standing authorization it started under —, its times, and what it
+// came to with its archive, the pre-purge backup and the purge receipt.
+// Six columns keep the table inside its card down to a 1024 px window
+// beside the Administration sidebar, as the requests card below does: the
+// actions sit under the state they apply to, the cutoff tops the counts
+// and the archive follows the result. A user who may run history
+// archival approves a proposed run with a reason of their own or
+// dismisses it (no reason, after a confirmation), cancels a requested run
+// or one waiting for its off-host copy (after a confirmation) — never a
+// proposed one, nor one the job works on — and confirms the off-host copy
+// of a run waiting for it against the manifest SHA-256 shown; the job
+// then takes the pre-purge backup and purges. The server decides every
+// transition and its refusals are shown as given; an action whose answer
+// was lost reloads the runs and says so (every action is safe to repeat).
 
 type Notice =
   { kind: 'done'; text: string } | { kind: 'unknown'; text: string } | null;
+
+type RunAction = 'approve' | 'dismiss' | 'cancel' | 'confirm-copy';
 
 export function ArchiveRunsCard({
   runsData,
@@ -59,16 +77,22 @@ export function ArchiveRunsCard({
   canWrite: boolean;
   writeBlocked: boolean;
 }) {
-  const [cancelling, setCancelling] = useState<ArchiveRun | null>(null);
-  const [confirming, setConfirming] = useState<ArchiveRun | null>(null);
+  const [acting, setActing] = useState<{
+    action: RunAction;
+    run: ArchiveRun;
+  } | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const { state } = runsData;
 
   const finished = (next: Notice) => {
-    setCancelling(null);
-    setConfirming(null);
+    setActing(null);
     setNotice(next);
     runsData.reload();
+  };
+  const dialogProps = {
+    writeBlocked,
+    onCancel: () => setActing(null),
+    onFinished: finished,
   };
 
   return (
@@ -118,13 +142,10 @@ export function ArchiveRunsCard({
             <tr>
               <th>Run</th>
               <th>State</th>
-              <th>Cutoff date</th>
-              <th>Counts</th>
+              <th className="admin-runcounts">Cutoff and counts</th>
               <th>Requested by</th>
               <th>Times</th>
-              <th>Archive</th>
               <th>Result</th>
-              {canWrite ? <th>Actions</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -134,34 +155,26 @@ export function ArchiveRunsCard({
                 run={run}
                 canWrite={canWrite}
                 writeBlocked={writeBlocked}
-                onCancel={() => {
+                onAction={(action) => {
                   setNotice(null);
-                  setCancelling(run);
-                }}
-                onConfirmCopy={() => {
-                  setNotice(null);
-                  setConfirming(run);
+                  setActing({ action, run });
                 }}
               />
             ))}
           </tbody>
         </table>
       ) : null}
-      {cancelling !== null ? (
-        <CancelRunDialog
-          run={cancelling}
-          writeBlocked={writeBlocked}
-          onCancel={() => setCancelling(null)}
-          onFinished={finished}
-        />
+      {acting?.action === 'approve' ? (
+        <ApproveRunDialog run={acting.run} {...dialogProps} />
       ) : null}
-      {confirming !== null ? (
-        <ConfirmCopyDialog
-          run={confirming}
-          writeBlocked={writeBlocked}
-          onCancel={() => setConfirming(null)}
-          onFinished={finished}
-        />
+      {acting?.action === 'dismiss' ? (
+        <DismissRunDialog run={acting.run} {...dialogProps} />
+      ) : null}
+      {acting?.action === 'cancel' ? (
+        <CancelRunDialog run={acting.run} {...dialogProps} />
+      ) : null}
+      {acting?.action === 'confirm-copy' ? (
+        <ConfirmCopyDialog run={acting.run} {...dialogProps} />
       ) : null}
     </SettingsCard>
   );
@@ -171,14 +184,12 @@ function RunRow({
   run,
   canWrite,
   writeBlocked,
-  onCancel,
-  onConfirmCopy,
+  onAction,
 }: {
   run: ArchiveRun;
   canWrite: boolean;
   writeBlocked: boolean;
-  onCancel: () => void;
-  onConfirmCopy: () => void;
+  onAction: (action: RunAction) => void;
 }) {
   const skipped =
     run.skipped !== null &&
@@ -191,19 +202,51 @@ function RunRow({
   const times = runTimes(run);
   // Requested and the latest step are shown; the rest only under All times.
   const hiddenTimes = times.length - (latest === null ? 1 : 2);
+  const withoutApproval = startedWithoutApprovalText(run);
+  const outcome = runOutcome(run);
+  const actionButton = (action: RunAction, label: string, name: string) => (
+    <button
+      type="button"
+      className="admin-btn"
+      aria-label={name}
+      disabled={writeBlocked}
+      onClick={() => onAction(action)}
+    >
+      {label}
+    </button>
+  );
   return (
     <tr>
       <td data-label="Run" className="mono">
         {run.id}
       </td>
       <td data-label="State">
-        <span className={`pillnav ${runStateTone(run)}`}>
-          {runStateLabel(run)}
-        </span>
+        {/* The actions sit under the state they apply to. */}
+        <div className="admin-runactions">
+          <span className={`pillnav ${runStateTone(run)}`}>
+            {runStateLabel(run)}
+          </span>
+          {canWrite && runAwaitsApproval(run) ? (
+            <>
+              {actionButton('approve', 'Approve…', `Approve run ${run.id}…`)}
+              {actionButton('dismiss', 'Dismiss…', `Dismiss run ${run.id}…`)}
+            </>
+          ) : null}
+          {canWrite && runAwaitsCopyConfirmation(run)
+            ? actionButton(
+                'confirm-copy',
+                'Confirm copy…',
+                `Confirm the off-host copy of run ${run.id}…`,
+              )
+            : null}
+          {canWrite && runCanBeCancelled(run)
+            ? actionButton('cancel', 'Cancel…', `Cancel run ${run.id}…`)
+            : null}
+        </div>
       </td>
-      <td data-label="Cutoff date">{formatIsoDate(run.cutoffDate)}</td>
-      <td data-label="Counts">
+      <td data-label="Cutoff and counts">
         <div className="admin-runlines">
+          <span className="admin-runwhen">{formatIsoDate(run.cutoffDate)}</span>
           <span className="admin-runmain">
             {movementsText(counts.shown.movements)}
           </span>
@@ -226,8 +269,22 @@ function RunRow({
       </td>
       <td data-label="Requested by">
         <div className="admin-runlines">
-          <span>{run.requestedBy.displayName}</span>
+          <span>{runRequester(run)}</span>
           <span className="admin-runreason">{run.reason}</span>
+          {run.approval !== null ? (
+            <>
+              <span className="admin-runtime">
+                {`Approved by ${run.approval.approvedBy.displayName}, `}
+                <span className="admin-runwhen">
+                  {formatInstant(run.approval.approvedAt)}
+                </span>
+              </span>
+              <span className="admin-runreason">{run.approval.reason}</span>
+            </>
+          ) : null}
+          {withoutApproval !== null ? (
+            <span className="admin-runreason">{withoutApproval}</span>
+          ) : null}
         </div>
       </td>
       <td data-label="Times">
@@ -248,12 +305,17 @@ function RunRow({
           ) : null}
         </div>
       </td>
-      <td data-label="Archive">
-        {run.archiveName === null ? (
+      <td data-label="Result">
+        {outcome === null && run.archiveName === null ? (
           '—'
         ) : (
           <div className="admin-runlines">
-            <span className="admin-runarchive">{run.archiveName}</span>
+            {outcome !== null ? (
+              <span className="admin-runresult">{outcome}</span>
+            ) : null}
+            {run.archiveName !== null ? (
+              <span className="admin-runarchive">{run.archiveName}</span>
+            ) : null}
             {run.archiveBytes !== null ? (
               <span className="admin-runsub">
                 {formatArchiveSize(run.archiveBytes)}
@@ -285,35 +347,6 @@ function RunRow({
           </div>
         )}
       </td>
-      <td data-label="Result">{runOutcome(run) ?? '—'}</td>
-      {canWrite ? (
-        <td data-label="Actions">
-          <div className="admin-runactions">
-            {runAwaitsCopyConfirmation(run) ? (
-              <button
-                type="button"
-                className="admin-btn"
-                aria-label={`Confirm the off-host copy of run ${run.id}…`}
-                disabled={writeBlocked}
-                onClick={onConfirmCopy}
-              >
-                Confirm copy…
-              </button>
-            ) : null}
-            {runCanBeCancelled(run) ? (
-              <button
-                type="button"
-                className="admin-btn"
-                aria-label={`Cancel run ${run.id}…`}
-                disabled={writeBlocked}
-                onClick={onCancel}
-              >
-                Cancel…
-              </button>
-            ) : null}
-          </div>
-        </td>
-      ) : null}
     </tr>
   );
 }
@@ -328,17 +361,188 @@ function RunTime({ label, at }: { label: string; at: string }) {
   );
 }
 
+interface RunDialogProps {
+  run: ArchiveRun;
+  writeBlocked: boolean;
+  onCancel: () => void;
+  onFinished: (notice: Notice) => void;
+}
+
+function ApproveRunDialog({
+  run,
+  writeBlocked,
+  onCancel,
+  onFinished,
+}: RunDialogProps) {
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const guard = useCloseGuard({
+    dirty: reason.trim() !== '',
+    busy,
+    onClose: onCancel,
+  });
+
+  const submit = async () => {
+    if (busy || writeBlocked) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      // The server checks the reason and the run's state, and answers its
+      // own message.
+      await approveArchiveRun(run.id, reason);
+      onFinished({
+        kind: 'done',
+        text: `Run ${run.id} is approved. The archival job on the server starts it at its next Start minute.`,
+      });
+    } catch (error) {
+      if (writeOutcomeUnknown(error)) {
+        onFinished({
+          kind: 'unknown',
+          text: `The server did not answer, so run ${run.id} may or may not have been approved. Check its state in the table; approving it again is safe.`,
+        });
+        return;
+      }
+      setServerError(errorMessage(error));
+      setBusy(false);
+    }
+  };
+
+  const title = `Approve run ${run.id}`;
+  return (
+    <ModalDialog label={title} onClose={guard.requestClose}>
+      <h3>{title}</h3>
+      <p className="admin-idnote">{runEffectText(run.cutoffDate)}</p>
+      <div className="admin-identity">
+        <div className="idrow">
+          <span className="k">Proposed because</span>
+          <span className="v">{run.reason}</span>
+        </div>
+        <div className="idrow">
+          <span className="k">Cutoff date</span>
+          <span className="v">{formatIsoDate(run.cutoffDate)}</span>
+        </div>
+        <div className="idrow">
+          <span className="k">Preview</span>
+          <span className="v">{countsLine(run.preview)}</span>
+        </div>
+        <div className="idrow">
+          <span className="k">Movements from</span>
+          <span className="v">{eligibleRange(run.preview)}</span>
+        </div>
+        <div className="idrow">
+          <span className="k">Estimated size</span>
+          <span className="v">
+            {formatArchiveSize(run.preview.estimatedArchiveBytes)}
+          </span>
+        </div>
+      </div>
+      <div className="admin-form">
+        <AdminField
+          label={
+            <>
+              Reason for approving{' '}
+              <span className="field-required">(required)</span>
+            </>
+          }
+        >
+          <textarea
+            className="field"
+            rows={3}
+            maxLength={500}
+            placeholder="Why should this run go ahead?"
+            value={reason}
+            disabled={busy}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </AdminField>
+        <p className="admin-fieldhelp">
+          The archival job on the server starts the run at its next Start
+          minute. Before the pre-purge backup and before the purge, it checks
+          that you are still active and still hold Run history archival and
+          purge.
+        </p>
+        <ServerErrorNote message={serverError} />
+      </div>
+      <div className="row">
+        <button
+          className="bigbtn ghost"
+          disabled={busy}
+          onClick={guard.requestClose}
+        >
+          Cancel (Esc)
+        </button>
+        <button
+          className="bigbtn primary"
+          disabled={busy || writeBlocked}
+          onClick={() => void submit()}
+        >
+          Approve run
+        </button>
+      </div>
+      {guard.asking ? (
+        <DiscardInputDialog
+          title={`Discard the approval of run ${run.id}?`}
+          onKeepEditing={guard.keepEditing}
+          onDiscard={onCancel}
+        />
+      ) : null}
+    </ModalDialog>
+  );
+}
+
+function DismissRunDialog({
+  run,
+  writeBlocked,
+  onCancel,
+  onFinished,
+}: RunDialogProps) {
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  const confirm = async () => {
+    if (busy || writeBlocked) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      await dismissArchiveRun(run.id);
+      onFinished({ kind: 'done', text: `Run ${run.id} is dismissed.` });
+    } catch (error) {
+      if (writeOutcomeUnknown(error)) {
+        onFinished({
+          kind: 'unknown',
+          text: `The server did not answer, so run ${run.id} may or may not have been dismissed. Check its state in the table; dismissing it again is safe.`,
+        });
+        return;
+      }
+      setServerError(errorMessage(error));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ConfirmDialog
+      title={`Dismiss run ${run.id}?`}
+      tone="danger"
+      cancelLabel="Keep run (Esc)"
+      confirmLabel="Dismiss run"
+      confirmDisabled={writeBlocked || busy}
+      onConfirm={() => void confirm()}
+      onCancel={busy ? () => undefined : onCancel}
+    >
+      The run will not start, and the Movement history stays in the database.
+      The days between automatic runs count from this dismissal.
+      <ServerErrorNote message={serverError} />
+    </ConfirmDialog>
+  );
+}
+
 function CancelRunDialog({
   run,
   writeBlocked,
   onCancel,
   onFinished,
-}: {
-  run: ArchiveRun;
-  writeBlocked: boolean;
-  onCancel: () => void;
-  onFinished: (notice: Notice) => void;
-}) {
+}: RunDialogProps) {
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -385,12 +589,7 @@ function ConfirmCopyDialog({
   writeBlocked,
   onCancel,
   onFinished,
-}: {
-  run: ArchiveRun;
-  writeBlocked: boolean;
-  onCancel: () => void;
-  onFinished: (notice: Notice) => void;
-}) {
+}: RunDialogProps) {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);

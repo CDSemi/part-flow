@@ -598,24 +598,27 @@ class StationCommand(StrEnum):
 
 class HistoryArchiveRunState(StrEnum):
     """Where a Movement-history archival run stands (Phase 16, history
-    archival design §6.1; build steps 1 and 2).
+    archival design §6.1; build steps 1, 2 and 4).
 
-    APPROVED — requested in Administration (the request is the approval)
-    and waiting for the host job; RUNNING — the job is exporting,
-    verifying and copying the archive, and the host script takes the
-    pre-purge backup; WAITING_FOR_COPY — verified, waiting for a person to
-    confirm the off-host copy (only without a usable copy folder);
+    PROPOSED — an automatic run waiting for a holder of Run history
+    archival and purge to approve or dismiss it (build step 4); APPROVED —
+    requested in Administration (the request is the approval), approved
+    from PROPOSED, or created by the host job under the standing
+    authorization, and waiting for the host job; RUNNING — the job is
+    exporting, verifying and copying the archive, and the host script takes
+    the pre-purge backup; WAITING_FOR_COPY — verified, waiting for a person
+    to confirm the off-host copy (only without a usable copy folder);
     PURGING — deleting the archived Movements (the only state in which the
     database lets them be deleted); COMPLETED — finished, nothing skipped;
     COMPLETED_WITH_SKIPS — finished, some components were skipped (they
     changed after the export and stay in the database); NOTHING_ELIGIBLE —
-    finished, nothing was eligible at the cutoff; CANCELLED — cancelled in
-    Administration before it started deleting; FAILED — the job stopped it
-    and recorded why. The last five are final. The design's PROPOSED and
-    DISMISSED (automatic runs) are added by the build step that introduces
-    them.
+    finished, nothing was eligible at the cutoff; DISMISSED — a proposed
+    run a person dismissed; CANCELLED — cancelled in Administration before
+    it started deleting; FAILED — the job stopped it and recorded why. The
+    last six are final.
     """
 
+    PROPOSED = "PROPOSED"
     APPROVED = "APPROVED"
     RUNNING = "RUNNING"
     WAITING_FOR_COPY = "WAITING_FOR_COPY"
@@ -623,8 +626,35 @@ class HistoryArchiveRunState(StrEnum):
     COMPLETED = "COMPLETED"
     COMPLETED_WITH_SKIPS = "COMPLETED_WITH_SKIPS"
     NOTHING_ELIGIBLE = "NOTHING_ELIGIBLE"
+    DISMISSED = "DISMISSED"
     CANCELLED = "CANCELLED"
     FAILED = "FAILED"
+
+
+class HistoryArchiveRunTrigger(StrEnum):
+    """Who started a Movement-history archival run (build step 4).
+
+    MANUAL — a holder of Run history archival and purge requested it in
+    Administration (it records the requesting User); AUTOMATIC — the host
+    job's ``history-archive evaluate`` created it (no requesting User).
+    """
+
+    MANUAL = "MANUAL"
+    AUTOMATIC = "AUTOMATIC"
+
+
+class HistoryArchiveMeasure(StrEnum):
+    """What decides that an automatic archival run is needed (design §6.2, D10).
+
+    LIVE_MOVEMENT_ROWS — the Movement rows in the database (the default);
+    RETAINED_HISTORY_AGE — how much older than the cutoff the oldest
+    retained Movement is; DATABASE_SIZE — the size of the database. Each
+    has a limit of its own in Administration → History archival & purge.
+    """
+
+    LIVE_MOVEMENT_ROWS = "LIVE_MOVEMENT_ROWS"
+    RETAINED_HISTORY_AGE = "RETAINED_HISTORY_AGE"
+    DATABASE_SIZE = "DATABASE_SIZE"
 
 
 class HistoryArchiveRunResult(StrEnum):

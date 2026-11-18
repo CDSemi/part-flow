@@ -1,4 +1,4 @@
-"""History archival endpoints (Phase 16, history archival design B; build steps 1-2).
+"""History archival endpoints (Phase 16, history archival design B; build steps 1, 2, 4).
 
 HTTP surface of the runs of Administration → History archival & purge; its
 settings are ``/api/policies/data-retention`` (``app.api.policies``). Routes
@@ -21,11 +21,22 @@ translate typed failures (404 unknown run, 409 conflict, 422 invalid).
   open or when nothing is eligible.
 - ``POST /history-archive/runs/{run_id}/cancel`` — cancel an ``APPROVED`` or
   ``WAITING_FOR_COPY`` run (a cancelled run answers unchanged); a run the
-  host job works on (``RUNNING``, ``PURGING``) is refused.
+  host job works on (``RUNNING``, ``PURGING``) is refused, and a ``PROPOSED``
+  run is dismissed instead.
+- ``POST /history-archive/runs/{run_id}/approve`` — ``{"reason": text}``:
+  approve a ``PROPOSED`` (automatic) run with a reason of the approver's
+  own; it becomes ``APPROVED`` with the approver and the time (approving it
+  again as the same User answers unchanged).
+- ``POST /history-archive/runs/{run_id}/dismiss`` — dismiss a ``PROPOSED``
+  run (``DISMISSED``; no body, like cancel; a dismissed run answers
+  unchanged).
 
 A run answers its purge too (build step 2): the pre-purge backup, when the
 purge started, what it deleted so far, and the purge receipt's name and
-SHA-256.
+SHA-256; and (build step 4) its trigger (``MANUAL`` or ``AUTOMATIC``; an
+automatic run has no ``requested_by``), its approval, who dismissed it, the
+standing authorization it was created under, and whether it failed because
+the User of its authority may no longer run it.
 - ``POST /history-archive/runs/{run_id}/copy-confirmation`` —
   ``{"manifest_sha256": hex}``: confirm the off-host copy of a
   ``WAITING_FOR_COPY`` run, against the manifest SHA-256 shown.
@@ -115,14 +126,34 @@ class RunPurged(BaseModel):
     movements: int
 
 
+class RunApproval(BaseModel):
+    """The approval of a proposed (automatic) run, by a person with a reason of their own."""
+
+    approved_by: UserRef
+    approved_at: datetime.datetime
+    reason: str
+
+
+class RunAuthorization(BaseModel):
+    """The standing authorization an automatic run was created under: the audit row
+    that switched the approval step off."""
+
+    audit_event_id: int
+    authorized_by: UserRef | None
+    authorized_at: datetime.datetime | None
+
+
 class RunResponse(BaseModel):
     id: int
     state: str
     cutoff: datetime.datetime
     cutoff_date: datetime.date
     groups: list[str]
+    # MANUAL (requested in Administration) or AUTOMATIC (history-archive evaluate).
+    trigger: str
     reason: str
-    requested_by: UserRef
+    # Null exactly for an automatic run.
+    requested_by: UserRef | None
     requested_at: datetime.datetime
     preview: RunPreview
     started_at: datetime.datetime | None
@@ -144,9 +175,16 @@ class RunResponse(BaseModel):
     # The purge receipt beside the archive folder, once written.
     receipt_name: str | None
     receipt_sha256: str | None
+    # Automatic runs (build step 4): the approval of a proposed run, who
+    # dismissed it, the standing authorization it was created under.
+    approval: RunApproval | None
+    dismissed_by: UserRef | None
+    authorization: RunAuthorization | None
     finished_at: datetime.datetime | None
     result: str | None
     failure_reason: str | None
+    # The run failed because the User of its authority may no longer run it.
+    authorization_failed: bool
 
 
 class RunRequest(BaseModel):
@@ -161,6 +199,12 @@ class CopyConfirmationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     manifest_sha256: str
+
+
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
 
 
 def _user(value: RunUser | None) -> UserRef | None:
@@ -187,8 +231,26 @@ def _run_response(view: RunView) -> RunResponse:
         if run.verified_at is None
         else RunSkips(components=run.skipped_components or 0, flows=run.skipped_flows or 0)
     )
-    requested_by = _user(view.requested_by)
-    assert requested_by is not None
+    approval = (
+        None
+        if run.approved_at is None or view.approved_by is None or run.approval_reason is None
+        else RunApproval(
+            approved_by=UserRef(
+                user_id=view.approved_by.user_id, display_name=view.approved_by.display_name
+            ),
+            approved_at=run.approved_at,
+            reason=run.approval_reason,
+        )
+    )
+    authorization = (
+        None
+        if view.authorization is None
+        else RunAuthorization(
+            audit_event_id=view.authorization.audit_event_id,
+            authorized_by=_user(view.authorization.authorized_by),
+            authorized_at=view.authorization.authorized_at,
+        )
+    )
     backup = (
         None
         if run.pre_purge_backup_name is None or run.pre_purge_backup_started_at is None
@@ -211,8 +273,9 @@ def _run_response(view: RunView) -> RunResponse:
         cutoff=run.cutoff,
         cutoff_date=history_archive.site_date_of(run.cutoff, history_archive.site_zone()),
         groups=[history_archive.GROUP_MOVEMENT_HISTORY],
+        trigger=run.trigger,
         reason=run.reason,
-        requested_by=requested_by,
+        requested_by=_user(view.requested_by),
         requested_at=run.requested_at,
         preview=RunPreview(
             components=run.preview_components,
@@ -239,9 +302,13 @@ def _run_response(view: RunView) -> RunResponse:
         purged=purged,
         receipt_name=history_archive.receipt_name(run.archive_name, run.receipt_sha256),
         receipt_sha256=run.receipt_sha256,
+        approval=approval,
+        dismissed_by=_user(view.dismissed_by),
+        authorization=authorization,
         finished_at=run.finished_at,
         result=run.result,
         failure_reason=run.failure_reason,
+        authorization_failed=run.authorization_failed,
     )
 
 
@@ -296,6 +363,24 @@ def post_cancel(
     principal: HistoryArchiveManagerDep, run_id: int, session: SessionDep
 ) -> RunResponse:
     run = history_archive.cancel_run(session, run_id, actor_user_id=principal.user_id)
+    return _answer(session, run)
+
+
+@router.post("/history-archive/runs/{run_id}/approve")
+def post_approve(
+    principal: HistoryArchiveManagerDep, run_id: int, body: ApprovalRequest, session: SessionDep
+) -> RunResponse:
+    run = history_archive.approve_run(
+        session, run_id, reason=body.reason, actor_user_id=principal.user_id
+    )
+    return _answer(session, run)
+
+
+@router.post("/history-archive/runs/{run_id}/dismiss")
+def post_dismiss(
+    principal: HistoryArchiveManagerDep, run_id: int, session: SessionDep
+) -> RunResponse:
+    run = history_archive.dismiss_run(session, run_id, actor_user_id=principal.user_id)
     return _answer(session, run)
 
 

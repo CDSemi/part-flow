@@ -207,7 +207,10 @@ def test_status_ok(
     assert backup["latest_scheduled"]["name"] == name
     assert document["archival"] == {
         "status": "not_applicable",
-        "reason": "Archival proposals arrive with P16-S10.",
+        "reason": (
+            "History archival is reported by history-archive status (the archival_proposal line"
+            " of check.sh)."
+        ),
         "awaiting_approval": None,
     }
     assert document["findings"] == []

@@ -1,10 +1,12 @@
 // Presentation of the history archival runs and previews of
 // Administration → History archival & purge (Phase 16, archival design B
-// steps 1 and 2): the plain words of each run state and result, the
-// counts (exported, purged, skipped), sizes and times, and the purge's
-// evidence (the pre-purge backup and the receipt). Presentation only —
-// the server owns every rule and decides what a run may do; the actions
-// offered here follow the states it answers.
+// steps 1, 2 and 4): the plain words of each run state and result, who
+// started a run and on whose authority (a requester, or an automatic run
+// with its approval or its standing authorization), the counts
+// (exported, purged, skipped), sizes and times, and the purge's evidence
+// (the pre-purge backup and the receipt). Presentation only — the server
+// owns every rule and decides what a run may do; the actions offered here
+// follow the states it answers.
 
 import type { ArchiveCounts, ArchiveRun } from '../../api/history-archive';
 import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
@@ -14,16 +16,33 @@ import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
  * otherwise break the word `Pre-purge` after it. */
 export const PRE_PURGE_BACKUP_LABEL = 'Pre‑purge backup';
 
+/** What follows a purge, said on the Preview card and before a run is
+ * requested or approved. */
+export const AFTER_PURGE =
+  'Tracking then shows one “History archived in run N” line per archived flow, and archived commands can no longer be undone.';
+
+/** What a run at `cutoffDate` does, said before it is requested or
+ * approved. */
+export function runEffectText(cutoffDate: string): string {
+  return `The run exports the Movement history before ${formatIsoDate(cutoffDate)} to archive files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database. ${AFTER_PURGE}`;
+}
+
 /** The plain words of a run's state. */
 export function runStateLabel(run: ArchiveRun): string {
   switch (run.state) {
+    case 'PROPOSED':
+      return 'Proposed — waiting for approval';
     case 'APPROVED':
-      return 'Requested — waiting for the job';
+      // An approved proposal, a run started under the standing
+      // authorization, or a requested run (the request is its approval).
+      return 'Approved — waiting for the job';
     case 'RUNNING':
       return 'Running';
     case 'WAITING_FOR_COPY':
+      // A non-breaking hyphen (U+2011) keeps `off‑host` whole when the
+      // pill wraps in the State column.
       return run.copyConfirmedAt === null
-        ? 'Waiting for the off-host copy'
+        ? 'Waiting for the off‑host copy'
         : 'Copy confirmed — waiting for the job';
     case 'PURGING':
       return 'Purging';
@@ -33,6 +52,8 @@ export function runStateLabel(run: ArchiveRun): string {
       return 'Completed with skips';
     case 'NOTHING_ELIGIBLE':
       return 'Nothing eligible';
+    case 'DISMISSED':
+      return 'Dismissed';
     case 'CANCELLED':
       return 'Cancelled';
     case 'FAILED':
@@ -50,6 +71,7 @@ export function runStateTone(run: ArchiveRun): 'on' | 'off' | 'term' | 'err' {
       return 'on';
     case 'FAILED':
       return 'err';
+    case 'PROPOSED':
     case 'APPROVED':
     case 'RUNNING':
     case 'WAITING_FOR_COPY':
@@ -60,11 +82,40 @@ export function runStateTone(run: ArchiveRun): 'on' | 'off' | 'term' | 'err' {
   }
 }
 
+/** A proposed (automatic) run waits for a person to approve it with a
+ * reason of their own, or to dismiss it; it is never cancelled. */
+export function runAwaitsApproval(run: ArchiveRun): boolean {
+  return run.state === 'PROPOSED';
+}
+
 /** A requested run, or one waiting for its off-host copy, may be
- * cancelled — never one the job works on (`RUNNING`, `PURGING`); the
- * server decides and a refusal is shown. */
+ * cancelled — never a proposed one (it is dismissed instead) nor one the
+ * job works on (`RUNNING`, `PURGING`); the server decides and a refusal
+ * is shown. */
 export function runCanBeCancelled(run: ArchiveRun): boolean {
   return run.state === 'APPROVED' || run.state === 'WAITING_FOR_COPY';
+}
+
+/** Who started a run: the requester, or `Automatic` for a run the
+ * server's archival job created. */
+export function runRequester(run: ArchiveRun): string {
+  return run.requestedBy === null || run.trigger === 'AUTOMATIC'
+    ? 'Automatic'
+    : run.requestedBy.displayName;
+}
+
+/** An automatic run started under the standing authorization, without
+ * approval: `Started without approval (authorization of Ann Admin, Nov
+ * 18, 2026)`; null for every other run. */
+export function startedWithoutApprovalText(run: ArchiveRun): string | null {
+  const { authorization } = run;
+  if (authorization === null) return null;
+  const who =
+    authorization.authorizedBy?.displayName ??
+    `audit row ${authorization.auditEventId}`;
+  return authorization.authorizedAt === null
+    ? `Started without approval (authorization of ${who})`
+    : `Started without approval (authorization of ${who}, ${formatInstantDate(authorization.authorizedAt)})`;
 }
 
 /** A run waiting for its off-host copy that nobody confirmed yet. */
@@ -98,6 +149,11 @@ export function runOutcome(run: ArchiveRun): string | null {
   if (run.state === 'FAILED') return run.failureReason ?? 'Failed.';
   if (run.state === 'NOTHING_ELIGIBLE') {
     return 'Nothing was eligible at the cutoff.';
+  }
+  if (run.state === 'DISMISSED') {
+    return run.dismissedBy === null
+      ? 'Dismissed.'
+      : `Dismissed by ${run.dismissedBy.displayName}.`;
   }
   if (run.state === 'CANCELLED') {
     return run.cancelledBy === null
@@ -168,6 +224,7 @@ export function eligibleRange(counts: ArchiveCounts): string {
 export function runTimes(run: ArchiveRun): { label: string; at: string }[] {
   const times: { label: string; at: string | null }[] = [
     { label: 'Requested', at: run.requestedAt },
+    { label: 'Approved', at: run.approval?.approvedAt ?? null },
     { label: 'Started', at: run.startedAt },
     { label: 'Exported', at: run.exportedAt },
     { label: 'Verified', at: run.verifiedAt },
@@ -212,8 +269,8 @@ export function runCounts(run: ArchiveRun): {
 }
 
 /** The latest step a run reached after its request (Finished, Purge
- * started, Verified, Exported or Started), or null when it has not
- * started. */
+ * started, Verified, Exported, Started or Approved), or null when it has
+ * neither started nor been approved. */
 export function latestRunStep(
   run: ArchiveRun,
 ): { label: string; at: string } | null {
@@ -223,6 +280,7 @@ export function latestRunStep(
     { label: 'Verified', at: run.verifiedAt },
     { label: 'Exported', at: run.exportedAt },
     { label: 'Started', at: run.startedAt },
+    { label: 'Approved', at: run.approval?.approvedAt ?? null },
   ];
   const latest = steps.find((step) => step.at !== null);
   return latest ? { label: latest.label, at: latest.at as string } : null;

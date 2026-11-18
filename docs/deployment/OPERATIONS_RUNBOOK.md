@@ -25,7 +25,7 @@ described in [`../DEPLOYMENT.md`](../DEPLOYMENT.md) §3.1.
 | Find what a past release did | §1 |
 | Use the short `pf` command for an installation, an update, a backup, a restore or the status | Before you run any command |
 | Delete Work Orders and Part Numbers that were entered only for testing (a permanent deletion request) | §10 |
-| Understand the history archive job, its pre-purge backups, its purge and how it carries out a permanent deletion request, check or confirm an archival run, recover from a failed run, check an archive, or return disk space after a purge | §11 |
+| Understand the history archive job, its automatic runs, its pre-purge backups, its purge and how it carries out a permanent deletion request, approve or dismiss a proposed run, check or confirm an archival run, recover from a failed run, check an archive, or return disk space after a purge | §11 |
 | Handle a reconciliation finding after a purge of Movement history (`archive.sh` exit 4) | §8 (Reconcile finding after a purge) |
 | Handle a reconciliation finding after a permanent deletion (`archive.sh` exit 4) | §8 (Reconcile finding after a deletion) |
 
@@ -58,7 +58,7 @@ its options.
 | `pf restore <NAME> --approved-by <owner>` | The new-instance restore of §6 into an empty database, with the owner's approval recorded in `restore.json` before `backend` starts. |
 | `pf status [--url https://<partflow-host>]` | The containers, `/api/health` and the `status` summary (§2); with `--url`, `check.sh --no-state`. |
 | `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | The preview of deleting Work Orders and Part Numbers entered only for testing; with `--confirm`, a permanent deletion request, which the history archive job carries out at once (its pre-purge backup, the deletion in one transaction and the reconciliation), and the request's final state (§10). It needs the history archive job set up. |
-| `pf archive` | The history archive job now, `archive.sh` without `--scheduled` (§11): it carries out an open permanent deletion request first (its pre-purge backup and the deletion), or does the hourly work: it exports, verifies and copies a requested run, takes its pre-purge backup and **purges** the archived Movement history from the database; then it runs the reconciliation. |
+| `pf archive` | The history archive job now, `archive.sh` without `--scheduled` (§11): it first evaluates the automatic runs (it creates one when they are on and due), then carries out an open permanent deletion request (its pre-purge backup and the deletion), or does the rest of the hourly work: it exports, verifies and copies an approved run, takes its pre-purge backup and **purges** the archived Movement history from the database; then it runs the reconciliation. |
 
 Conventions: a one-shot job that reads or writes the backup folder runs with `--user "$(id -u):$(id -g)"`, because
 that folder has mode 0700. `<partflow-host>` is the host name people type in the browser, `<backup-dir>` is the value
@@ -78,7 +78,7 @@ they tell you which backup belongs to which release and what was checked.
 | `<UTC>-restore-test-<NAME>/` | `restore-test.sh` | `evidence.json`, the result of the drill (§4) |
 | the folder of the release being undone | you, during rollback path 3 (§6) | `rollback.json`, `rollback-reconcile.json` |
 | `<UTC>-restore-<NAME>/` | you, during a new-instance restore (§6) | `restore.json` |
-| `archive/<UTC>/` | `archive.sh`, only for a start that did something or failed (§11) | one JSON report and one log per step (`recover`; `next`, then `next-2`, `next-3` and so on; `export`, `verify`, `copy`, `purge`, `start-deletion`, `delete`, `status`); `check.json`, the check that found a permanent deletion request; `backup.out` and `backup.log` of the pre-purge backup; `reconcile.json` and `reconcile.log`, the reconciliation after a purge or a deletion; and `messages.log` |
+| `archive/<UTC>/` | `archive.sh`, only for a start that did something or failed (§11) | one JSON report and one log per step (`recover`; `evaluate`, the evaluation of the automatic runs; `next`, then `next-2`, `next-3` and so on; `export`, `verify`, `copy`, `purge`, `start-deletion`, `delete`, `status`); `check.json`, the check that found a permanent deletion request; `backup.out` and `backup.log` of the pre-purge backup; `reconcile.json` and `reconcile.log`, the reconciliation after a purge or a deletion; and `messages.log` |
 | `archive/hourly-slot` | `archive.sh --scheduled` (§11) | the hourly stamp: the minute of the last hourly work that was attempted |
 | `archive/reconcile-after-purge` | `archive.sh` (§11) | the incident record of a reconciliation after a purge or a permanent deletion that did not end clean: the run or the deletion request, the result, the failing checks and the path of the report. While it exists, `archive.sh` works on no run and carries out no deletion request; you remove it when the incident is closed (§8, Reconcile finding after a purge, or after a deletion) |
 
@@ -140,7 +140,7 @@ It prints one line per check, `PASS|FAIL|SKIP <id> <reason>`, in this order, the
 | `database` | the `status` report could not run, did not answer within 120 s, or reported a database error |
 | `schema` | `status` reports the schema as not ready |
 | `backup_age` | no published backup is found, the backup folder cannot be read, or the newest backup of any kind (a pre-purge backup included) completed longer ago than the scheduled backup interval of Administration → Backups plus 2 hours (3 hours initially; `--max-backup-age-hours` sets another limit) |
-| `archival_proposal` | the read-only `history-archive status` reports a finding, named in the line: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable`, `copy_dir_unusable` or `receipt_not_copied` (§11); a permanent deletion request is still open (`APPROVED` or `RUNNING`) more than 15 minutes after it was requested (`--deletion-wait-minutes`), so the history archive task has not carried it out or has not finished it: `deletion_request_waiting` (§10), which names the run that an `APPROVED` request waits behind; or the reconciliation after a purge or a deletion has not ended clean, named first as `reconcile_after_purge` (§8); `SKIP` while archival is not set up, except for `deletion_request_waiting`: PartFlow records deletion requests all the same, and then nothing carries them out |
+| `archival_proposal` | the read-only `history-archive status` reports a finding, named in the line: `copy_confirmation_overdue`, `approval_overdue`, `last_run_failed` (`authorization_failed` instead, for a run that failed because it could no longer run on its authority), `standing_authorization_invalid`, `archive_dir_unusable`, `copy_dir_unusable` or `receipt_not_copied` (§11); a permanent deletion request is still open (`APPROVED` or `RUNNING`) more than 15 minutes after it was requested (`--deletion-wait-minutes`), so the history archive task has not carried it out or has not finished it: `deletion_request_waiting` (§10), which names the run that an `APPROVED` request waits behind; or the reconciliation after a purge or a deletion has not ended clean, named first as `reconcile_after_purge` (§8); `SKIP` while archival is not set up, except for `deletion_request_waiting`: PartFlow records deletion requests all the same, and then nothing carries them out |
 
 - The lines `database`, `schema` and `backup_age` come from one read-only `status` run, and `archival_proposal` from one
   read-only `history-archive status` run in the `maintenance` service (§11) and from the incident record
@@ -1041,7 +1041,12 @@ emails. No tool deletes them; remove them by hand after review (§9).
 | `archive.sh` exits with 4, or refuses with exit 1 because the incident record exists; or `check.sh`: `FAIL archival_proposal reconcile_after_purge` | The reconciliation after a purge or a permanent deletion has not ended clean: an incident, and the archive job works on no run and carries out no deletion request until it is closed (Reconcile finding after a purge, or after a deletion, below). |
 | `check.sh`: `FAIL archival_proposal deletion_request_waiting` | A permanent deletion request is still open more than 15 minutes after it was requested (§10). `APPROVED`: the history archive task has not started `archive.sh`, every start fails, or the request waits behind the run that the line names, whose work comes first. `RUNNING`: a start stopped during the deletion, and no later start has made the request `FAILED`. Check that the task is enabled and read its failure emails, or run `deploy/production/pf archive` and read what it says. When the line says that archival is not set up, nothing carries the request out: set up the history archive task ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8) or cancel the request in PartFlow. |
 | `archive.sh` or `pf delete-permanently` exits with 3: a deletion request `FAILED` | Nothing was deleted. The reason names the cause: the data changed after the request, the requesting user is no longer active or no longer holds the permission, or the job stopped while the request was `RUNNING`. Request the deletion again if it is still wanted (§10). |
-| `archive.sh`: the pre-purge backup failed | Nothing was deleted; the next hourly start makes the run `FAILED`. Fix the cause (a backup that held the backup lock longer than `--backup-wait-minutes`, a stale backup lock (§3), too little space in the backup folder, a dump error), then request a new run (§11, The pre-purge backup). |
+| `check.sh`: `FAIL archival_proposal approval_overdue` | An automatic run has waited for its approval (`PROPOSED`) longer than **Report a waiting run after** (7 days initially). A holder of Run history archival and purge approves it, with a reason of their own, or dismisses it in Administration → History archival & purge (§11, Automatic runs). |
+| `archive.sh` exits with 3, or `check.sh`: `FAIL archival_proposal authorization_failed` | A run failed before its pre-purge backup or its purge because it could no longer run on its authority: the user who requested it, approved it or switched off the approval step is no longer active or no longer holds Run history archival and purge, or the approval step was switched on again after the run was created without approval. Nothing was deleted; the reason names the cause. Request a new run, approve the next proposed run, or have a holder of the permission save the approval setting again (§11, Automatic runs). |
+| `archive.sh` exits with 3, or `check.sh`: `FAIL archival_proposal last_run_failed`, for an automatic run created without approval | Besides the causes of A failed run (§11), the settings may have stopped it before its pre-purge backup or its purge: **Automatic runs** was switched off, or the retention period no longer allows its cutoff (it was lengthened, or cleared, after the run was created). Nothing was deleted, and the standing authorization stays valid. If that was intended, nothing else is needed, although `check.sh` reports the failure until a later run finishes; otherwise switch Automatic runs on again or request a run (§11, Automatic runs). |
+| `check.sh`: `FAIL archival_proposal standing_authorization_invalid` | Automatic runs are on without the approval step, and its standing authorization is no longer valid: a run created under it failed because the user who switched the step off could no longer run it, or that user is no longer active or no longer holds the permission. No automatic run is created until a holder of Run history archival and purge saves the approval setting again (§11, Automatic runs). |
+| `archive.sh` exits with 2: "history-archive evaluate could not run" | The evaluation of the automatic runs did not finish (for example within the preview time limit) and created no run; the work on the open run went on. If it repeats, raise **Preview time limit** in Administration → History archival & purge, or check the database (§2). |
+| `archive.sh`: the pre-purge backup failed | Nothing was deleted; the next hourly start makes the run `FAILED`. Fix the cause (a backup that held the backup lock longer than `--backup-wait-minutes`, a stale backup lock (§3), too little space in the backup folder, a dump error), then request a new run, or wait for the next automatic run (§11, The pre-purge backup). |
 | `archive.sh`: a run `FAILED while purging` | Whole flow components only were deleted, and the purge receipt lists them; the reconciliation ran after it. Request a new run for the rest (§11, A failed run). |
 | `archive.sh` exits with 2: "the purge of run N stopped", the run stays `PURGING` | A transient database error (a lost connection, a deadlock, a timeout, a server shutdown); the batch in progress was rolled back. Once the database answers, the next start resumes the purge and reconciles when it ends. If it keeps stopping, check the database (§2). |
 | `check.sh` or `release.sh`: a lock is older than 4 hours, another release holds the lock, or `backup_lock_stale` | A killed run left its lock: §3, Backup lock and release lock. |
@@ -1203,10 +1208,11 @@ incident is closed. The purge may have damaged history or quantities, so treat i
    the record exists. Tell everyone who holds **Run history archival and purge** or **Delete Work Orders and Part
    Numbers permanently** not to request one, and cancel a run or a deletion request that was requested meanwhile
    (Cancel in Administration → History archival & purge, possible while a run is `APPROVED` or `WAITING_FOR_COPY` and
-   while a deletion request is `APPROVED`): otherwise the job carries it out once the incident is closed. To stop the
-   hourly failure emails, disable the history archive task in the host scheduler (on the NAS: untick **Enabled** in
-   Task Scheduler). Keep the pre-purge backup, the archive folder and the purge receipt: they are the evidence and the
-   way back.
+   while a deletion request is `APPROVED`; a proposed automatic run, `PROPOSED`, is dismissed instead, and the job
+   creates no automatic run while the record exists): otherwise the job carries it out once the incident is closed.
+   To stop the hourly failure emails, disable the history archive task in the host scheduler (on the NAS: untick
+   **Enabled** in Task Scheduler). Keep the pre-purge backup, the archive folder and the purge receipt: they are the
+   evidence and the way back.
 2. **When the reconciliation could not run or ended in error**, run it again by hand (§7, Running it). When it is clean,
    the purge is confirmed: close the incident (step 5). When it has findings, go on.
 3. **Compare the findings with the receipt.** The report `<records-dir>/archive/<UTC>/reconcile.json` (its path is in
@@ -1349,10 +1355,10 @@ working examples.
 | When | Tasks |
 | --- | --- |
 | Every 15 minutes (automatic) | `check.sh`: health, restarts, disks, certificate, backup age, backend errors and the archival status (§2). An unchanged failure is repeated every 6 hours. |
-| Every 5 minutes (automatic) | `archive.sh --scheduled`: every start carries out an open permanent deletion request at once (pre-purge backup, deletion and the reconciliation after it, §10); once an hour, at the Start minute of Administration → History archival & purge, the history archive job works on a requested run: export, verification, off-host copy, pre-purge backup, purge and the reconciliation after it (§11). |
+| Every 5 minutes (automatic) | `archive.sh --scheduled`: every start carries out an open permanent deletion request at once (pre-purge backup, deletion and the reconciliation after it, §10); once an hour, at the Start minute of Administration → History archival & purge, the history archive job first evaluates the automatic runs (it creates one when they are on and due), then works on an approved run: export, verification, off-host copy, pre-purge backup, purge and the reconciliation after it (§11). |
 | Daily | The scheduled backups (every hour) and the scheduled reconciliation at 04:00 run by themselves. Read every failure email, including those of the off-host copy; exit 4 of a backup includes a scheduled or pre-purge backup that fails verification, and exit 4 of the history archive job is an incident (§8). |
 | Weekly | Review the database growth (`~/partflow-monitoring/growth.tsv`) and `docker stats --no-stream`. Review failed sign-ins and refused permissions: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` and `refusal.code` tell a refused or locked sign-in, a permission refusal, `station_device_required`, `station_device_mismatch` and `csrf_rejected` apart). Check pending security updates of the host. |
-| Monthly | Confirm the off-host copy of every archival run that waits for it (§11). Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and scheduled or pre-purge backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
+| Monthly | Confirm the off-host copy of every archival run that waits for it, and approve or dismiss every automatic run that waits for approval (§11). Remove old reconciliation reports after review. Remove pre-release and manual backups whose observation time has ended, and scheduled or pre-purge backups that the rotation reported invalid, after review (below). Install updates, on a test system first where possible. Review users and roles, firewall rules and secrets. Run `reconcile --check h`. |
 | Quarterly, and after a large schema change | The restore drill (§4); compare its `restore_to_ready` and `total` times with how long the factory can work without PartFlow. |
 | Before a change of the PostgreSQL image or of the host's glibc | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Before every release | Review the migrations, the rollback decision and the checks (§5); `release.sh` takes the backup. |
@@ -1391,7 +1397,8 @@ log, §2).
   job does not work (no `~/partflow-deployments/.archive.lock`), away from its Start minute and while no permanent
   deletion request is open: only that one-shot job uses the role (§11), so no freeze is needed. A purge that can no
   longer reach the database stays `PURGING`, and the next start resumes it; a deletion that can no longer reach it
-  deletes nothing, and its request becomes `FAILED` at the next start.
+  deletes nothing, and its request becomes `FAILED` at the next start; an evaluation of the automatic runs that can no
+  longer reach it creates no run, and the next hourly work evaluates again.
 - **The owner password** (`postgres_password`): change it in the database first, then replace the file. No restart
   is needed, because only the one-shot `migrate` and `db-roles` read it.
 
@@ -1490,7 +1497,8 @@ The operator's way, `pf delete-permanently`:
    2. it records the request: the plan again and the request in one transaction (its JSON document, `result`
       `requested`, goes to the standard output); a refusal stops here, with nothing recorded;
    3. it runs the history archive job at once (`archive.sh`, as `pf archive` does), which starts the request, takes its
-      pre-purge backup, deletes and runs the reconciliation (§11);
+      pre-purge backup, deletes and runs the reconciliation (§11); like every hourly work, this start first evaluates
+      the automatic runs;
    4. it reads the request's final state from `history-archive status` and reports it (Exit codes, below).
 
    When another `archive.sh` holds the archive lock (for example a run's long purge), the request stays `APPROVED`,
@@ -1574,12 +1582,16 @@ verifies the archive, copies it off the host, takes a pre-purge backup of the da
 deletes the archived Movements from the database and keeps one carry-forward record per archived flow, so that every
 quantity, status and check stays exact. Once purged, that history is in the archive folder and its off-host copy (and
 in the pre-purge backups that are still kept), no longer in the database; commands whose history was archived can no
-longer be undone. The same job also carries out the permanent deletion requests of test data (§10). The automatic
-runs, the viewing requests and the optional groups are later build steps.
+longer be undone. The same job also carries out the permanent deletion requests of test data (§10), and it creates
+the **automatic runs** once they are switched on (Automatic runs, below). The viewing requests and the optional groups
+are later build steps.
 
 A user who holds the permission **Run history archival and purge** sets the retention period and the other settings,
-looks at a preview and requests a run in **Administration → History archival & purge**; the request is the approval.
-The web application never touches the archive folder. The **history archive job** on the host does the work.
+looks at a preview and requests a run in **Administration → History archival & purge**. A requested (manual) run needs
+no other approval: the request is the approval. An automatic run waits for such a user to approve it, unless the
+approval step is switched off: it then runs under the standing authorization of the user who switched it off
+(Automatic runs, below). The web application never touches the archive folder. The **history archive job** on the host
+does the work.
 
 ### What the archive job does
 
@@ -1588,18 +1600,19 @@ A host task starts `deploy/production/archive.sh --scheduled` every 5 minutes ([
 the running `backend` container, two quick reads as the application database role that tell whether a permanent
 deletion request is open and give the Start minute. A start that finds an open request carries it out at once,
 whatever the time (the deletion steps below). Once an hour, at the first start at or after the **Start minute** set in
-Administration (20 initially), it does the **hourly work**; every other start ends within seconds and prints
-`NOT_DUE`. The first start after the task is created only records the current hour, so the first hourly work comes at
-the next Start minute. A start that carried out a deletion does no run work and leaves the hour to the next start,
-which does the hourly work 5 minutes later. When the check gives no answer (for example `backend` is stopped), the
-start counts it as no open request: the hourly work goes on as usual (the Start minute is then read in the
-`maintenance` service), and the request waits for a later start. `deploy/production/pf archive` runs at once, whatever
-the time: an open deletion request first, otherwise the hourly work.
+Administration (20 initially), it does the **hourly work**, which begins with the evaluation of the automatic runs;
+every other start ends within seconds and prints `NOT_DUE`. The first start after the task is created only records the
+current hour, so the first hourly work comes at the next Start minute. A start that carried out a deletion does no run
+work and leaves the hour to the next start, which does the hourly work 5 minutes later. When the check gives no answer
+(for example `backend` is stopped), the start counts it as no open request: the hourly work goes on as usual (the Start
+minute is then read in the `maintenance` service), and the request waits for a later start.
+`deploy/production/pf archive` runs the hourly work at once, whatever the time: the evaluation of the automatic runs,
+then an open deletion request first, otherwise the work on a run.
 
 The steps run in the one-shot `maintenance` service, which connects as the maintenance database role
-(`partflow_maintenance`, which reads history, writes the archive records and deletes only what row guards admit: the
-archived Movements of a run in `PURGING`, and the stored rows of a deletion request that is `RUNNING`) and is the only
-service that mounts the archive folder:
+(`partflow_maintenance`, which reads history, creates the automatic runs (the run guard admits no other run from it),
+writes the archive records and deletes only what row guards admit: the archived Movements of a run in `PURGING`, and
+the stored rows of a deletion request that is `RUNNING`) and is the only service that mounts the archive folder:
 
 1. `recover`: a run left `RUNNING` by a job that stopped (a restart, a power loss), or whose pre-purge backup failed,
    becomes `FAILED`, and so does a deletion request left `RUNNING` (nothing was deleted: a deletion is one
@@ -1607,13 +1620,20 @@ service that mounts the archive folder:
    receipt that is missing in the copy folder is copied there again. A run left `PURGING` is not touched: its purge
    resumes below. When `recover` does not end with exit 0, no run or request is worked on in that start (only
    `status` runs). Neither while the incident record `<records-dir>/archive/reconcile-after-purge` exists (§8,
-   Reconcile finding after a purge, or after a deletion): the start then runs only `recover` and `status`, works on no
-   run, not even the resumed purge of a run left `PURGING`, carries out no deletion request, and exits with 1 (with 3
-   when `recover` failed a run or a request).
-2. `next`, again after every step: the work to do and its next step. An open deletion request comes first. A request
+   Reconcile finding after a purge, or after a deletion): the start then runs only `recover` and `status`, creates no
+   automatic run, works on no run, not even the resumed purge of a run left `PURGING`, carries out no deletion request,
+   and exits with 1 (with 3 when `recover` failed a run or a request).
+2. `evaluate`, in the hourly work only, never in a start that only carries out a deletion request: the evaluation of
+   the automatic runs (Automatic runs, below). It creates the run that the settings call for now, or says why it
+   creates none, and `archive.sh` logs its decision. When it is refused (exit 1) or cannot run or does not finish
+   (exit 2, for example within the preview time limit), it creates no run, `archive.sh` reports the error in its exit
+   status, and the work goes on with the next step all the same.
+3. `next`, again after every step: the work to do and its next step. An open deletion request comes first. A request
    made while this start works on a run's steps waits until the run waits for its copy, purges or ends, and a later
-   start takes it. All of a run's steps can happen in one start.
-3. For a deletion request, the steps that `next` names:
+   start takes it. All of a run's steps can happen in one start, also those of an automatic run that `evaluate` has
+   just created `APPROVED`. A run that waits for approval (`PROPOSED`) waits for a person: `next` answers `wait`, and
+   the job does nothing with it.
+4. For a deletion request, the steps that `next` names:
    - `start_deletion`: `start-deletion` makes the request `RUNNING`, at a whole second that names its pre-purge backup,
      after checking the requesting user again (otherwise it becomes `FAILED`, nothing deleted, exit 3).
    - `deletion_backup`: the pre-purge backup of the request, `backup.sh --kind pre-purge --label
@@ -1624,8 +1644,8 @@ service that mounts the archive folder:
      while the deletion committed, or gives no valid report, the start reads `status`: a `COMPLETED` request is
      reconciled at once, a `FAILED` one deleted nothing (exit 3), one still `RUNNING` deleted nothing and the next start
      makes it `FAILED` (exit 2), and when `status` cannot tell, the reconciliation runs anyway.
-   - Then the full reconciliation (step 5), and the start ends.
-4. For a run, the step that `next` names:
+   - Then the full reconciliation (step 6), and the start ends.
+5. For a run, the step that `next` names:
    - `export` writes the archive into `<archive-dir>/.partial/`. With nothing eligible, the run ends as
      `NOTHING_ELIGIBLE`.
    - `verify` re-reads every file, compares it with the database and publishes the folder
@@ -1634,9 +1654,11 @@ service that mounts the archive folder:
      without a copy or a backup.
    - `copy` copies the archive to the off-host copy folder and checks the copy, or accepts a copy confirmation; without
      either, the run waits in `WAITING_FOR_COPY` (The off-host copy, below).
-   - `backup`: the pre-purge backup (below). `next` hands it out only after checking that the User who requested the
-     run is still active and still holds Run history archival and purge; otherwise the run becomes `FAILED` and nothing
-     is deleted.
+   - `backup`: the pre-purge backup (below). `next` hands it out only after checking the run's authority, and `purge`
+     checks it again before the run becomes `PURGING`: the user who requested the run, the user who approved it, or,
+     for a run created under the standing authorization, the settings (the approval step not switched on since,
+     **Automatic runs** still on, the cutoff still allowed by the retention period) and then the user who switched the
+     approval step off (Automatic runs, below). Otherwise the run becomes `FAILED` and nothing is deleted.
    - `purge` with that backup: the run becomes `PURGING`, and its archived Movements are deleted in batches of whole
      flow components, at most **Movements per purge batch** and **Part Numbers per purge batch** of Administration
      (50,000 and 20 initially). Each batch is one transaction under the locks of its Part Numbers; a component that
@@ -1648,13 +1670,14 @@ service that mounts the archive folder:
      resumed by `purge` alone, without a new backup: only whole components are ever deleted. Every other failure while
      purging (a deleted count that differs from the records, a guard refusal, a changed published archive, an internal
      error) makes the run `FAILED`, with its receipt (A failed run, below).
-5. After a purge that ended, or failed once the run was `PURGING`, and after a deletion: the full reconciliation (§7),
+6. After a purge that ended, or failed once the run was `PURGING`, and after a deletion: the full reconciliation (§7),
    in a one-off `backend` container as the application database role. When it does not end clean, it is an incident
    (§8, Reconcile finding after a purge, or after a deletion). A purge that exits with 2 is not reconciled in that
    start: the next start resumes it and reconciles when it ends. A start never begins another run after a purge, and
    does no run work after a deletion.
-6. `status`: the open run, the last finished run, the open and the last finished deletion request and the free space,
-   for the monitoring.
+7. `status`: the open run, the last finished run, the open and the last finished deletion request, the automatic runs
+   with their standing authorization, and the free space, for the monitoring, with its findings (Checking a run,
+   below).
 
 Production goes on during a run and a deletion: the export reads one database snapshot, each purge batch holds the
 locks of its Part Numbers only for its own transaction, and a deletion holds the locks of its Part Numbers and rows
@@ -1664,16 +1687,20 @@ minute 0, because a pre-purge backup waits for a backup that is running, and awa
 releases: a release is refused while the job works, and a purge can take long.
 
 **Exit codes of `archive.sh`.** The host task's failure email is the alert. On success it prints one line:
-`NOT_DUE`, `DEFERRED archive_running` (the previous start still works), `ARCHIVE <outcome> <run> <state>`, for example
-`ARCHIVE completed 3 COMPLETED`, or, for a start that worked on a deletion request,
+`NOT_DUE`; `DEFERRED archive_running` (the previous start still works); for an hourly work that worked on no run,
+`EVALUATE <result> <run> <state>`: the result of the evaluation of the automatic runs (Automatic runs, below), then the
+open run that the job found and its state, or `-` without one, for example `EVALUATE off - -` (automatic runs off,
+no run open), `EVALUATE created 7 PROPOSED` (a run was proposed and waits for approval) or
+`EVALUATE run_open 3 WAITING_FOR_COPY`; for an hourly work that worked on a run, `ARCHIVE <outcome> <run> <state>`,
+for example `ARCHIVE completed 3 COMPLETED`; or, for a start that worked on a deletion request,
 `DELETION <outcome> <request> <state>`, for example `DELETION deleted 7 COMPLETED`.
 
 | Exit | Meaning | What to do |
 | --- | --- | --- |
 | 0 | Done, or nothing was due. | Nothing. |
-| 1 | Refused, nothing changed: a release runs, another `archive.sh` holds the archive lock, another history-archive command runs, a step refused, or the incident record of a reconciliation after a purge or a deletion exists. | Nothing: the next start tries again. Repeated refusals: Locks, below; the incident record: §8. |
-| 2 | Could not run: the configuration, Docker or the database, or a step whose outcome is unknown; or a pre-purge backup failed; or a purge or a deletion stopped on a transient database error (the run stays `PURGING`, the deletion request `RUNNING`). | Read the email; fix the cause. A run or a deletion request left `RUNNING` is failed by the next start's `recover`, and nothing was deleted (then request it again); a run left `PURGING` is resumed by the next start, which reconciles when the purge ends. |
-| 3 | A run or a deletion request failed: it is now `FAILED`. A failed deletion request deleted nothing. | A failed run, below; request the deletion again if it is still wanted (§10). |
+| 1 | Refused, nothing changed: a release runs, another `archive.sh` holds the archive lock, another history-archive command runs, a step refused (the evaluation of the automatic runs included), or the incident record of a reconciliation after a purge or a deletion exists. | Nothing: the next start tries again. Repeated refusals: Locks, below; the incident record: §8. |
+| 2 | Could not run: the configuration, Docker or the database, or a step whose outcome is unknown; or the evaluation of the automatic runs could not run or did not finish within the preview time limit (it created no run, and the work on the open run went on); or a pre-purge backup failed; or a purge or a deletion stopped on a transient database error (the run stays `PURGING`, the deletion request `RUNNING`). | Read the email; fix the cause. A run or a deletion request left `RUNNING` is failed by the next start's `recover`, and nothing was deleted (then request it again); a run left `PURGING` is resumed by the next start, which reconciles when the purge ends. An evaluation that keeps running out of time: raise **Preview time limit** in Administration → History archival & purge. |
+| 3 | A run or a deletion request failed: it is now `FAILED`. A failed deletion request deleted nothing. | A failed run, below (a run that could no longer run on its authority: Automatic runs, below); request the deletion again if it is still wanted (§10). |
 | 4 | The reconciliation after a purge or a deletion found a mismatch, ended in error or could not run. | An incident: §8, Reconcile finding after a purge, or after a deletion. Until its record is removed, every start refuses to work on a run or a deletion request (exit 1). |
 
 `archive.sh --help` lists its options; `--backup-wait-minutes N` (0 to 1440, 60 by default) is how long a pre-purge
@@ -1708,25 +1735,125 @@ docker ps --filter label=com.docker.compose.service=maintenance   # must list no
 rm -r ~/partflow-deployments/.archive.lock
 ```
 
+### Automatic runs
+
+With **Automatic runs** switched on in Administration → History archival & purge (they are off initially), the hourly
+work begins with `history-archive evaluate`, which decides whether a run is needed now and, if so, creates it. The
+evaluation itself deletes nothing: an automatic run is exported, verified, copied, backed up and purged exactly as a
+requested run. Without the history archive task ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8), no automatic run is
+ever created. The settings, in Administration → History archival & purge:
+
+- **Automatic runs**: on or off. Switching them off creates no new automatic run, and also stops a run created without
+  approval before it purges (The re-check of a run's authority, below).
+- **The measure** that decides that a run is needed, with its own limit: the live Movement rows (above 5,000,000
+  initially), the age of the retained history (its oldest Movement older than the retention cutoff by more than 1
+  month initially) or the size of the database (above 20 GiB initially). A limit of 0 lets every evaluation that finds
+  eligible history create a run.
+- **The approval step** (on initially): whether an automatic run waits for a person's approval.
+- **The days between automatic runs** (7 initially), counted from the end of the last automatic run, whatever its end
+  (completed, dismissed, cancelled or failed); requested runs do not count.
+- **Report a waiting run after** (7 days initially) also limits how long a proposed run may wait for its approval.
+
+`evaluate` checks the conditions in this order and stops at the first one that does not hold. `archive.sh` logs its
+result with a message that gives the values it read:
+
+| Result | Meaning |
+| --- | --- |
+| `off` | Automatic runs are off. |
+| `no_retention_period` | No retention period is set, so no history is eligible. |
+| `run_open` | A run is open, a proposed one included: no automatic run is created while one is open. |
+| `not_due` | The last automatic run ended less than the days between automatic runs ago; the message says when the next one is due. |
+| `authorization_invalid` | The approval step is off, and its standing authorization is no longer valid (below); the message says why. |
+| `below_limit` | The measure is not above its limit. |
+| `nothing_eligible` | The measure is above its limit, but nothing is eligible at the retention cutoff. Every hourly work then reads the preview again. |
+| `settings_changed` | The on switch or the approval setting changed while the evaluation ran: no run was created, and the next hourly work evaluates again. |
+| `created` | A run was created: `PROPOSED`, or `APPROVED` under the standing authorization. |
+
+All of these exit with 0. The measure and the preview of the eligible history share the **Preview time limit** of
+Administration (90 seconds initially): an evaluation that runs out of it creates no run and exits with 2, as one that
+cannot reach the database does, and another history-archive command that holds the job's lock refuses it with exit 1.
+`archive.sh` then reports the error in its exit status, and the start still works on the open run. Raise the preview
+time limit when the evaluation keeps running out of it.
+
+**A proposed run.** With the approval step on, an automatic run is created `PROPOSED`, with the preview's counts and
+an automatic reason, for example "Live Movement rows 5,120,334 above the limit 5,000,000; retention 24 months". The job
+does nothing with it. A holder of Run history archival and purge decides in Administration → History archival & purge:
+
+- **Approve…**, with a reason of their own: the run becomes `APPROVED`, and the next hourly work exports it. The user
+  who approved it is the user of its authority.
+- **Dismiss…**, without a reason: the run becomes `DISMISSED` and is finished; the days between automatic runs count
+  from its dismissal.
+
+A proposed run cannot be cancelled. While it waits, no other run can be requested and no other automatic run is
+created. Once it has waited longer than **Report a waiting run after**, `check.sh` reports
+`FAIL archival_proposal approval_overdue` until it is approved or dismissed.
+
+**The standing authorization.** Switching the approval step off needs Run history archival and purge, a reason and the
+typed confirmation `RUN WITHOUT APPROVAL`. The audit row of that change is the **standing authorization**: from then on
+an automatic run is created `APPROVED`, records that authorization, and the same start works on it, so nobody reviews
+its preview before it runs. Saving the approval setting again with a reason and the confirmation while the step is
+off renews it (a new standing authorization); switching the step on withdraws it. The standing authorization is valid
+while the user who switched the step off is active and holds Run history archival and purge, and while no run created
+under it has failed on that user. After such a failure it stays invalid, even once that user is active and holds the
+permission again, until a holder of the permission saves the approval setting again (renewing it, or switching the
+approval step on). While it is not valid, `evaluate` answers `authorization_invalid` and creates no run, Administration
+shows the reason, and `check.sh` reports `FAIL archival_proposal standing_authorization_invalid` while automatic runs
+are on.
+
+**The re-check of a run's authority.** Right before it hands out the pre-purge backup, and again right before the
+purge, the job checks the run's authority:
+
+- a requested run: the user who requested it;
+- an approved proposal: the user who approved it;
+- a run created under the standing authorization, which no person reviewed, in this order: the approval step, which
+  must not have been switched on since the run was created (renewing the authorization does not count); **Automatic
+  runs**, which must still be on; the run's cutoff, which the retention period as it is set now must still allow (it no
+  longer does once the period was lengthened past it, or cleared); then the user of the authorization that the run was
+  created under.
+
+That user must still be active and still hold Run history archival and purge. Whichever check fails, the run becomes
+`FAILED` with nothing deleted and `archive.sh` exits with 3:
+
+- When a user is no longer active or no longer holds the permission, or the approval step was switched on, `check.sh`
+  reports `authorization_failed` with the reason (instead of `last_run_failed`) until a later run finishes. Then
+  request a new run, or approve the next proposed one. When the user of the standing authorization made the run fail,
+  that authorization stays invalid, and automatic runs wait until a holder of the permission saves the approval setting
+  again.
+- When **Automatic runs** is off or the retention period no longer allows the cutoff, the run fails as any failed run:
+  `check.sh` reports `last_run_failed` with the reason until a later run finishes, and the standing authorization stays
+  valid for the next automatic run.
+
+A run created without approval can therefore still be stopped before it purges: switch **Automatic runs** off, or
+switch the approval step on (which also withdraws the standing authorization), and its next re-check fails it,
+deleting nothing. Lengthening the retention period stops such a run whose cutoff the new period no longer allows. A run
+that is already `PURGING` has passed both re-checks. These settings never stop a requested run or an approved
+proposal: cancel such a run in Administration while it is `APPROVED` or `WAITING_FOR_COPY`.
+
 ### Checking a run
 
 - **Administration → History archival & purge** lists every run with its state, its counts and, once exported, the
   archive name and the manifest SHA-256.
 - `check.sh` prints the line `archival_proposal` (§2): `PASS` with the open run (a `PURGING` run with what it purged so
-  far), the last finished run (its result, what it purged and what it skipped), the free space, and the open and the
-  last finished permanent deletion request (`deletion request 7 APPROVED for 2 min`, `last deletion request 6
-  COMPLETED`), or `FAIL` naming each finding: `copy_confirmation_overdue` (a run has waited for its copy confirmation
-  longer than the setting **Report a waiting run after**), `last_run_failed` (the newest finished run is `FAILED`),
-  `archive_dir_unusable` (the archive folder is missing or not writable), `copy_dir_unusable` (the copy folder is set
-  but not mounted, missing, not writable or on the archive folder's own file system), `receipt_not_copied` (the purge
-  receipt of a run that the job copied off the host is missing or differs in the copy folder; the next start copies
-  it again) or `deletion_request_waiting` (a deletion request is still open, `APPROVED` or `RUNNING`, more than 15
-  minutes after it was requested, `--deletion-wait-minutes`: the history archive task has not carried it out or has not
-  finished it, so check that the task is enabled; an `APPROVED` request behind a run that is `RUNNING` or `PURGING`
-  names that run). A `FAILED` deletion request is no finding. The incident of a reconciliation after a purge or a
-  deletion comes first, as `reconcile_after_purge` (§8).
-- The full report, read-only; it also names the open deletion request (`open_deletion_request`, with its age) and the
-  last finished one (`last_finished_deletion_request`):
+  far; a run that waits for its approval with how long it has waited, `run 7 PROPOSED waiting 2.0 days for approval
+  (limit 7 days)`), the last finished run (its result, what it purged and what it skipped), the free space, and the
+  open and the last finished permanent deletion request (`deletion request 7 APPROVED for 2 min`, `last deletion
+  request 6 COMPLETED`), or `FAIL` naming each finding: `copy_confirmation_overdue` (a run has waited for its copy
+  confirmation longer than the setting **Report a waiting run after**), `approval_overdue` (an automatic run has
+  waited for its approval, `PROPOSED`, longer than that setting: approve or dismiss it), `last_run_failed` (the newest
+  finished run is `FAILED`), `authorization_failed` (named instead of `last_run_failed` when that run failed because it
+  could no longer run on its authority, with the reason: Automatic runs, below), `standing_authorization_invalid`
+  (automatic runs are on without the approval step, and its standing authorization is no longer valid, with the
+  reason: Automatic runs, below), `archive_dir_unusable` (the archive folder is missing or not writable),
+  `copy_dir_unusable` (the copy folder is set but not mounted, missing, not writable or on the archive folder's own
+  file system), `receipt_not_copied` (the purge receipt of a run that the job copied off the host is missing or differs
+  in the copy folder; the next start copies it again) or `deletion_request_waiting` (a deletion request is still open,
+  `APPROVED` or `RUNNING`, more than 15 minutes after it was requested, `--deletion-wait-minutes`: the history archive
+  task has not carried it out or has not finished it, so check that the task is enabled; an `APPROVED` request behind
+  a run that is `RUNNING` or `PURGING` names that run). A `FAILED` deletion request is no finding. The incident of a
+  reconciliation after a purge or a deletion comes first, as `reconcile_after_purge` (§8).
+- The full report, read-only; it also names the open deletion request (`open_deletion_request`, with its age), the
+  last finished one (`last_finished_deletion_request`) and the automatic runs (`automatic_runs`: whether they are on,
+  whether the approval step is on, and the standing authorization with its validity and `problem`):
 
   ```sh
   $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status
@@ -1734,15 +1861,17 @@ rm -r ~/partflow-deployments/.archive.lock
 
 | State | Meaning |
 | --- | --- |
-| `APPROVED` | Requested in Administration; the next hourly work exports it. It can still be cancelled. |
+| `PROPOSED` | An automatic run that waits for a holder of Run history archival and purge to approve or dismiss it (Automatic runs, below). The job does nothing with it. It cannot be cancelled: dismiss it instead. |
+| `APPROVED` | Requested in Administration, a proposed run that was approved, or an automatic run created under the standing authorization; the next hourly work exports it (an automatic run created `APPROVED`, in the same start). It can still be cancelled. |
 | `RUNNING` | The job exports, verifies or copies it, or takes its pre-purge backup. It cannot be cancelled. |
 | `WAITING_FOR_COPY` | Verified and published; it waits for its off-host copy or a confirmation. It can be cancelled. |
 | `PURGING` | The job deletes its archived Movements, batch by batch. It cannot be cancelled; a purge that stopped (a restart, or a transient database error such as a lost connection or a deadlock) is resumed by the next start. |
 | `COMPLETED` | Copied off the host and purged: the result is `PURGED`. A run finished before the purge existed has the result `EXPORT_ONLY` (exported, nothing deleted). |
 | `COMPLETED_WITH_SKIPS` | Finished, but some components changed after the export and stay in the database; the receipt lists them. The result is `PURGED`, or `NOTHING_PURGED` when every component was skipped. `check.sh` passes and names the skips. |
 | `NOTHING_ELIGIBLE` | Nothing was eligible at its cutoff when the export started. |
-| `CANCELLED` | Cancelled in Administration. A published archive folder stays. |
-| `FAILED` | A check failed; the reason is shown. Nothing was deleted, unless the run failed while `PURGING` (a deleted count that differs from its records, a guard refusal, a changed published archive, an internal error; a transient database error leaves it `PURGING` instead): it then keeps the whole components it purged, and its receipt lists them. |
+| `DISMISSED` | A proposed run that a holder of Run history archival and purge dismissed. Nothing was exported or deleted. |
+| `CANCELLED` | Cancelled in Administration (possible while `APPROVED` or `WAITING_FOR_COPY`). A published archive folder stays. |
+| `FAILED` | A check failed; the reason is shown (for a run that could no longer run on its authority, also as an authorization failure: Automatic runs, below). Nothing was deleted, unless the run failed while `PURGING` (a deleted count that differs from its records, a guard refusal, a changed published archive, an internal error; a transient database error leaves it `PURGING` instead): it then keeps the whole components it purged, and its receipt lists them. |
 
 ### The pre-purge backup
 
@@ -1830,20 +1959,28 @@ purged. Two ways exist:
 
 A run that waits for a confirmation longer than the setting **Report a waiting run after** of Administration
 (7 days initially) makes
-`check.sh` report `FAIL archival_proposal copy_confirmation_overdue`. A waiting run never blocks a release.
+`check.sh` report `FAIL archival_proposal copy_confirmation_overdue`; the same setting limits how long a proposed run
+waits for its approval (`approval_overdue`, Automatic runs, above). A waiting run never blocks a release.
 
 ### A failed run
 
 A run becomes `FAILED` when a check fails: for example the cutoff became newer than the shortest allowed period, the
-counts exceed the preview, the files differ from the database, the published folder changed or vanished, the User who
-requested it is no longer active or no longer holds Run history archival and purge, or the job stopped while the run
-was `RUNNING` (also after a failed pre-purge backup). `archive.sh` then exits 3 once, and `check.sh` reports
-`last_run_failed` until a later run finishes.
+counts exceed the preview, the files differ from the database, the published folder changed or vanished, the run could
+no longer run on its authority (the user who requested it, who approved it, or who switched off the approval step is
+no longer active or no longer holds Run history archival and purge, or the approval step was switched on again after
+an automatic run was created without approval), the settings no longer let an automatic run created without approval
+run (**Automatic runs** was switched off, or the retention period no longer allows its cutoff: Automatic runs, above),
+or the job stopped while the run was `RUNNING` (also after a failed pre-purge backup). `archive.sh` then exits 3 once,
+and `check.sh` reports `last_run_failed`, or `authorization_failed` for a run that could no longer run on its
+authority, until a later run finishes.
 
 1. Read the reason: in Administration, in the failure email, or in `<records-dir>/archive/<UTC>/` (the step's
    `.json` and `.log`).
-2. Fix the cause, for example free space in the archive or backup folder, or mount the copy folder.
-3. Request a new run in Administration. A failed run is never resumed; the new run writes a new archive folder.
+2. Fix the cause, for example free space in the archive or backup folder, or mount the copy folder. When the user of
+   the standing authorization made the run fail, a holder of Run history archival and purge saves the approval setting
+   again (Automatic runs, above).
+3. Request a new run in Administration, or let the automatic runs create the next one. A failed run is never resumed;
+   the new run writes a new archive folder.
 
 Nothing was deleted, unless the run failed while `PURGING` (a deleted count that differs from its records, a guard
 refusal, the published archive changed, an internal error): it then keeps the whole components it purged, its receipt
@@ -1890,7 +2027,8 @@ host ([`SYNOLOGY_NAS.md`](./SYNOLOGY_NAS.md) §11.8), and remove it on the old h
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §10: permanent deletion requests, made in PartFlow by a holder of Delete Work Orders and Part Numbers permanently or with `pf delete-permanently`, which the history archive job carries out within 5 minutes after a pre-purge backup, and which need that job set up; the audit rows of earlier deletions stay; §11: the cheap check at every start, the deletion steps, the backup label `deletion-<id>-<UTC time>`, the `DELETION` line and every exit 2 of `delete` resolved through `status`; §8: the incident of a reconcile finding after a deletion, and `deletion_request_waiting`; §3 and §11: deletions and purges share Pre-purge backups kept; §6: cancel the unwanted `APPROVED` requests after a restore; §2, §7, §9 and the `pf` table for the requests. |
+| 2026-11-18 | uncommitted | §11: the automatic runs: `evaluate` at the start of the hourly work and the `EVALUATE` line of `archive.sh`, the states `PROPOSED` and `DISMISSED`, approval and dismissal in Administration, the standing authorization and the re-check of a run's authority, which also stops a run created without approval before its purge when Automatic runs is switched off, the approval step is switched on or the retention period no longer allows its cutoff; §2, §8 and §11: `approval_overdue`, `authorization_failed` and `standing_authorization_invalid`; §1, §8, §9, §10 and the `pf` table for the evaluation and the proposed runs. |
+| 2026-11-18 | `1874636` | §10: permanent deletion requests, made in PartFlow by a holder of Delete Work Orders and Part Numbers permanently or with `pf delete-permanently`, which the history archive job carries out within 5 minutes after a pre-purge backup, and which need that job set up; the audit rows of earlier deletions stay; §11: the cheap check at every start, the deletion steps, the backup label `deletion-<id>-<UTC time>`, the `DELETION` line and every exit 2 of `delete` resolved through `status`; §8: the incident of a reconcile finding after a deletion, and `deletion_request_waiting`; §3 and §11: deletions and purges share Pre-purge backups kept; §6: cancel the unwanted `APPROVED` requests after a restore; §2, §7, §9 and the `pf` table for the requests. |
 | 2026-11-18 | `d094f5e` | §6 and §8: disable the history archive task before any restore, because a restored `PURGING` run resumes its purge; §8 and §11: a transient database error leaves a purge `PURGING` for the next start, which reconciles when it ends. |
 | 2026-11-18 | `d094f5e` | §11: the history archive job purges archived Movement history after the off-host copy and a pre-purge backup, then reconciles; the states `PURGING` and `COMPLETED_WITH_SKIPS`, the results `PURGED` and `NOTHING_PURGED`, the purge receipt, the resumed purge, the pre-purge backup and its wait, and returning disk space with `VACUUM FULL`; §8: the incident of a reconcile finding after a purge, during which the archive job works on no run; §3: the `pre-purge` backup kind, its rotation and `--lock-wait-minutes`; §1, §2, §7, §9, §10 and the `pf` table for the purge. |
 | 2026-11-17 | `2f12d33` | §11 and the `pf` table: the history archive job (`archive.sh`, `pf archive`), which exports and copies archives and never deletes anything; §1, §2, §6, §8 and §9 for its records, check lines, move, problems and schedule. |

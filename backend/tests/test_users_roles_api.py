@@ -1066,10 +1066,13 @@ def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
         "fk_machine_lifecycle_events_actor_user_id_users",
         "fk_work_order_allocations_actor_user_id_users",
         # Phase 16: the people who request, confirm the copy of or cancel
-        # a history archival run.
+        # a history archival run, and (step 4) who approve or dismiss a
+        # proposed one.
         "fk_history_archive_runs_requested_by_user_id_users",
         "fk_history_archive_runs_copy_confirmed_by_user_id_users",
         "fk_history_archive_runs_cancelled_by_user_id_users",
+        "fk_history_archive_runs_approved_by_user_id_users",
+        "fk_history_archive_runs_dismissed_by_user_id_users",
         # Phase 16, history archival step 3: the people who request or cancel
         # a permanent deletion request.
         "fk_deletion_requests_requested_by_user_id_users",
@@ -1282,6 +1285,11 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     "app/application/history_archive_job.py",
     # Phase 16, history archival step 3: the permanent deletion routes.
     "app/api/permanent_deletion.py",
+    # Phase 16, history archival step 4: the archival module tells whether the
+    # User of a run's authority, or of the standing authorization of automatic
+    # runs, still holds Run history archival and purge (the job and the settings
+    # read it there).
+    "app/application/history_archive.py",
 }
 
 

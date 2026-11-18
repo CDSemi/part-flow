@@ -8,10 +8,11 @@
 #   backup   a manual deploy/production/backup.sh (OPERATIONS_RUNBOOK §3)
 #   restore  the new-instance restore of a backup into an empty database (OPERATIONS_RUNBOOK §6)
 #   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
-#   archive  the history archive job now: deploy/production/archive.sh (§11): an open permanent deletion request
-#            (its pre-purge backup and the deletion), or the hourly work of Movement-history archival: the export, check
-#            and off-host copy of a requested run, its pre-purge backup and the purge of the archived Movement history
-#            from the database; then the reconcile after the purge or the deletion
+#   archive  the history archive job now: deploy/production/archive.sh (§11): first the evaluation of the automatic
+#            runs (`evaluate`, which may create a run); then an open permanent deletion request (its pre-purge backup and
+#            the deletion), or the hourly work of Movement-history archival: the export, check and off-host copy of an
+#            approved run, its pre-purge backup and the purge of the archived Movement history from the database; then
+#            the reconcile after the purge or the deletion
 #   delete-permanently
 #            the preview of deleting Work Orders and Part Numbers entered only for testing, or with --confirm a
 #            permanent deletion request (`app.cli delete-permanently` in the owner's one-shot db-roles service) that
@@ -51,10 +52,13 @@ Commands:
   status [--url URL]        the containers, /api/health and the status report; with --url the full check.sh
   archive                   run the history archive job now (archive.sh; OPERATIONS_RUNBOOK §11): carry out an open
                             permanent deletion request (its pre-purge backup, then the deletion), or the hourly work
-                            of Movement-history archival: export, verify and copy a requested run, take its pre-purge
+                            of Movement-history archival: export, verify and copy an approved run, take its pre-purge
                             backup and PURGE its archived Movement history from the database; then reconcile; or
-                            continue a run that waits for its copy confirmation or was left purging. A start that
-                            carried out a deletion does no run work: run it again for that
+                            continue a run that waits for its copy confirmation or was left purging. First it
+                            evaluates the automatic runs: when Administration has them on and their measure calls for
+                            one, it creates a run, PROPOSED for a person's approval, or APPROVED under the standing
+                            authorization, which it then works on. A start that carried out a deletion does no run
+                            work: run it again for that
   delete-permanently (--work-order NUMBER | --part-number PN)... --reason TEXT [--confirm]
                             show what would be deleted of Work Orders and Part Numbers entered only for testing; with
                             --confirm record a permanent deletion request and run the history archive job at once

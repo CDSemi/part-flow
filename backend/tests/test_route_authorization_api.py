@@ -423,9 +423,18 @@ def _owner(client: TestClient) -> Engine:
 
 
 def _close_open_runs(client: TestClient) -> None:
-    """Fail every open run, as the maintenance job would (owner, with its setting)."""
+    """Fail every open run, as the maintenance job would (owner, with its setting); a
+    proposed (automatic) run is dismissed instead, as a person would."""
     owner = _owner(client)
     try:
+        with owner.begin() as connection:
+            proposed = list(
+                connection.execute(
+                    sa.text("SELECT id FROM history_archive_runs WHERE state = 'PROPOSED'")
+                ).scalars()
+            )
+        for run_id in proposed:
+            _ok(admin_of(client).post(f"/api/history-archive/runs/{run_id}/dismiss"))
         with owner.begin() as connection:
             open_ids = list(
                 connection.execute(
@@ -528,6 +537,39 @@ def _requested_run(client: TestClient) -> int:
 
 def _run_to_cancel(client: TestClient) -> tuple[str, dict[str, Any]]:
     return f"/api/history-archive/runs/{_requested_run(client)}/cancel", {}
+
+
+def _proposed_run(client: TestClient) -> int:
+    """A PROPOSED automatic run, inserted as the host job's evaluate inserts one (history
+    archival step 4; owner, a role that may write archive records)."""
+    _close_open_runs(client)
+    owner = _owner(client)
+    try:
+        with owner.begin() as connection:
+            return int(
+                connection.execute(
+                    sa.text(
+                        "INSERT INTO history_archive_runs (state, trigger, cutoff, reason,"
+                        " preview_components, preview_flows, preview_movements,"
+                        " preview_archive_bytes) VALUES ('PROPOSED', 'AUTOMATIC',"
+                        " now() - interval '36 months', 'authorization test', 1, 1, 1, 0)"
+                        " RETURNING id"
+                    )
+                ).scalar_one()
+            )
+    finally:
+        owner.dispose()
+
+
+def _run_to_approve(client: TestClient) -> tuple[str, dict[str, Any]]:
+    return (
+        f"/api/history-archive/runs/{_proposed_run(client)}/approve",
+        {"json": {"reason": "authorization test"}},
+    )
+
+
+def _run_to_dismiss(client: TestClient) -> tuple[str, dict[str, Any]]:
+    return f"/api/history-archive/runs/{_proposed_run(client)}/dismiss", {}
 
 
 def _run_waiting_for_copy(client: TestClient) -> tuple[str, dict[str, Any]]:
@@ -897,6 +939,24 @@ _WRITES: list[_Write] = [
         _key(RHAP),
         _key(RHAP),
         _run_to_cancel,
+        "history_archive_runs",
+    ),
+    _Write(
+        "history-archive-approve",
+        "POST",
+        "/api/history-archive/runs/{run_id}/approve",
+        _key(RHAP),
+        _key(RHAP),
+        _run_to_approve,
+        "history_archive_runs",
+    ),
+    _Write(
+        "history-archive-dismiss",
+        "POST",
+        "/api/history-archive/runs/{run_id}/dismiss",
+        _key(RHAP),
+        _key(RHAP),
+        _run_to_dismiss,
         "history_archive_runs",
     ),
     _Write(

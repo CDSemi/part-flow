@@ -18,30 +18,58 @@ import { formatInstant } from './archive-runs';
 import { HistoryArchivalSection } from './HistoryArchivalSection';
 
 // Administration → History archival & purge (Phase 16, archival design B
-// steps 1 and 2): the settings card and its partial-PUT dialog (with the
+// steps 1, 2 and 4): the settings card and its partial-PUT dialog (with the
 // purge batch limits), the preview with its progress and the server's
 // refusals, the request of a run (and a request whose answer was lost),
 // what a run purges, and the runs table with the purge's states, results,
-// counts and evidence, Cancel and Confirm off-host copy; and (step 3,
-// D17) the Permanent deletion requests card, shown only to holders of its
-// key, with Cancel. The /api surface is faked in memory with the
-// contracts' routes and shapes; the server's messages are shown as given.
+// counts and evidence, Cancel and Confirm off-host copy; (step 3, D17) the
+// Permanent deletion requests card, shown only to holders of its key, with
+// Cancel; and (step 4, D9–D11) the Automatic runs card with its dialog —
+// the measure with its own limit, the approval step switched off, renewed
+// and on again with the standing authorization and its validity — and the
+// automatic runs in the table: Proposed and Dismissed, Automatic with the
+// approval or the standing authorization, Approve… and Dismiss…. The /api
+// surface is faked in memory with the contracts' routes and shapes; the
+// server's messages are shown as given.
 
 const T0 = '2026-11-17T08:00:00Z';
+/** When the fake server approves or dismisses a proposed run. */
+const T1 = '2026-11-18T09:12:00Z';
 const SHA = 'a'.repeat(64);
 const RECEIPT_SHA = 'b'.repeat(64);
 /** The pre-purge backup disclosure, its hyphen non-breaking (U+2011). */
 const PRE_PURGE = 'Pre‑purge backup';
+/** The state pill of a run waiting for its off-host copy, its hyphen
+ * non-breaking (U+2011). */
+const WAITING_FOR_COPY = 'Waiting for the off‑host copy';
+
+interface UserWire {
+  user_id: number;
+  display_name: string;
+}
 
 interface RunWire {
   id: number;
   state: string;
+  trigger: string;
   cutoff: string;
   cutoff_date: string;
   groups: string[];
   reason: string;
-  requested_by: { user_id: number; display_name: string };
+  requested_by: UserWire | null;
   requested_at: string;
+  approval: {
+    approved_by: UserWire;
+    approved_at: string;
+    reason: string;
+  } | null;
+  dismissed_by: UserWire | null;
+  authorization: {
+    audit_event_id: number;
+    authorized_by: UserWire | null;
+    authorized_at: string | null;
+  } | null;
+  authorization_failed: boolean;
   preview: {
     components: number;
     flows: number;
@@ -82,12 +110,17 @@ function run(id: number, overrides: Partial<RunWire> = {}): RunWire {
   return {
     id,
     state: 'APPROVED',
+    trigger: 'MANUAL',
     cutoff: '2024-11-17T08:00:00Z',
     cutoff_date: '2024-11-17',
     groups: ['MOVEMENT_HISTORY'],
     reason: 'First archive',
     requested_by: { user_id: 1, display_name: 'Ann' },
     requested_at: '2026-11-17T09:00:00Z',
+    approval: null,
+    dismissed_by: null,
+    authorization: null,
+    authorization_failed: false,
     preview: {
       components: 120,
       flows: 310,
@@ -165,6 +198,30 @@ const PURGED = (id: number) =>
     result: 'PURGED',
   });
 
+/** An automatic run the archival job proposed (archival step 4). */
+const AUTO_REASON =
+  'Live Movement rows 5,120,334 above the limit 5,000,000; retention 24 months';
+
+function proposed(id: number, overrides: Partial<RunWire> = {}): RunWire {
+  return run(id, {
+    state: 'PROPOSED',
+    trigger: 'AUTOMATIC',
+    requested_by: null,
+    reason: AUTO_REASON,
+    requested_at: '2026-11-18T08:20:00Z',
+    ...overrides,
+  });
+}
+
+interface StandingAuthorizationWire {
+  audit_event_id: number;
+  authorized_by: UserWire | null;
+  authorized_at: string | null;
+  reason: string | null;
+  valid: boolean;
+  problem: string | null;
+}
+
 interface Policy {
   retention_period_months: number | null;
   shortest_retention_months: number;
@@ -173,7 +230,26 @@ interface Policy {
   archive_max_wait_days: number;
   archive_purge_batch_movements: number;
   archive_purge_batch_part_numbers: number;
+  archive_automatic_runs: boolean;
+  archive_measure: string;
+  archive_limit_movement_rows: number;
+  archive_limit_history_months: number;
+  archive_limit_database_gib: number;
+  archive_approval_required: boolean;
+  archive_interval_days: number;
+  standing_authorization: StandingAuthorizationWire | null;
 }
+
+/** The server's refusals of the approval step (B4 contract §5.1). */
+const CONFIRMATION_REFUSAL =
+  'Type RUN WITHOUT APPROVAL to confirm that automatic runs archive and purge history without anyone approving them first.';
+const AUTHORIZATION_REASON_REFUSAL =
+  'Enter the reason for letting automatic runs start without approval: 1 to 500 characters of plain text.';
+const CONFIRMATION_UNNEEDED =
+  'Type the confirmation only to switch off the approval step of automatic runs.';
+/** The standing authorization's problem once its User lost the key. */
+const KEY_LOST =
+  'The User who switched off the approval step of automatic runs, Ann Admin (user 4), no longer holds Run history archival and purge. No automatic run is created until a holder of the key saves the approval setting again.';
 
 /** A permanent deletion request (archival step 3, D17) as the API
  * answers it. */
@@ -282,8 +358,48 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       const refused = fail('PUT policy');
       if (refused) return refused;
       const changes = { ...(body as Record<string, unknown>) };
+      const { reason, confirmation } = changes;
       delete changes.reason;
-      policy = { ...policy, ...changes } as Policy;
+      delete changes.confirmation;
+      const after = { ...policy, ...changes } as Policy;
+      // The approval step as the server checks it (B4 contract §2.2,
+      // §5.1): switching it off, or renewing it while it stays off, needs
+      // the typed confirmation and a reason; the audited change is the
+      // standing authorization.
+      const given = confirmation !== undefined && confirmation !== null;
+      let granted = false;
+      if (after.archive_approval_required) {
+        if (given) return json({ detail: CONFIRMATION_UNNEEDED }, 422);
+        after.standing_authorization = null;
+      } else if (!given) {
+        if (policy.archive_approval_required) {
+          return json({ detail: CONFIRMATION_REFUSAL }, 422);
+        }
+      } else if (
+        String(confirmation)
+          .split(/\s+/)
+          .filter(Boolean)
+          .join(' ')
+          .toUpperCase() !== 'RUN WITHOUT APPROVAL'
+      ) {
+        return json({ detail: CONFIRMATION_REFUSAL }, 422);
+      } else if (typeof reason !== 'string' || reason.trim() === '') {
+        return json({ detail: AUTHORIZATION_REASON_REFUSAL }, 422);
+      } else {
+        granted = true;
+      }
+      if (granted) {
+        after.standing_authorization = {
+          audit_event_id:
+            (policy.standing_authorization?.audit_event_id ?? 40) + 1,
+          authorized_by: { user_id: 90, display_name: 'Ada Admin' },
+          authorized_at: T0,
+          reason: (reason as string).trim(),
+          valid: true,
+          problem: null,
+        };
+      }
+      policy = after;
     }
     return json({ ...policy, updated_at: T0 });
   }
@@ -332,22 +448,97 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     return json(created, 201);
   }
   const action =
-    /^\/api\/history-archive\/runs\/(\d+)\/(cancel|copy-confirmation)$/.exec(
+    /^\/api\/history-archive\/runs\/(\d+)\/(cancel|copy-confirmation|approve|dismiss)$/.exec(
       url,
     );
   if (action && method === 'POST') {
+    const kind = action[2];
+    // Approve checks its reason before the run (B4 contract §5.3).
+    if (kind === 'approve') {
+      const reason = (body as { reason?: unknown } | undefined)?.reason;
+      if (typeof reason !== 'string' || reason.trim() === '') {
+        return json(
+          {
+            detail:
+              'Enter the reason for approving this run: 1 to 500 characters of plain text.',
+          },
+          422,
+        );
+      }
+    }
     const target = runs.find((r) => r.id === Number(action[1]));
     if (!target)
       return json({ detail: `There is no archival run ${action[1]}.` }, 404);
-    const refused = fail(action[2] === 'cancel' ? 'POST cancel' : 'POST copy');
+    const refused = fail(
+      {
+        cancel: 'POST cancel',
+        'copy-confirmation': 'POST copy',
+        approve: 'POST approve',
+        dismiss: 'POST dismiss',
+      }[kind] as string,
+    );
     if (refused) return refused;
-    if (action[2] === 'cancel') {
+    const me = { user_id: 90, display_name: 'Ada Admin' };
+    if (kind === 'approve') {
+      if (target.state !== 'PROPOSED') {
+        return json(
+          {
+            detail: `Run ${target.id} is ${target.state}; only a run waiting for approval (PROPOSED) can be approved.`,
+          },
+          409,
+        );
+      }
+      target.state = 'APPROVED';
+      target.approval = {
+        approved_by: me,
+        approved_at: T1,
+        reason: (body as { reason: string }).reason.trim(),
+      };
+    } else if (kind === 'dismiss') {
+      if (['APPROVED', 'WAITING_FOR_COPY'].includes(target.state)) {
+        return json(
+          {
+            detail: `Run ${target.id} is ${target.state}; only a run waiting for approval (PROPOSED) can be dismissed. Cancel it instead.`,
+          },
+          409,
+        );
+      }
+      if (['RUNNING', 'PURGING'].includes(target.state)) {
+        return json(
+          {
+            detail: `Run ${target.id} is running on the server now and cannot be dismissed. Wait until it stops.`,
+          },
+          409,
+        );
+      }
+      if (target.state !== 'PROPOSED' && target.state !== 'DISMISSED') {
+        return json(
+          {
+            detail: `Run ${target.id} is finished (${target.state}) and cannot be dismissed.`,
+          },
+          409,
+        );
+      }
+      if (target.state === 'PROPOSED') {
+        target.state = 'DISMISSED';
+        target.dismissed_by = me;
+        target.finished_at = T1;
+      }
+    } else if (kind === 'cancel') {
+      if (target.state === 'PROPOSED') {
+        return json(
+          {
+            detail: `Run ${target.id} waits for approval (PROPOSED): dismiss it instead of cancelling it.`,
+          },
+          409,
+        );
+      }
       target.state = 'CANCELLED';
-      target.cancelled_by = { user_id: 90, display_name: 'Ada Admin' };
+      target.cancelled_by = me;
       target.finished_at = T0;
     } else {
       target.copy_confirmed_at = T0;
-      target.copy_confirmed_by = { user_id: 90, display_name: 'Ada Admin' };
+      target.copy_confirmed_by = me;
     }
     return json(target);
   }
@@ -425,6 +616,14 @@ beforeEach(() => {
     archive_max_wait_days: 7,
     archive_purge_batch_movements: 50000,
     archive_purge_batch_part_numbers: 20,
+    archive_automatic_runs: false,
+    archive_measure: 'LIVE_MOVEMENT_ROWS',
+    archive_limit_movement_rows: 5000000,
+    archive_limit_history_months: 1,
+    archive_limit_database_gib: 20,
+    archive_approval_required: true,
+    archive_interval_days: 7,
+    standing_authorization: null,
   };
   runs = [];
   deletions = [];
@@ -467,18 +666,44 @@ async function loaded() {
   );
 }
 
-/** The cells of the runs table's row of run `id`, by column. */
+/** The row of run `id` in the runs table. */
+function runRowElement(id: number): HTMLElement {
+  const row = within(within(card('Runs')).getByRole('table'))
+    .getAllByRole('row')
+    .find((tr) => tr.querySelector('td')?.textContent === String(id));
+  if (!row) throw new Error(`No row for run ${id}`);
+  return row;
+}
+
+/** The cells of the runs table's row of run `id`, by column: the State is
+ * its pill, and `Actions` the buttons under it. */
 function runRow(id: number): Record<string, string> {
   const table = within(card('Runs')).getByRole('table');
   const headers = within(table)
     .getAllByRole('columnheader')
     .map((th) => th.textContent ?? '');
-  const row = within(table)
-    .getAllByRole('row')
-    .find((tr) => tr.querySelector('td')?.textContent === String(id));
-  if (!row) throw new Error(`No row for run ${id}`);
+  const row = runRowElement(id);
   const cells = Array.from(row.querySelectorAll('td'), (td) => td.textContent);
-  return Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? '']));
+  const state = row.querySelector('td[data-label="State"]') as HTMLElement;
+  return {
+    ...Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? ''])),
+    State: state.querySelector('.pillnav')?.textContent ?? '',
+    Actions: Array.from(
+      state.querySelectorAll('button'),
+      (button) => button.textContent,
+    ).join(' / '),
+  };
+}
+
+/** The lines a cell of run `id` shows outside its folded disclosures. */
+function runLines(id: number, label: string): string[] {
+  const cell = runRowElement(id).querySelector(
+    `td[data-label="${label}"]`,
+  ) as HTMLElement;
+  return Array.from(
+    cell.querySelectorAll(':scope > .admin-runlines > :not(details)'),
+    (line) => line.textContent ?? '',
+  );
 }
 
 test('HA-1: the section shows the settings, the preview and the runs, and says what a run purges', async () => {
@@ -527,28 +752,49 @@ test('HA-1: the section shows the settings, the preview and the runs, and says w
   expect(card('Runs').textContent).not.toContain('nothing is deleted');
   expect(screen.queryByText(/View only/)).toBeNull();
 
+  // Six columns keep the table inside its card at a 1024 px window.
+  expect(
+    within(card('Runs'))
+      .getAllByRole('columnheader')
+      .map((th) => th.textContent),
+  ).toEqual([
+    'Run',
+    'State',
+    'Cutoff and counts',
+    'Requested by',
+    'Times',
+    'Result',
+  ]);
   expect(runRow(3)).toMatchObject({
     State: 'Running',
-    'Cutoff date': 'Nov 17, 2024',
     Result: '—',
-    Archive: '—',
+    Actions: '',
   });
-  // No export yet: the preview's numbers, Movements first, marked as such.
-  expect(runRow(3).Counts).toBe(
-    '4,210 Movements120 components · 310 flowsFrom the preview',
-  );
+  // The cutoff date tops the counts; no export yet: the preview's numbers,
+  // Movements first, marked as such.
+  expect(runLines(3, 'Cutoff and counts')).toEqual([
+    'Nov 17, 2024',
+    '4,210 Movements',
+    '120 components · 310 flows',
+    'From the preview',
+  ]);
   // Requested and the latest step only; nothing more to fold away.
   expect(runRow(3).Times).toMatch(/^Requested .+Started .+$/);
   expect(runRow(3).Times).not.toContain('All times');
-  expect(runRow(3)['Requested by']).toBe('AnnFirst archive');
-  expect(runRow(3).Actions).toBe('');
-  expect(runRow(2)).toMatchObject({
-    State: 'Completed',
-    Result: 'Exported to files; nothing deleted.',
-    Archive: 'run-2-20261117T092000Z771.5 KB',
-  });
+  expect(runLines(3, 'Requested by')).toEqual(['Ann', 'First archive']);
+  expect(runRow(2).State).toBe('Completed');
+  // The result, then the archive folder and its size.
+  expect(runLines(2, 'Result')).toEqual([
+    'Exported to files; nothing deleted.',
+    'run-2-20261117T092000Z',
+    '771.5 KB',
+  ]);
   // The export equals the preview: one set of numbers, no skipped line.
-  expect(runRow(2).Counts).toBe('4,210 Movements120 components · 310 flows');
+  expect(runLines(2, 'Cutoff and counts')).toEqual([
+    'Nov 17, 2024',
+    '4,210 Movements',
+    '120 components · 310 flows',
+  ]);
   // The latest step is Finished; the whole timeline is under All times.
   const times = within(card('Runs'))
     .getAllByRole('row')
@@ -579,6 +825,8 @@ test('HA-1: the section shows the settings, the preview and the runs, and says w
     State: 'Failed',
     Result: 'The archive folder is not usable.',
   });
+  // A requested run has no approval and no standing authorization.
+  expect(runLines(1, 'Requested by')).toEqual(['Ann', 'First archive']);
   expect(writes).toEqual([]);
 });
 
@@ -598,9 +846,13 @@ test('HA-1b: a run whose export differs from its preview shows both, and skipped
   ];
   renderSection();
   await loaded();
-  expect(runRow(6).Counts).toBe(
-    '4,150 Movements118 components · 305 flowsPreview: 4,210 Movements · 120 components · 310 flowsSkipped (changed during the run): 2 components · 5 flows',
-  );
+  expect(runLines(6, 'Cutoff and counts')).toEqual([
+    'Nov 17, 2024',
+    '4,150 Movements',
+    '118 components · 305 flows',
+    'Preview: 4,210 Movements · 120 components · 310 flows',
+    'Skipped (changed during the run): 2 components · 5 flows',
+  ]);
   expect(runRow(6).Times).toMatch(/^Requested .+Verified .+All times/);
 });
 
@@ -617,11 +869,19 @@ test('HA-2: without the archival permission the section is view-only: values, ru
   ).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /^Edit / })).toBeNull();
   expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull();
-  expect(screen.queryByRole('columnheader', { name: 'Actions' })).toBeNull();
+  // No action under any state: the only button is the runs' Reload.
   expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
     'Reload',
   ]);
-  expect(runRow(4).State).toBe('Waiting for the off-host copy');
+  expect(runRow(4)).toMatchObject({ State: WAITING_FOR_COPY, Actions: '' });
+  // Without the Preview, Automatic runs stands beside Retention and
+  // schedule.
+  const columns = document.querySelectorAll('.admin-cardcolumn');
+  expect(
+    Array.from(columns, (column) =>
+      Array.from(column.querySelectorAll('h2'), (h2) => h2.textContent),
+    ),
+  ).toEqual([['Retention and schedule'], ['Automatic runs']]);
   // The preview needs the permission: it is never asked for.
   expect(
     vi
@@ -876,7 +1136,7 @@ test('HA-7: a request shows the preview numbers, posts the reason and the cutoff
     ),
   ).toBeInTheDocument();
   await waitFor(() =>
-    expect(runRow(1).State).toBe('Requested — waiting for the job'),
+    expect(runRow(1).State).toBe('Approved — waiting for the job'),
   );
 });
 
@@ -898,7 +1158,7 @@ test('HA-8: a request whose answer was lost (524) reloads the runs and asks to c
   ).toBeNull();
   // The run the server created shows after the reload.
   await waitFor(() =>
-    expect(runRow(1).State).toBe('Requested — waiting for the job'),
+    expect(runRow(1).State).toBe('Approved — waiting for the job'),
   );
   expect(writes.filter((w) => w.method === 'POST')).toHaveLength(1);
 });
@@ -936,7 +1196,12 @@ test('HA-9: Cancel asks first, is offered only for a requested or waiting run, a
     },
   ]);
   await waitFor(() => expect(runRow(2).State).toBe('Cancelled'));
-  expect(runRow(2).Result).toBe('Cancelled by Ada Admin.');
+  // The waiting run's archive folder stays on the server.
+  expect(runLines(2, 'Result')).toEqual([
+    'Cancelled by Ada Admin.',
+    'run-2-20261117T092000Z',
+    '771.5 KB',
+  ]);
   expect(screen.queryByRole('button', { name: 'Cancel run 2…' })).toBeNull();
 });
 
@@ -1021,7 +1286,7 @@ test('HA-12: offline every write is blocked while the values stay readable', asy
   expect(
     screen.getByRole('button', { name: 'Confirm the off-host copy of run 3…' }),
   ).toBeDisabled();
-  expect(runRow(3).Archive).toBe('run-3-20261117T092000Z771.5 KB');
+  expect(runLines(3, 'Result')).toEqual(['run-3-20261117T092000Z', '771.5 KB']);
 });
 
 test('HA-13: a failed load of the runs offers Retry', async () => {
@@ -1039,7 +1304,7 @@ test('HA-13: a failed load of the runs offers Retry', async () => {
   runs = [run(1)];
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   await waitFor(() =>
-    expect(runRow(1).State).toBe('Requested — waiting for the job'),
+    expect(runRow(1).State).toBe('Approved — waiting for the job'),
   );
 });
 
@@ -1057,12 +1322,12 @@ function allTimes(id: number): string[] {
   );
 }
 
-/** The archive cell of a run's row. */
-function archiveCell(id: number): HTMLElement {
-  const row = within(card('Runs'))
-    .getAllByRole('row')
-    .find((tr) => tr.querySelector('td')?.textContent === String(id))!;
-  return row.querySelector('td[data-label="Archive"]') as HTMLElement;
+/** The result cell of a run's row: the result, then the archive with
+ * the purge's evidence. */
+function resultCell(id: number): HTMLElement {
+  return runRowElement(id).querySelector(
+    'td[data-label="Result"]',
+  ) as HTMLElement;
 }
 
 test('HA-14: the runs show the purge — its states and results, the purged and skipped counts, the purge start, the backup and the receipt', async () => {
@@ -1107,15 +1372,16 @@ test('HA-14: the runs show the purge — its states and results, the purged and 
   renderSection();
   await loaded();
 
-  // Purging: open, its progress so far, never cancellable.
-  expect(runRow(9)).toMatchObject({
-    State: 'Purging',
-    Result: '—',
-    Actions: '',
-  });
-  expect(runRow(9).Counts).toBe(
-    '4,210 Movements120 components · 310 flowsPurged so far: 1,400 Movements · 40 components · 100 flows',
-  );
+  // Purging: open, its progress so far, never cancellable; no result yet,
+  // its archive under the Result heading.
+  expect(runRow(9)).toMatchObject({ State: 'Purging', Actions: '' });
+  expect(runLines(9, 'Result')).toEqual(['run-9-20261117T092000Z', '771.5 KB']);
+  expect(runLines(9, 'Cutoff and counts')).toEqual([
+    'Nov 17, 2024',
+    '4,210 Movements',
+    '120 components · 310 flows',
+    'Purged so far: 1,400 Movements · 40 components · 100 flows',
+  ]);
   expect(runRow(9).Times).toMatch(/^Requested .+Purge started .+All times/);
   expect(allTimes(9)).toEqual([
     'Requested',
@@ -1126,7 +1392,7 @@ test('HA-14: the runs show the purge — its states and results, the purged and 
     'Backup started',
     'Purge started',
   ]);
-  const purging = archiveCell(9);
+  const purging = resultCell(9);
   // A non-breaking hyphen keeps `Pre-purge` whole in a narrow column.
   expect(within(purging).getByText(PRE_PURGE).tagName).toBe('SUMMARY');
   expect(purging.textContent).toContain(
@@ -1137,20 +1403,25 @@ test('HA-14: the runs show the purge — its states and results, the purged and 
 
   // Completed: the result in plain words, the purged counts, the backup
   // and the receipt with its SHA-256.
-  expect(runRow(8)).toMatchObject({
-    State: 'Completed',
-    Result: 'Archived and purged.',
-  });
-  expect(runRow(8).Counts).toBe(
-    '4,210 Movements120 components · 310 flowsPurged: 4,210 Movements · 120 components · 310 flows',
-  );
+  expect(runRow(8).State).toBe('Completed');
+  expect(runLines(8, 'Result')).toEqual([
+    'Archived and purged.',
+    'run-8-20261117T092000Z',
+    '771.5 KB',
+  ]);
+  expect(runLines(8, 'Cutoff and counts')).toEqual([
+    'Nov 17, 2024',
+    '4,210 Movements',
+    '120 components · 310 flows',
+    'Purged: 4,210 Movements · 120 components · 310 flows',
+  ]);
   expect(runRow(8).Times).toMatch(/^Requested .+Finished .+All times/);
   expect(allTimes(8).slice(-3)).toEqual([
     'Backup started',
     'Purge started',
     'Finished',
   ]);
-  const purged = archiveCell(8);
+  const purged = resultCell(8);
   expect(within(purged).getByText('Purge receipt').tagName).toBe('SUMMARY');
   expect(purged.textContent).toContain('run-8-20261117T092000Z.purged.json');
   expect(purged.textContent).toContain(`SHA-256 ${RECEIPT_SHA}`);
@@ -1158,34 +1429,36 @@ test('HA-14: the runs show the purge — its states and results, the purged and 
     '20261117T092400Z-pre-purge-run-8-20261117T092000Z',
   );
 
-  expect(runRow(7)).toMatchObject({
-    State: 'Completed with skips',
-    Result: 'Archived and purged.',
-  });
-  expect(runRow(7).Counts).toBe(
-    '4,210 Movements120 components · 310 flowsPurged: 4,190 Movements · 118 components · 305 flowsSkipped (changed during the run): 2 components · 5 flows',
-  );
+  expect(runRow(7).State).toBe('Completed with skips');
+  expect(runLines(7, 'Result')[0]).toBe('Archived and purged.');
+  expect(runLines(7, 'Cutoff and counts')).toEqual([
+    'Nov 17, 2024',
+    '4,210 Movements',
+    '120 components · 310 flows',
+    'Purged: 4,190 Movements · 118 components · 305 flows',
+    'Skipped (changed during the run): 2 components · 5 flows',
+  ]);
 
-  expect(runRow(6)).toMatchObject({
-    State: 'Completed with skips',
-    Result: 'Nothing purged (every component changed).',
-  });
-  expect(runRow(6).Counts).not.toContain('Purged');
-  expect(within(archiveCell(6)).getByText('Purge receipt')).toBeTruthy();
-  expect(within(archiveCell(6)).queryByText(PRE_PURGE)).toBeNull();
+  expect(runRow(6).State).toBe('Completed with skips');
+  expect(runLines(6, 'Result')[0]).toBe(
+    'Nothing purged (every component changed).',
+  );
+  expect(runRow(6)['Cutoff and counts']).not.toContain('Purged');
+  expect(within(resultCell(6)).getByText('Purge receipt')).toBeTruthy();
+  expect(within(resultCell(6)).queryByText(PRE_PURGE)).toBeNull();
 
   // A run that failed while purging keeps the whole components it purged.
-  expect(runRow(5)).toMatchObject({
-    State: 'Failed',
-    Result: 'A purge batch deleted 9 Movements where its records count 10.',
-  });
-  expect(runRow(5).Counts).toContain(
+  expect(runRow(5).State).toBe('Failed');
+  expect(runLines(5, 'Result')[0]).toBe(
+    'A purge batch deleted 9 Movements where its records count 10.',
+  );
+  expect(runLines(5, 'Cutoff and counts')).toContain(
     'Purged: 1,400 Movements · 40 components · 100 flows',
   );
 
   // A run that step 1 finished keeps its result.
-  expect(runRow(4).Result).toBe('Exported to files; nothing deleted.');
-  expect(runRow(4).Counts).not.toContain('Purged');
+  expect(runLines(4, 'Result')[0]).toBe('Exported to files; nothing deleted.');
+  expect(runRow(4)['Cutoff and counts']).not.toContain('Purged');
   expect(writes).toEqual([]);
 });
 
@@ -1666,4 +1939,659 @@ test('HA-20: a Work Order Number or Part Number stays whole unless it is longer 
   expect(deletionRow(11).Deletes).toBe(
     'Work Order 007099-SUPPLEMENTAL-AMENDMENT / 28 rows',
   );
+});
+
+/* ============ Automatic runs (archival step 4, D9–D11) ============ */
+
+const RENEWAL_WARNING =
+  'Without the approval step, automatic runs archive and purge Movement history without anyone approving them first.';
+/** What each change that stops a run started without approval says. */
+const STEP_ON_STOPS =
+  'Switching the approval step on withdraws the standing authorization: a run started without approval stops before it purges any history, and each later automatic run waits for approval.';
+const AUTOMATIC_OFF_STOPS =
+  'Switching automatic runs off also stops a run started without approval before it purges any history.';
+const PERIOD_STOPS =
+  'A run started without approval stops before it purges any history when the retention period no longer allows its cutoff.';
+const CONFIRMATION_FIELD = 'Type RUN WITHOUT APPROVAL to confirm';
+const AUTHORIZATION_REASON_FIELD =
+  /^Reason for letting automatic runs start without approval/;
+
+function editAutomaticRuns(): HTMLElement {
+  fireEvent.click(screen.getByRole('button', { name: 'Edit automatic runs…' }));
+  return screen.getByRole('dialog', { name: 'Automatic runs' });
+}
+
+async function automaticRunsSaved() {
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'Automatic runs' })).toBeNull(),
+  );
+}
+
+/** The cards of each column of the settings, by title. */
+function cardColumns(): (string | null)[][] {
+  return Array.from(document.querySelectorAll('.admin-cardcolumn'), (column) =>
+    Array.from(column.querySelectorAll('h2'), (h2) => h2.textContent),
+  );
+}
+
+test('HA-21: the Automatic runs card shows its settings; Edit sends only the changed ones, each measure with its own limit, and shows the server refusal as given', async () => {
+  renderSection();
+  await loaded();
+  expect(rows(card('Automatic runs'))).toEqual({
+    'Automatic runs': 'Off',
+    Measure: 'Live Movement rows',
+    Limit: '5,000,000 rows',
+    'Days between automatic runs': '7 days',
+    'Approval step': 'On',
+  });
+  // No standing authorization while the approval step is on.
+  expect(card('Automatic runs').textContent).not.toContain(
+    'Standing authorization',
+  );
+  // The settings stacked in the first column, the Preview beside them.
+  expect(cardColumns()).toEqual([
+    ['Retention and schedule', 'Automatic runs'],
+    ['Preview'],
+  ]);
+
+  const dialog = editAutomaticRuns();
+  expect(
+    within(dialog).getByRole('switch', { name: 'Automatic runs' }),
+  ).toHaveAttribute('aria-checked', 'false');
+  expect(within(dialog).getByLabelText('Measure')).toHaveValue(
+    'LIVE_MOVEMENT_ROWS',
+  );
+  expect(within(dialog).getByLabelText('Live Movement rows above')).toHaveValue(
+    5000000,
+  );
+  // Each measure keeps its own limit: the dialog shows the chosen one's.
+  fireEvent.change(within(dialog).getByLabelText('Measure'), {
+    target: { value: 'DATABASE_SIZE' },
+  });
+  expect(
+    within(dialog).queryByLabelText('Live Movement rows above'),
+  ).toBeNull();
+  const gib = within(dialog).getByLabelText('Database size above (GiB)');
+  expect(gib).toHaveValue(20);
+  fireEvent.change(gib, { target: { value: '30' } });
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'Automatic runs' }),
+  );
+  fireEvent.change(
+    within(dialog).getByLabelText('Days between automatic runs'),
+    {
+      target: { value: '14' },
+    },
+  );
+  // The approval step is untouched: no reason and no confirmation.
+  expect(within(dialog).queryByLabelText(CONFIRMATION_FIELD)).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await automaticRunsSaved();
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: {
+        archive_automatic_runs: true,
+        archive_measure: 'DATABASE_SIZE',
+        archive_limit_database_gib: 30,
+        archive_interval_days: 14,
+      },
+    },
+  ]);
+  await waitFor(() =>
+    expect(rows(card('Automatic runs'))).toEqual({
+      'Automatic runs': 'On',
+      Measure: 'Database size',
+      Limit: '30 GiB',
+      'Days between automatic runs': '14 days',
+      'Approval step': 'On',
+    }),
+  );
+
+  // The server checks every range; its message stays in the dialog.
+  writes = [];
+  const REFUSAL =
+    'The limit of the age of retained history must be a whole number of months from 0 to 1200.';
+  failures['PUT policy'] = { status: 422, detail: REFUSAL };
+  const again = editAutomaticRuns();
+  fireEvent.change(within(again).getByLabelText('Measure'), {
+    target: { value: 'RETAINED_HISTORY_AGE' },
+  });
+  const months = within(again).getByLabelText(
+    'Retained history older than the cutoff by more than (months)',
+  );
+  expect(months).toHaveValue(1);
+  fireEvent.change(months, { target: { value: '1201' } });
+  fireEvent.click(within(again).getByRole('button', { name: 'Save changes' }));
+  expect(await within(again).findByRole('alert')).toHaveTextContent(REFUSAL);
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: {
+        archive_measure: 'RETAINED_HISTORY_AGE',
+        archive_limit_history_months: 1201,
+      },
+    },
+  ]);
+  // Only a value that is not a whole number is refused in the dialog.
+  fireEvent.change(months, { target: { value: '1.5' } });
+  expect(
+    within(again)
+      .getAllByRole('alert')
+      .map((alert) => alert.textContent),
+  ).toContain('Enter a whole number.');
+  expect(
+    within(again).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+});
+
+test('HA-22: switching the approval step off says plainly what it means and asks for a reason and the typed confirmation; the server refusals are shown as given', async () => {
+  renderSection();
+  await loaded();
+  const dialog = editAutomaticRuns();
+  expect(within(dialog).queryByText(RENEWAL_WARNING)).toBeNull();
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'Approval step' }),
+  );
+  expect(within(dialog).getByText(RENEWAL_WARNING)).toBeInTheDocument();
+  const reason = within(dialog).getByLabelText(AUTHORIZATION_REASON_FIELD);
+  const confirmation = within(dialog).getByLabelText(CONFIRMATION_FIELD);
+
+  // Without the confirmation the server refuses, in its own words.
+  fireEvent.change(reason, {
+    target: { value: 'Weekly archival without approval' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    CONFIRMATION_REFUSAL,
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: {
+        archive_approval_required: false,
+        reason: 'Weekly archival without approval',
+        confirmation: '',
+      },
+    },
+  ]);
+  expect(policy.archive_approval_required).toBe(true);
+
+  // The confirmation as typed (the server ignores letter case and
+  // spacing), without a reason: the server's reason text.
+  fireEvent.change(confirmation, {
+    target: { value: ' run  without approval ' },
+  });
+  fireEvent.change(reason, { target: { value: '' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(
+      AUTHORIZATION_REASON_REFUSAL,
+    ),
+  );
+
+  // Both: the step is off, and the card shows the standing authorization.
+  writes = [];
+  fireEvent.change(reason, {
+    target: { value: 'Weekly archival without approval' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await automaticRunsSaved();
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: {
+        archive_approval_required: false,
+        reason: 'Weekly archival without approval',
+        confirmation: ' run  without approval ',
+      },
+    },
+  ]);
+  await waitFor(() =>
+    expect(rows(card('Automatic runs'))).toMatchObject({
+      'Approval step': 'Off',
+      'Standing authorization': 'Valid',
+    }),
+  );
+  expect(card('Automatic runs').textContent).toContain(
+    `Given by Ada Admin on ${formatInstant(T0)}. Reason: Weekly archival without approval`,
+  );
+});
+
+test("HA-23: the standing authorization shows who gave it, when and why, and the server's problem; the same form renews it, and switching the step on withdraws it", async () => {
+  policy = {
+    ...policy,
+    archive_automatic_runs: true,
+    archive_approval_required: false,
+    standing_authorization: {
+      audit_event_id: 12,
+      authorized_by: { user_id: 4, display_name: 'Ann Admin' },
+      authorized_at: '2026-11-10T12:00:00Z',
+      reason: 'Weekly archival',
+      valid: false,
+      problem: KEY_LOST,
+    },
+  };
+  renderSection();
+  await loaded();
+  expect(rows(card('Automatic runs'))).toMatchObject({
+    'Approval step': 'Off',
+    'Standing authorization': 'Not valid',
+  });
+  expect(card('Automatic runs').textContent).toContain(
+    `Given by Ann Admin on ${formatInstant('2026-11-10T12:00:00Z')}. Reason: Weekly archival`,
+  );
+  // The problem exactly as the server words it.
+  expect(
+    within(card('Automatic runs')).getByText(KEY_LOST),
+  ).toBeInTheDocument();
+
+  // While the step stays off, the same form renews the authorization.
+  const dialog = editAutomaticRuns();
+  expect(within(dialog).getByText(KEY_LOST)).toBeInTheDocument();
+  expect(within(dialog).queryByLabelText(CONFIRMATION_FIELD)).toBeNull();
+  fireEvent.click(
+    within(dialog).getByRole('checkbox', {
+      name: 'Renew the standing authorization under my name',
+    }),
+  );
+  expect(within(dialog).getByText(RENEWAL_WARNING)).toBeInTheDocument();
+  fireEvent.change(within(dialog).getByLabelText(AUTHORIZATION_REASON_FIELD), {
+    target: { value: 'Ann moved to another team' },
+  });
+  fireEvent.change(within(dialog).getByLabelText(CONFIRMATION_FIELD), {
+    target: { value: 'RUN WITHOUT APPROVAL' },
+  });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await automaticRunsSaved();
+  // Nothing else changed: the reason and the confirmation alone.
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: {
+        reason: 'Ann moved to another team',
+        confirmation: 'RUN WITHOUT APPROVAL',
+      },
+    },
+  ]);
+  await waitFor(() =>
+    expect(rows(card('Automatic runs'))['Standing authorization']).toBe(
+      'Valid',
+    ),
+  );
+  expect(card('Automatic runs').textContent).toContain(
+    `Given by Ada Admin on ${formatInstant(T0)}. Reason: Ann moved to another team`,
+  );
+  expect(within(card('Automatic runs')).queryByText(KEY_LOST)).toBeNull();
+
+  // Switching the step on withdraws it, which stops a run started without
+  // approval; no confirmation travels.
+  writes = [];
+  const again = editAutomaticRuns();
+  fireEvent.click(within(again).getByRole('switch', { name: 'Approval step' }));
+  expect(within(again).getByText(STEP_ON_STOPS)).toBeInTheDocument();
+  expect(within(again).queryByRole('checkbox', { name: /^Renew/ })).toBeNull();
+  expect(within(again).queryByLabelText(CONFIRMATION_FIELD)).toBeNull();
+  fireEvent.click(within(again).getByRole('button', { name: 'Save changes' }));
+  await automaticRunsSaved();
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: { archive_approval_required: true },
+    },
+  ]);
+  await waitFor(() =>
+    expect(rows(card('Automatic runs'))['Approval step']).toBe('On'),
+  );
+  expect(card('Automatic runs').textContent).not.toContain(
+    'Standing authorization',
+  );
+});
+
+test('HA-24: automatic runs read Automatic with their approval or standing authorization; Proposed and Dismissed have their pills, and a failed authority its reason', async () => {
+  const AUTHORIZATION = {
+    audit_event_id: 12,
+    authorized_by: { user_id: 4, display_name: 'Ann Admin' },
+    authorized_at: '2026-11-10T12:00:00Z',
+  };
+  const AUTHORITY_FAILED =
+    'The User who switched off the approval step of automatic runs, Ann Admin (user 4), no longer holds Run history archival and purge, so the history of run 11 was not purged. Nothing was deleted; automatic runs wait until a holder of the key saves the approval setting again.';
+  runs = [
+    proposed(14),
+    proposed(13, {
+      state: 'APPROVED',
+      approval: {
+        approved_by: { user_id: 4, display_name: 'Ann Admin' },
+        approved_at: T1,
+        reason: 'Checked the preview',
+      },
+    }),
+    proposed(12, {
+      state: 'RUNNING',
+      started_at: '2026-11-18T09:20:00Z',
+      authorization: AUTHORIZATION,
+    }),
+    proposed(11, {
+      ...WAITING(11),
+      trigger: 'AUTOMATIC',
+      requested_by: null,
+      reason: AUTO_REASON,
+      state: 'FAILED',
+      authorization: AUTHORIZATION,
+      authorization_failed: true,
+      failure_reason: AUTHORITY_FAILED,
+      finished_at: '2026-11-18T09:30:00Z',
+    }),
+    proposed(10, {
+      state: 'DISMISSED',
+      dismissed_by: { user_id: 4, display_name: 'Ann Admin' },
+      finished_at: T1,
+    }),
+  ];
+  renderSection();
+  await loaded();
+
+  // Proposed: open, its own pill, Approve… and Dismiss… — never Cancel….
+  expect(runRow(14)).toMatchObject({
+    State: 'Proposed — waiting for approval',
+    Actions: 'Approve… / Dismiss…',
+    Result: '—',
+  });
+  expect(runRowElement(14).querySelector('.pillnav')?.className).toBe(
+    'pillnav term',
+  );
+  expect(runLines(14, 'Requested by')).toEqual(['Automatic', AUTO_REASON]);
+  expect(screen.getByRole('button', { name: 'Approve run 14…' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Dismiss run 14…' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'Cancel run 14…' })).toBeNull();
+
+  // Approved: the approver with the time and their own reason; the
+  // approval is its latest time.
+  expect(runRow(13)).toMatchObject({
+    State: 'Approved — waiting for the job',
+    Actions: 'Cancel…',
+  });
+  expect(runLines(13, 'Requested by')).toEqual([
+    'Automatic',
+    AUTO_REASON,
+    `Approved by Ann Admin, ${formatInstant(T1)}`,
+    'Checked the preview',
+  ]);
+  expect(runLines(13, 'Times')).toEqual([
+    `Requested ${formatInstant('2026-11-18T08:20:00Z')}`,
+    `Approved ${formatInstant(T1)}`,
+  ]);
+
+  // Started under the standing authorization, without approval.
+  expect(runLines(12, 'Requested by')).toEqual([
+    'Automatic',
+    AUTO_REASON,
+    'Started without approval (authorization of Ann Admin, Nov 10, 2026)',
+  ]);
+  expect(runRow(12)).toMatchObject({ State: 'Running', Actions: '' });
+
+  // Failed because the authority's User lost the key: the reason as given.
+  expect(runRow(11).State).toBe('Failed');
+  expect(runLines(11, 'Result')[0]).toBe(AUTHORITY_FAILED);
+
+  // Dismissed: final, by whom.
+  expect(runRow(10)).toMatchObject({
+    State: 'Dismissed',
+    Actions: '',
+    Result: 'Dismissed by Ann Admin.',
+  });
+  expect(runRowElement(10).querySelector('.pillnav')?.className).toBe(
+    'pillnav off',
+  );
+  expect(writes).toEqual([]);
+});
+
+test("HA-25: Approve… shows what the run does and asks for a reason of the approver's own; the server texts stay in the dialog; a lost answer reloads the runs", async () => {
+  runs = [proposed(14)];
+  renderSection();
+  await loaded();
+  fireEvent.click(screen.getByRole('button', { name: 'Approve run 14…' }));
+  const dialog = screen.getByRole('dialog', { name: 'Approve run 14' });
+  expect(dialog.textContent).toContain(
+    'The run exports the Movement history before Nov 17, 2024 to archive files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database.',
+  );
+  expect(dialog.textContent).toContain(AUTO_REASON);
+  expect(dialog.textContent).toContain(
+    '120 components · 310 flows · 4,210 Movements',
+  );
+
+  // A blank reason: the server's 422, as given.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Approve run' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    'Enter the reason for approving this run: 1 to 500 characters of plain text.',
+  );
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/history-archive/runs/14/approve',
+      body: { reason: '' },
+    },
+  ]);
+
+  // Another User approved it first: the server's 409, the reason kept.
+  const reason = within(dialog).getByLabelText(/^Reason for approving/);
+  fireEvent.change(reason, { target: { value: 'Checked the preview' } });
+  runs[0].state = 'APPROVED';
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Approve run' }));
+  await waitFor(() =>
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(
+      'Run 14 is APPROVED; only a run waiting for approval (PROPOSED) can be approved.',
+    ),
+  );
+  expect(reason).toHaveValue('Checked the preview');
+
+  // A lost answer: the runs reload and the card says to check them.
+  runs[0].state = 'PROPOSED';
+  failures['POST approve'] = { status: 504, detail: 'Gateway timeout.' };
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Approve run' }));
+  expect(await within(card('Runs')).findByRole('alert')).toHaveTextContent(
+    'The server did not answer, so run 14 may or may not have been approved. Check its state in the table; approving it again is safe.',
+  );
+  expect(screen.queryByRole('dialog', { name: 'Approve run 14' })).toBeNull();
+
+  // Approved: the notice, and the run reloads with its approval.
+  delete failures['POST approve'];
+  writes = [];
+  fireEvent.click(screen.getByRole('button', { name: 'Approve run 14…' }));
+  const again = screen.getByRole('dialog', { name: 'Approve run 14' });
+  fireEvent.change(within(again).getByLabelText(/^Reason for approving/), {
+    target: { value: 'Checked the preview' },
+  });
+  fireEvent.click(within(again).getByRole('button', { name: 'Approve run' }));
+  expect(
+    await within(card('Runs')).findByText(
+      '✓ Run 14 is approved. The archival job on the server starts it at its next Start minute.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/history-archive/runs/14/approve',
+      body: { reason: 'Checked the preview' },
+    },
+  ]);
+  await waitFor(() =>
+    expect(runRow(14).State).toBe('Approved — waiting for the job'),
+  );
+  expect(runLines(14, 'Requested by')).toEqual([
+    'Automatic',
+    AUTO_REASON,
+    `Approved by Ada Admin, ${formatInstant(T1)}`,
+    'Checked the preview',
+  ]);
+  expect(screen.queryByRole('button', { name: 'Approve run 14…' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Cancel run 14…' })).toBeEnabled();
+});
+
+test("HA-26: Dismiss… asks first and sends no reason; the server's 409 texts are shown as given; offline blocks Approve… and Dismiss…", async () => {
+  runs = [proposed(15)];
+  renderSection();
+  await loaded();
+  fireEvent.click(screen.getByRole('button', { name: 'Dismiss run 15…' }));
+  const confirm = screen.getByRole('dialog', { name: 'Dismiss run 15?' });
+  expect(confirm.textContent).toContain(
+    'The run will not start, and the Movement history stays in the database.',
+  );
+  expect(within(confirm).queryByRole('textbox')).toBeNull();
+  fireEvent.click(
+    within(confirm).getByRole('button', { name: 'Keep run (Esc)' }),
+  );
+  expect(writes).toEqual([]);
+
+  // Approved meanwhile, then started: the server's texts, as given.
+  runs[0].state = 'APPROVED';
+  fireEvent.click(screen.getByRole('button', { name: 'Dismiss run 15…' }));
+  const again = screen.getByRole('dialog', { name: 'Dismiss run 15?' });
+  fireEvent.click(within(again).getByRole('button', { name: 'Dismiss run' }));
+  expect(await within(again).findByRole('alert')).toHaveTextContent(
+    'Run 15 is APPROVED; only a run waiting for approval (PROPOSED) can be dismissed. Cancel it instead.',
+  );
+  runs[0].state = 'RUNNING';
+  fireEvent.click(within(again).getByRole('button', { name: 'Dismiss run' }));
+  await waitFor(() =>
+    expect(within(again).getByRole('alert')).toHaveTextContent(
+      'Run 15 is running on the server now and cannot be dismissed. Wait until it stops.',
+    ),
+  );
+
+  runs[0].state = 'PROPOSED';
+  writes = [];
+  fireEvent.click(within(again).getByRole('button', { name: 'Dismiss run' }));
+  expect(
+    await within(card('Runs')).findByText('✓ Run 15 is dismissed.'),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/history-archive/runs/15/dismiss',
+      body: undefined,
+    },
+  ]);
+  await waitFor(() => expect(runRow(15).State).toBe('Dismissed'));
+  expect(runRow(15)).toMatchObject({
+    Result: 'Dismissed by Ada Admin.',
+    Actions: '',
+  });
+  cleanup();
+
+  // Offline, every write is blocked.
+  runs = [proposed(16)];
+  renderSection('unavailable');
+  await loaded();
+  expect(
+    screen.getByRole('button', { name: 'Approve run 16…' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Dismiss run 16…' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Edit automatic runs…' }),
+  ).toBeDisabled();
+});
+
+test('HA-27: while the approval step is off, switching automatic runs off and lengthening or clearing the retention period say that they stop a run started without approval', async () => {
+  policy = {
+    ...policy,
+    archive_automatic_runs: true,
+    archive_approval_required: false,
+    standing_authorization: {
+      audit_event_id: 12,
+      authorized_by: { user_id: 4, display_name: 'Ann Admin' },
+      authorized_at: '2026-11-10T12:00:00Z',
+      reason: 'Weekly archival',
+      valid: true,
+      problem: null,
+    },
+  };
+  renderSection();
+  await loaded();
+
+  // Switching automatic runs off says so; switching them on again does not.
+  const dialog = editAutomaticRuns();
+  expect(within(dialog).queryByText(AUTOMATIC_OFF_STOPS)).toBeNull();
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'Automatic runs' }),
+  );
+  expect(within(dialog).getByText(AUTOMATIC_OFF_STOPS)).toBeInTheDocument();
+  fireEvent.click(
+    within(dialog).getByRole('switch', { name: 'Automatic runs' }),
+  );
+  expect(within(dialog).queryByText(AUTOMATIC_OFF_STOPS)).toBeNull();
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  await automaticRunsSaved();
+
+  // A longer retention period says so; a shorter one does not.
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit retention and schedule…' }),
+  );
+  const retention = screen.getByRole('dialog', {
+    name: 'Retention and schedule',
+  });
+  const months = within(retention).getByLabelText('Retention period (months)');
+  expect(within(retention).queryByText(PERIOD_STOPS)).toBeNull();
+  fireEvent.change(months, { target: { value: '36' } });
+  expect(within(retention).getByText(PERIOD_STOPS)).toBeInTheDocument();
+  fireEvent.change(months, { target: { value: '18' } });
+  expect(within(retention).queryByText(PERIOD_STOPS)).toBeNull();
+  // No retention period says so too; keeping a period again does not.
+  fireEvent.click(
+    within(retention).getByRole('radio', { name: 'No retention period' }),
+  );
+  expect(within(retention).getByText(PERIOD_STOPS)).toBeInTheDocument();
+  fireEvent.click(
+    within(retention).getByRole('radio', {
+      name: 'Keep a set period of history',
+    }),
+  );
+  expect(within(retention).queryByText(PERIOD_STOPS)).toBeNull();
+  expect(writes).toEqual([]);
+  cleanup();
+
+  // With the approval step on, no run started without approval is
+  // pending: neither change says anything about one.
+  policy = {
+    ...policy,
+    archive_approval_required: true,
+    standing_authorization: null,
+  };
+  renderSection();
+  await loaded();
+  const onDialog = editAutomaticRuns();
+  fireEvent.click(
+    within(onDialog).getByRole('switch', { name: 'Automatic runs' }),
+  );
+  expect(within(onDialog).queryByText(AUTOMATIC_OFF_STOPS)).toBeNull();
+  fireEvent.click(
+    within(onDialog).getByRole('switch', { name: 'Automatic runs' }),
+  );
+  fireEvent.click(
+    within(onDialog).getByRole('button', { name: 'Cancel (Esc)' }),
+  );
+  await automaticRunsSaved();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit retention and schedule…' }),
+  );
+  const onRetention = screen.getByRole('dialog', {
+    name: 'Retention and schedule',
+  });
+  fireEvent.change(
+    within(onRetention).getByLabelText('Retention period (months)'),
+    { target: { value: '36' } },
+  );
+  expect(within(onRetention).queryByText(PERIOD_STOPS)).toBeNull();
+  fireEvent.click(
+    within(onRetention).getByRole('radio', { name: 'No retention period' }),
+  );
+  expect(within(onRetention).queryByText(PERIOD_STOPS)).toBeNull();
 });

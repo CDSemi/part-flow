@@ -34,7 +34,8 @@ APP_PRIVILEGES: Final[Mapping[TableClass, frozenset[str]]] = {
     TableClass.APPEND_ONLY: frozenset({"SELECT", "INSERT"}),
     # worker_sessions: open-session expiry and end; its FOR NO KEY UPDATE
     # row lock needs UPDATE too. history_archive_runs: a run request, its
-    # cancellation and the confirmation of its off-host copy.
+    # cancellation, the confirmation of its off-host copy, and the approval
+    # or dismissal of a proposed run.
     # deletion_requests: a permanent deletion request and its cancellation.
     # The row trigger of each refuses every other change.
     TableClass.GUARDED_UPDATE: frozenset({"SELECT", "INSERT", "UPDATE"}),
@@ -94,15 +95,17 @@ _READ_DELETE: Final = frozenset({"SELECT", "DELETE"})
 _READ_LOCK_DELETE: Final = frozenset({"SELECT", "UPDATE", "DELETE"})
 
 #: The exact table privileges of the maintenance database role (CD5;
-#: history archival design §8.3, build steps 1 to 3): SELECT on what the
+#: history archival design §8.3, build steps 1 to 4): SELECT on what the
 #: archive export reads — Movements, flows, lineage, Assigned Routes and
 #: their steps, Work Orders and demand lines, the Part Number master, the
 #: context tables, Users/roles/role permissions (also the re-check of the
-#: requester of a run or deletion request), the application policy and
+#: requester, approver or standing authorization of a run and of the
+#: requester of a deletion request), the application policy and
 #: ``alembic_version`` for the archive manifest —; on the two archival
-#: tables SELECT and the UPDATE their guard triggers allow, and INSERT on the
-#: records only (a run is requested by a person in Administration, never by
-#: the job); DELETE on ``part_movements``, which
+#: tables SELECT, INSERT and the UPDATE their guard triggers allow — the run
+#: guard admits only automatic runs from it (build step 4: ``history-archive
+#: evaluate``; a manual run is requested by a person in Administration) —;
+#: DELETE on ``part_movements``, which
 #: ``trg_part_movements_guard_delete`` limits to the archived rows of a run
 #: in PURGING (build step 2) and to the stored rows of a RUNNING deletion
 #: request (build step 3). For permanent deletion requests (build step 3):
@@ -126,7 +129,7 @@ MAINTENANCE_PRIVILEGES: Final[Mapping[str, frozenset[str]]] = {
     "audit_events": frozenset({"SELECT", "INSERT", "DELETE"}),
     "deletion_request_rows": _READ,
     "deletion_requests": frozenset({"SELECT", "UPDATE"}),
-    "history_archive_runs": frozenset({"SELECT", "UPDATE"}),
+    "history_archive_runs": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "history_archived_flows": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "machines": _READ,
     "operations": _READ,
@@ -370,7 +373,7 @@ GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
     ),
     "partflow_guard_delete": ("ac78c72998a7e5262309da70c18a8138583b22b33fe7da629b7596a24e51ae63"),
     "partflow_history_archive_runs_guard_mutation": (
-        "40c21ea2f2c577c385c682377470476f218c1dc37c747f38e2aad0fb302f52af"
+        "a79e49e6bcf7b6378b22c9546cc8b4a8bfda1ea6fe3f5791ed20947017b28c82"
     ),
     "partflow_history_archived_flows_guard_mutation": (
         "bd48a533b98c9b6d7571c9888fe50b64e7d1c81aa16ec46e115018b93e3504fd"

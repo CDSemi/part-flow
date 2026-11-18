@@ -65,6 +65,14 @@ _DEFAULTS = {
     "archive_preview_seconds": 90,
     "archive_purge_batch_movements": 50000,
     "archive_purge_batch_part_numbers": 20,
+    # Automatic runs (history archival step 4, migration 0043).
+    "archive_automatic_runs": False,
+    "archive_measure": "LIVE_MOVEMENT_ROWS",
+    "archive_limit_movement_rows": 5000000,
+    "archive_limit_history_months": 1,
+    "archive_limit_database_gib": 20,
+    "archive_approval_required": True,
+    "archive_interval_days": 7,
 }
 _E_DENIED = "Your account does not have permission to do this."
 
@@ -153,7 +161,11 @@ def restore_settings(owner: Engine) -> Iterator[None]:
                 "UPDATE application_policy SET retention_period_months = 24,"
                 " shortest_retention_months = 12, archive_max_wait_days = 7,"
                 " archive_start_minute = 20, archive_preview_seconds = 90,"
-                " archive_purge_batch_movements = 50000, archive_purge_batch_part_numbers = 20"
+                " archive_purge_batch_movements = 50000, archive_purge_batch_part_numbers = 20,"
+                " archive_automatic_runs = false, archive_measure = 'LIVE_MOVEMENT_ROWS',"
+                " archive_limit_movement_rows = 5000000, archive_limit_history_months = 1,"
+                " archive_limit_database_gib = 20, archive_approval_required = true,"
+                " archive_interval_days = 7, archive_authorization_id = NULL"
             )
         )
         open_ids = list(
@@ -179,8 +191,15 @@ def _ok(response: Any, status: int = 200) -> Any:
 
 
 def _settings(client: TestClient) -> dict[str, Any]:
+    """The settings (the standing authorization beside them is null while the approval step
+    is on: ``tests/test_automatic_runs.py``)."""
     body = cast(dict[str, Any], _ok(admin_of(client).get(_SETTINGS)))
-    return {key: value for key, value in body.items() if key != "updated_at"}
+    assert body["standing_authorization"] is None
+    return {
+        key: value
+        for key, value in body.items()
+        if key not in ("updated_at", "standing_authorization")
+    }
 
 
 def _policy_audits(owner: Engine) -> list[dict[str, Any]]:

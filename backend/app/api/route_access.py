@@ -220,6 +220,8 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/history-archive/preview"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs/{run_id}/cancel"): _permission(_RHAP),
+    ("POST", "/api/history-archive/runs/{run_id}/approve"): _permission(_RHAP),
+    ("POST", "/api/history-archive/runs/{run_id}/dismiss"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs/{run_id}/copy-confirmation"): _permission(_RHAP),
     # Permanent deletion requests (Phase 16, design B step 3; D17): the preview,
     # the list, the request and its cancellation.

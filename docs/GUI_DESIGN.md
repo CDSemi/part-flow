@@ -2853,7 +2853,8 @@ Routes and Part Numbers stay managed in Management by authorized production role
   enrolled Scan Station may do.
 - **History archival & purge** has a permission of its own, **Run history archival and purge**, initially granted to
   the Administrator role and to Super User (which holds every permission); Configure system settings does not guard it
-  (PROJECT_PROFILE §20).
+  (PROJECT_PROFILE §20). Its holders preview, request, approve, dismiss and cancel runs, confirm an off-host copy and
+  change the section's settings, switching off the approval step of automatic runs included.
 - **Delete Work Orders and Part Numbers permanently** is a permission of its own as well, initially held by Super User
   only (which holds every permission); the Administrator role does not hold it (PROJECT_PROFILE §20). Only its holders
   see **Delete permanently…** in Work Order Details (§11.2) and in the Part Number dialog of Management → Part Numbers
@@ -2922,16 +2923,21 @@ entity (§4.12, PROJECT_PROFILE §8.13).
 
 History archival & purge exports old Movement history to archive files on the server and then purges it from the
 database (PROJECT_PROFILE §28 Administrative Archival and Purge): after the off-host copy of the archive and a pre-purge
-backup, a run deletes the archived Movements in batches of whole components. Tracking then shows one archived entry,
-`History archived in run N`, per archived flow (§7.2), and archived commands can no longer be undone (§4.5). Runs that
-finished before runs purged keep their result `Exported to files; nothing deleted.` Every signed-in user
-reads the settings and the runs. The preview, a request and every change need the **Run history archival and purge**
-permission; without it one `View only` line names that permission, the Preview card is not shown and no action on the
-settings or the runs is offered. The section follows the card rule, with at most two columns: the **Retention and
-schedule** and **Preview** cards side by side in two equal columns when two fit (each at least 25rem, the width at which
-its widest label and value stay on one line), otherwise one full-width column; then the **Runs** card at the full width
-of the page and, only for holders of **Delete Work Orders and Part Numbers permanently**, the **Permanent deletion
-requests** card below it, at the full width too.
+backup, a run deletes the archived Movements in batches of whole components. A holder of the permission requests a run;
+with **Automatic runs** on, the server's archival job also creates one by itself when the history passes a limit, and
+either proposes it for a holder of the permission to approve or dismiss, or, with the approval step switched off,
+starts it at once under the standing authorization of the person who switched the step off. Tracking then shows one
+archived entry, `History archived in run N`, per archived flow (§7.2), and archived commands can no longer be undone
+(§4.5). Runs that finished before runs purged keep their result `Exported to files; nothing deleted.` Every signed-in
+user reads the settings and the runs. The preview, a request and every change need the **Run history archival and
+purge** permission; without it one `View only` line names that permission, the Preview card is not shown and no action
+on the settings or the runs is offered. The section follows the card rule, with at most two columns, each a stack of its
+own cards, so that a card that grows (the Preview's result) never moves a card of the other column: **Retention and
+schedule** with **Automatic runs** under it, and **Preview** beside them (without the permission, Automatic runs takes
+the Preview's place), in two equal columns when two fit (each at least 25rem, the width at which its widest label and
+value stay on one line), otherwise one full-width column; then the **Runs** card at the full width of the page and,
+only for holders of **Delete Work Orders and Part Numbers permanently**, the **Permanent deletion requests** card below
+it, at the full width too.
 
 - **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
   its work, and how much it purges at a time.` The card shows the **Retention period** (initially `24 months (2
@@ -2940,15 +2946,47 @@ requests** card below it, at the full width too.
   **Report a waiting run after** (7 days), **Movements per purge batch** (initially 50,000) and **Part Numbers per
   purge batch** (initially 20).
   The dialog's field `Preview time limit (seconds)` explains: `Keep it below the wait of every proxy in front of
-  PartFlow: through Cloudflare a request ends after 100 seconds.` The field `Report a waiting run after (days)` explains: `When a run waits longer than this for its off-host
-  copy to be confirmed, the server's monitoring check reports it.` (A failed last run is reported whatever this
-  setting says.) The field `Movements per purge batch` explains: `The purge deletes whole components, in batches of at
-  most this many Movements; a larger component is a batch of its own.` The field `Part Numbers per purge batch`
-  explains: `A batch locks at most this many Part Numbers; work on them waits until the batch ends.`
+  PartFlow: through Cloudflare a request ends after 100 seconds.` The field `Report a waiting run after (days)`
+  explains: `When a run waits longer than this for its approval or for its off-host copy to be confirmed, the server's
+  monitoring check reports it.` (A failed last run is reported whatever this setting says.) The field `Movements per
+  purge batch` explains: `The purge deletes whole components, in batches of at most this many Movements; a larger
+  component is a batch of its own.` The field `Part Numbers per purge batch` explains: `A batch locks at most this many
+  Part Numbers; work on them waits until the batch ends.`
   `Edit retention and schedule…` opens the dialog: `No retention period` or `Keep a set period of history` with the
   months, then a field for each other value of the card. A change of the shortest allowed period adds a required
-  reason field. A save sends only the changed values; the server checks every range and its message is shown in the
-  dialog, which itself refuses only a value that is not a whole number.
+  reason field. While the approval step of automatic runs is off, a longer retention period or `No retention period`
+  adds the line `A run started without approval stops before it purges any history when the retention period no
+  longer allows its cutoff.` A save sends only the changed values; the server checks every range and its message is
+  shown in the dialog, which itself refuses only a value that is not a whole number.
+- **Automatic runs** — `When the server's archival job starts a run by itself, and whether a person approves each run
+  first.` The card shows **Automatic runs** (`On` or `Off`, initially Off); the **Measure** that decides that a run is
+  needed — `Live Movement rows` (initially), `Age of retained history` or `Database size` — and that measure's own
+  **Limit** (initially `5,000,000 rows`, `1 month older than the cutoff` and `20 GiB`); the **Days between automatic
+  runs** (initially `7 days`); and the **Approval step** (`On` initially). While the approval step is off, a **Standing
+  authorization** row shows `Valid` or `Not valid`, and a line under the values says who gave it, when and why (`Given
+  by Ann Admin on Nov 18, 2026 09:12. Reason: …`); while it is not valid, the server's explanation follows as the server
+  words it (a run under it failed because the User who switched the step off could no longer run it, or that User is
+  no longer active or no longer holds the permission; no automatic run is created until someone saves the approval
+  setting again). The card's footnote says `The archival job checks the measure in its hourly work; a run it proposes
+  waits in the Runs table until someone with Run history archival and purge approves or dismisses it.` `Edit automatic
+  runs…` opens the dialog: the `Automatic runs` switch, the `Measure` and the limit field of the chosen measure — `Live
+  Movement rows above`, `Retained history older than the cutoff by more than (months)` or `Database size above (GiB)`,
+  each measure keeping its own limit, with a line under the field that says when a run is needed (0 means whenever
+  something is eligible) —, `Days between automatic runs` (counted from the end of the last automatic run, also a
+  dismissed or failed one; requested runs do not count), and the `Approval step` switch. Switching the approval step
+  off opens a warning-toned panel that says plainly `Without the approval step, automatic runs archive and purge
+  Movement history without anyone approving them first.`, says that the standing authorization is recorded under the
+  user's name with their reason and that automatic runs stop if that user is deactivated or loses the permission, and
+  asks for a required reason and the typed confirmation `RUN WITHOUT APPROVAL`. While the step stays off, the dialog
+  shows the standing authorization with its problem, and `Renew the standing authorization under my name` opens the
+  same panel. A change that stops a run started without approval says so where it is made: switching the step on
+  reads `Switching the approval step on withdraws the standing authorization: a run started without approval stops
+  before it purges any history, and each later automatic run waits for approval.`, and switching automatic runs off
+  while the step is off reads `Switching automatic runs off also stops a run started without approval before it
+  purges any history.` A save sends only the changed values, and the reason and the confirmation as typed only when
+  the step is switched off or the authorization renewed; the server checks every range, the confirmation (without
+  regard to letter case or spacing) and the reason, and its message is shown in the dialog, which itself refuses only a
+  value that is not a whole number.
 - **Preview** — `What a run would archive and purge at a cutoff date, before you request it.` The **Cutoff date** field
   starts empty, which asks for the latest date the retention period allows; a run archives and then purges the history
   before the start of that day. The card's footnote says what follows: `After the off-host copy and a pre-purge backup,
@@ -2965,19 +3003,36 @@ requests** card below it, at the full width too.
   files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database.`, followed by
   the second sentence of the Preview card's footnote. `Request run` sends the reason and the previewed cutoff date; the
   server checks the numbers again (up to the preview time limit) and stores them with the run, which then waits for the
-  job. A refusal (another run still open, nothing eligible) stays in the dialog with the reason kept. When the request
+  job. A refusal (another run still open, a proposed run waiting for approval included, or nothing eligible) stays in
+  the dialog with the reason kept. When the request
   gets no clear answer (no answer, or a gateway error or timeout such as 502, 504 or 524), the dialog closes, the runs
   reload, and the card says that the run may or may not have been requested and that the runs table must be checked
   before requesting again.
 - **Runs** — `Each run exports the Movement history before its cutoff to archive files on the server and, after the
   off-host copy and a pre-purge backup, purges it from the database.` The card's footnote says once `Archived commands
-  can no longer be undone.` A `Reload` button, then the runs, newest first: the run number; the state in plain words as
-  a status pill (`Requested — waiting for the job`, `Running`, `Waiting for the off-host copy`, `Copy confirmed —
-  waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing eligible`, `Cancelled`, `Failed`); the
-  cutoff date; the counts; who requested the run, with the reason; the times; the archive folder name and size, with
-  the pre-purge backup and the purge receipt; and the result or the failure reason. A completed run's result reads
-  `Archived and purged.`, `Nothing purged (every component changed).` or, for a run that finished before runs purged,
-  `Exported to files; nothing deleted.` The wide table keeps a typical run to about five lines:
+  can no longer be undone.` A `Reload` button, then the runs, newest first, in six columns so that the table stays
+  inside its card down to a 1024 px window beside the Administration sidebar:
+  - **Run**: the run number;
+  - **State**: the state in plain words as a status pill (`Proposed — waiting for approval`, `Approved — waiting for
+    the job` — a requested run too, since its request is its approval —, `Running`, `Waiting for the off-host copy`,
+    `Copy confirmed — waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing eligible`,
+    `Dismissed`, `Cancelled`, `Failed`), with the run's actions under it;
+  - **Cutoff and counts**: the cutoff date, then the counts;
+  - **Requested by**: who requested the run, with the reason. An automatic run has no requester: it reads `Automatic`
+    with the reason the job gave (for example `Live Movement rows 5,120,334 above the limit 5,000,000; retention 24
+    months`), then the approver with the time and the approver's own reason (`Approved by Ann Admin, Nov 18, 2026
+    09:12`), or, for a run started under the standing authorization, `Started without approval (authorization of
+    <name>, <date>)`;
+  - **Times**: the times of the run;
+  - **Result**: the result or the failure reason as the server gives it — also when the job stopped the run before its
+    purge because the User of its authority (the requester, the approver or the standing authorization's User) may no
+    longer run it, or because a change of the settings stopped a run started without approval —, `Dismissed by
+    <name>.` or `Cancelled by <name>.`, then the archive folder name and size, with the pre-purge backup and the purge
+    receipt.
+
+  A completed run's result reads `Archived and purged.`, `Nothing purged (every component changed).` or, for a run
+  that finished before runs purged, `Exported to files; nothing deleted.` The wide table keeps a typical run to a few
+  lines:
   - **Counts** show the exported numbers once there are any, otherwise the preview's: the Movements first
     (`4,210 Movements`), then `120 components · 310 flows` on a smaller line. A further line says `From the preview`
     while nothing is exported, or gives the preview's numbers when the export differs from them. Once the purge
@@ -2985,16 +3040,27 @@ requests** card below it, at the full width too.
     flows`, `Purged so far: …` while the run is purging; a run that failed while purging keeps the whole components it
     purged). A `Skipped (changed during the run)` line appears only when components were skipped, by the verification
     or by the purge's own check;
-  - **Times** show `Requested` and the latest step only (`Finished`, `Purge started`, `Verified`, `Exported` or
-    `Started`), each with its date and time kept together; the full timeline, with `Backup started` (the pre-purge
-    backup) and `Purge started`, is folded under `All times`, a disclosure that the keyboard opens;
+  - **Times** show `Requested` and the latest step only (`Finished`, `Purge started`, `Verified`, `Exported`, `Started`
+    or `Approved`), each with its date and time kept together; the full timeline, with `Approved` (the approval of a
+    proposed run), `Backup started` (the pre-purge backup) and `Purge started`, is folded under `All times`, a
+    disclosure that the keyboard opens. A dismissed run's dismissal is its `Finished` time;
   - the **archive folder name** is in a smaller monospace that wraps anywhere, with the size under it, then two
     disclosures that the keyboard opens: `Pre-purge backup` with the backup's name, and `Purge receipt` with the
     receipt's file name (`<archive folder name>.purged.json`, beside the archive folder) and its SHA-256.
 
-  Text in the table wraps only between words, so a narrow window never breaks a word in two: a reason's column is
-  never narrower than 6.5rem, and only a word longer than that (a pasted link) wraps anywhere, like the archive folder
-  name, a backup name and the SHA-256. Below 800 px the rows stack.
+  Text in the table wraps only between words, so a narrow window never breaks a word in two: a reason's and a result's
+  column is never narrower than 6.5rem, and only a word longer than that (a pasted link) wraps anywhere, like the
+  archive folder name, a backup name and the SHA-256; the Movements wrap between the number and the word only in a
+  narrow window. Below 800 px the rows stack.
+  - `Approve…` (accessible name `Approve run N…`) on a proposed run opens `Approve run N`, which says what the run does
+    as the request does, shows the reason the job gave, the cutoff date and the preview's numbers, and asks for a
+    required reason of the approver's own. `Approve run` sends it; the job starts the run at its next Start minute, and
+    before the pre-purge backup and before the purge it checks that the approver is still active and still holds the
+    permission.
+  - `Dismiss…` (accessible name `Dismiss run N…`) on a proposed run asks first and takes no reason (`Dismiss run N?`,
+    saying that the run will not start, that the Movement history stays in the database and that the days between
+    automatic runs count from the dismissal, with `Dismiss run` and `Keep run (Esc)`). A proposed run offers no
+    `Cancel…`, and the server refuses to cancel it.
   - `Cancel…` on a run that is requested or waiting for its off-host copy asks first (`Cancel run N?`, with `Cancel run`
     and `Keep run (Esc)`); the archive folder of a waiting run stays on the server. A run the job works on (`Running`,
     `Purging`) offers no `Cancel…`, and the server refuses to cancel it.
@@ -3004,8 +3070,9 @@ requests** card below it, at the full width too.
     server, for example by adding the archive folder to the Hyper Backup task. `Confirm copy` is enabled once `The
     archive folder is copied off the server` is ticked and sends the SHA-256 shown; at its next start the job then
     takes the pre-purge backup and purges the archived history.
-  - A refusal is shown in the dialog as the server words it. When a cancel or a confirmation gets no clear answer, the
-    runs reload and the card says to check the run's state; both are safe to repeat.
+  - A refusal of an approval, a dismissal, a cancellation or a confirmation is shown in the dialog as the server words
+    it. When one of them gets no clear answer, the runs reload and the card says to check the run's state; each is safe
+    to repeat.
 - **Permanent deletion requests** — `Each request deletes Work Orders or a Part Number with all their data from the
   database, as if they had never been entered; the server carries it out after a pre-purge backup.` Only holders of
   **Delete Work Orders and Part Numbers permanently** see the card, and only they make the requests, with **Delete
@@ -4344,7 +4411,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-18 | uncommitted | §9, §11.2 and §14.2: the new permission Delete Work Orders and Part Numbers permanently offers Delete permanently… in Work Order Details and in the Part Number dialog, which requests the deletion and follows its state, and the Permanent deletion requests card of History archival & purge. |
+| 2026-11-18 | uncommitted | §9: History archival & purge gains the Automatic runs card — the measure with its own limit, the days between automatic runs and the approval step, switched off with a reason and the typed confirmation as the standing authorization, shown with its validity, and a note wherever a change of the settings stops a run started without approval (the approval step switched on, automatic runs switched off, or a retention period lengthened or cleared so that it no longer allows the run's cutoff) — and the runs table shows proposed and dismissed runs, `Approved — waiting for the job`, `Automatic` with the approval or the standing authorization, and `Approve…` and `Dismiss…`, in six columns that fit a 1024 px window. |
+| 2026-11-18 | 1874636 | §9, §11.2 and §14.2: the new permission Delete Work Orders and Part Numbers permanently offers Delete permanently… in Work Order Details and in the Part Number dialog, which requests the deletion and follows its state, and the Permanent deletion requests card of History archival & purge. |
 | 2026-11-18 | d094f5e | §4.5, §7.2, §7.3 and §9: an archival run purges the archived history after the off-host copy and a pre-purge backup, Tracking shows archived entries and archived route steps, archived commands can no longer be undone, and the purge batch limits and Pre-purge backups kept are settings. |
 | 2026-11-17 | 2f12d33 | §9: History archival & purge shows its settings, the preview, the request of a run and the runs with Cancel and Confirm off-host copy; a run exports history and deletes nothing, and the new Run history archival and purge permission guards the section. |
 | 2026-11-17 | 1490927 | §11: Add Part offers, previews and creates the canonical form of a new PN that the server derives from the entry. |

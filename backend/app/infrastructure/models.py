@@ -92,8 +92,10 @@ from app.domain.enums import (
     AuditEntityType,
     AuditEventType,
     DeletionRequestState,
+    HistoryArchiveMeasure,
     HistoryArchiveRunResult,
     HistoryArchiveRunState,
+    HistoryArchiveRunTrigger,
     LineageRelation,
     MachineLifecycleEventType,
     MachineLifecycleState,
@@ -383,14 +385,19 @@ POLICY_DUE_SOON_ORDER_SQL = "due_soon_min_days <= due_soon_max_days"
 # period — itself a setting, 1-1200 months, initially 12, changed only with
 # a reason — and 1200 months; only the archival module reads it. The other
 # settings of Administration → History archival & purge: the days a run may
-# wait for its copy confirmation before the host job's status reports it
-# (1-365, initially 7), the Start minute of the host job's hourly work (0-59,
-# initially 20) and the preview time limit (10-600 seconds, initially 90,
-# inside the 100 seconds after which Cloudflare ends a request), repeated
-# verbatim by migration 0040; and (design B step 2, migration
-# `0041_phase16_history_purge`) the purge batch limits: Movements per batch
-# (100-1,000,000, initially 50,000) and Part Numbers per batch (1-1000,
-# initially 20).
+# wait for its copy confirmation, or (build step 4) a proposed run for its
+# approval, before the host job's status reports it (1-365, initially 7),
+# the Start minute of the host job's hourly work (0-59, initially 20) and the
+# preview time limit (10-600 seconds, initially 90, inside the 100 seconds
+# after which Cloudflare ends a request), repeated verbatim by migration
+# 0040; (design B step 2, migration `0041_phase16_history_purge`) the purge
+# batch limits: Movements per batch (100-1,000,000, initially 50,000) and
+# Part Numbers per batch (1-1000, initially 20); and (design B step 4,
+# migration `0043_phase16_automatic_runs`) the automatic runs: the limit of
+# each measure — live Movement rows (0-1,000,000,000, initially 5,000,000),
+# the months the oldest retained Movement is older than the cutoff (0-1200,
+# initially 1) and the database size in GiB (0-100,000, initially 20) — and
+# the days between automatic runs (1-365, initially 7).
 RETENTION_PERIOD_MONTHS_MAX = 1200
 SHORTEST_RETENTION_MONTHS_DEFAULT = 12
 HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
@@ -400,26 +407,44 @@ HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
     "archive_preview_seconds": (10, 600),
     "archive_purge_batch_movements": (100, 1_000_000),
     "archive_purge_batch_part_numbers": (1, 1000),
+    "archive_limit_movement_rows": (0, 1_000_000_000),
+    "archive_limit_history_months": (0, 1200),
+    "archive_limit_database_gib": (0, 100_000),
+    "archive_interval_days": (1, 365),
 }
 POLICY_RETENTION_PERIOD_SQL = (
     "retention_period_months IS NULL"
     " OR retention_period_months BETWEEN shortest_retention_months AND 1200"
 )
+# Automatic runs (design B step 4): off by default; the measure (live
+# Movement rows by default) and its limit; the approval step, required by
+# default — while it is off, the setting holds the id of the audit row that
+# switched it off (the standing authorization), and only then.
+ARCHIVE_LIMIT_MOVEMENT_ROWS_DEFAULT = 5_000_000
+ARCHIVE_LIMIT_HISTORY_MONTHS_DEFAULT = 1
+ARCHIVE_LIMIT_DATABASE_GIB_DEFAULT = 20
+ARCHIVE_INTERVAL_DAYS_DEFAULT = 7
+POLICY_ARCHIVE_MEASURE_SQL = (
+    "archive_measure IN (" + ", ".join(f"'{measure}'" for measure in HistoryArchiveMeasure) + ")"
+)
+POLICY_ARCHIVE_AUTHORIZATION_SQL = "archive_approval_required = (archive_authorization_id IS NULL)"
 
 # Movement-history archival runs and their carry-forward records (Phase 16,
 # history archival design §4.1, §6.1, §8.1; build step 1: runs without
 # deletion, migration `0040_phase16_history_archive`; build step 2: the
-# purge, migration `0041_phase16_history_purge`). Repeated verbatim by those
+# purge, migration `0041_phase16_history_purge`; build step 4: automatic
+# runs, migration `0043_phase16_automatic_runs`). Repeated verbatim by those
 # migrations; the guard triggers live in the migrations only.
 HISTORY_ARCHIVE_FINAL_STATES = (
     "COMPLETED",
     "COMPLETED_WITH_SKIPS",
     "NOTHING_ELIGIBLE",
+    "DISMISSED",
     "CANCELLED",
     "FAILED",
 )
 #: The states of an open run; at most one run is open (a partial UNIQUE index).
-HISTORY_ARCHIVE_OPEN_STATES = ("APPROVED", "RUNNING", "WAITING_FOR_COPY", "PURGING")
+HISTORY_ARCHIVE_OPEN_STATES = ("PROPOSED", "APPROVED", "RUNNING", "WAITING_FOR_COPY", "PURGING")
 HISTORY_ARCHIVE_REASON_MAX_LENGTH = 500
 #: The pre-purge backup a purge names: ``<UTC stamp>-pre-purge-<archive name>``
 #: (``app.application.backups``); the label starts at character 28.
@@ -456,7 +481,7 @@ HISTORY_ARCHIVE_RUN_VERIFY_SQL = (
     " AND (copied_at IS NULL OR verified_at IS NOT NULL)"
 )
 HISTORY_ARCHIVE_RUN_PROGRESS_SQL = (
-    "(state <> 'APPROVED' OR started_at IS NULL)"
+    "(state NOT IN ('PROPOSED', 'APPROVED', 'DISMISSED') OR started_at IS NULL)"
     " AND (state NOT IN ('RUNNING', 'WAITING_FOR_COPY', 'PURGING', 'COMPLETED',"
     " 'COMPLETED_WITH_SKIPS', 'NOTHING_ELIGIBLE') OR started_at IS NOT NULL)"
     " AND (state NOT IN ('WAITING_FOR_COPY', 'PURGING', 'COMPLETED', 'COMPLETED_WITH_SKIPS')"
@@ -525,10 +550,37 @@ HISTORY_ARCHIVE_RUN_FINISH_SQL = (
     + ", ".join(f"'{state}'" for state in HISTORY_ARCHIVE_FINAL_STATES)
     + ")) = (finished_at IS NOT NULL)"
     " AND (state = 'CANCELLED') = (cancelled_by_user_id IS NOT NULL)"
+    " AND (state = 'DISMISSED') = (dismissed_by_user_id IS NOT NULL)"
 )
 HISTORY_ARCHIVE_RUN_OPEN_WHERE_SQL = (
     "state IN (" + ", ".join(f"'{state}'" for state in HISTORY_ARCHIVE_OPEN_STATES) + ")"
 )
+# Who started and who authorized a run (build step 4, migration
+# `0043_phase16_automatic_runs`): only an automatic run has no requesting
+# User; an approval is recorded with its approver, time and reason; a manual
+# run is authorized by its request, a proposed or dismissed automatic run by
+# nobody, and every other automatic run by exactly one of an approval or the
+# standing authorization (the audit row that switched the approval step off).
+HISTORY_ARCHIVE_RUN_TRIGGER_SQL = (
+    "trigger IN (" + ", ".join(f"'{trigger}'" for trigger in HistoryArchiveRunTrigger) + ")"
+)
+HISTORY_ARCHIVE_RUN_REQUESTER_SQL = "(trigger = 'MANUAL') = (requested_by_user_id IS NOT NULL)"
+HISTORY_ARCHIVE_RUN_APPROVAL_SQL = (
+    "(approved_at IS NULL) = (approved_by_user_id IS NULL)"
+    " AND (approved_at IS NULL) = (approval_reason IS NULL)"
+    " AND (approval_reason IS NULL OR char_length(approval_reason) BETWEEN 1 AND 500)"
+    " AND (approved_at IS NULL OR approved_at >= requested_at)"
+)
+HISTORY_ARCHIVE_RUN_AUTHORITY_SQL = (
+    "(trigger = 'MANUAL' AND approved_at IS NULL AND authorization_id IS NULL)"
+    " OR (trigger = 'AUTOMATIC' AND state IN ('PROPOSED', 'DISMISSED')"
+    " AND approved_at IS NULL AND authorization_id IS NULL)"
+    " OR (trigger = 'AUTOMATIC' AND state NOT IN ('PROPOSED', 'DISMISSED')"
+    " AND (approved_at IS NULL) <> (authorization_id IS NULL))"
+)
+#: The run failed because the User of its authority (the requester, the
+#: approver or the standing authorization's User) may no longer run it.
+HISTORY_ARCHIVE_RUN_AUTHORIZATION_FAILED_SQL = "NOT authorization_failed OR state = 'FAILED'"
 #: The closed statuses a flow of an archived component has.
 HISTORY_ARCHIVED_FLOW_STATUS_SQL = (
     "flow_status IN ("
@@ -1593,7 +1645,9 @@ class ApplicationPolicy(Base):
     allowed retention period, the Start minute of the host job's hourly work
     and the preview time limit — and sets the retention period to 24 months
     where it was never saved; only the archival module and the host job's
-    `app.cli history-archive` read them.
+    `app.cli history-archive` read them. Design B step 4 adds the automatic
+    runs: whether they are on, the measure and its limits, the approval step
+    with its standing authorization, and the days between automatic runs.
 
     Phase 14 slice 1 adds the user sign-in policy of Administration →
     Settings → User sign-in (owner decisions OD-P1–OD-P3): whether
@@ -1686,6 +1740,38 @@ class ApplicationPolicy(Base):
     )
     archive_purge_batch_part_numbers: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("20")
+    )
+    # Automatic runs (design B step 4): off by default; the measure that
+    # decides a run is needed and the limit of each measure; the approval
+    # step (required by default); the days between automatic runs; and,
+    # exactly while the approval step is off, the id of the audit row that
+    # switched it off — the standing authorization automatic runs record.
+    archive_automatic_runs: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("false")
+    )
+    archive_measure: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'LIVE_MOVEMENT_ROWS'")
+    )
+    archive_limit_movement_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("5000000")
+    )
+    archive_limit_history_months: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    archive_limit_database_gib: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("20")
+    )
+    archive_approval_required: Mapped[bool] = mapped_column(
+        nullable=False, server_default=text("true")
+    )
+    archive_interval_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("7")
+    )
+    archive_authorization_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "audit_events.id", name="fk_application_policy_archive_authorization_id_audit_events"
+        ),
     )
     # User sign-in (Phase 14 slice 1): an expiry absolute from sign-in,
     # whole days, unless sign-ins never expire (the day count is kept
@@ -1906,6 +1992,13 @@ class ApplicationPolicy(Base):
                 policy_range_sql(column, bounds), name=conv(f"ck_application_policy_{column}_range")
             )
             for column, bounds in HISTORY_ARCHIVE_POLICY_RANGES.items()
+        ),
+        CheckConstraint(
+            POLICY_ARCHIVE_MEASURE_SQL, name=conv("ck_application_policy_archive_measure_allowed")
+        ),
+        CheckConstraint(
+            POLICY_ARCHIVE_AUTHORIZATION_SQL,
+            name=conv("ck_application_policy_archive_authorization_shape"),
         ),
     )
 
@@ -3331,13 +3424,20 @@ Index(
 class HistoryArchiveRun(Base):
     """One Movement-history archival run (Phase 16, history archival design
     §6.1; build step 1, migration `0040_phase16_history_archive`; build step
-    2, the purge, migration `0041_phase16_history_purge`).
+    2, the purge, migration `0041_phase16_history_purge`; build step 4,
+    automatic runs, migration `0043_phase16_automatic_runs`).
 
     A holder of Run history archival and purge requests a run in
     Administration with a reason, at a cutoff (the start of a site-calendar
     day, never newer than the retention period allows); the request is the
     approval, so the run starts APPROVED with the counts its preview found.
-    The host job (``python -m app.cli history-archive``, as the maintenance
+    An automatic run (``trigger`` AUTOMATIC, no requesting User) is created
+    by the host job's ``history-archive evaluate`` with an automatic reason:
+    PROPOSED while the approval step is required — a key holder approves it
+    with a reason of their own (APPROVED, with the approver and the time) or
+    dismisses it (DISMISSED) — or APPROVED under the standing authorization
+    (``authorization_id``, the audit row that switched the approval step
+    off). The host job (``python -m app.cli history-archive``, as the maintenance
     database role) exports the eligible flow components into an archive
     folder, verifies it and copies it off the host — or waits for a person
     to confirm the copy; the host script then takes the pre-purge backup,
@@ -3349,16 +3449,20 @@ class HistoryArchiveRun(Base):
     keep the result EXPORT_ONLY. Every change of state appends one
     ``HistoryArchiveRun`` audit row.
 
-    The request columns (cutoff, reason, requester, request time, preview)
-    never change. The guard trigger ``trg_history_archive_runs_guard_mutation``
-    lets the application role only insert an APPROVED run (and, like every
-    insert, refuses a cutoff newer than the shortest allowed retention period
-    allows), cancel an APPROVED or WAITING_FOR_COPY run and confirm the copy
-    of a WAITING_FOR_COPY run; every other transition is the maintenance
-    job's, made while ``partflow.archive_run_id`` names the run, and the run
-    becomes PURGING only with its verified, copied archive and its pre-purge
-    backup; a finished run never changes; no run is ever deleted. At most
-    one run is open (``uq_history_archive_runs_open``; PURGING is open).
+    The request columns (trigger, cutoff, reason, requester, request time,
+    authorization, preview) never change. The guard trigger
+    ``trg_history_archive_runs_guard_mutation`` lets the application role
+    only insert a manual APPROVED run (and, like every insert, refuses a
+    cutoff newer than the shortest allowed retention period allows), approve
+    or dismiss a PROPOSED run, cancel an APPROVED or WAITING_FOR_COPY run and
+    confirm the copy of a WAITING_FOR_COPY run; a role that may write archive
+    records inserts automatic runs only (PROPOSED, or APPROVED with the
+    setting's standing authorization); every other transition is the
+    maintenance job's, made while ``partflow.archive_run_id`` names the run,
+    and the run becomes PURGING only with its verified, copied archive and its
+    pre-purge backup; a finished run never changes; no run is ever deleted.
+    At most one run is open (``uq_history_archive_runs_open``; PROPOSED and
+    PURGING are open).
     """
 
     __tablename__ = "history_archive_runs"
@@ -3368,10 +3472,10 @@ class HistoryArchiveRun(Base):
     # The start of a site-calendar day: history older than it may be archived.
     cutoff: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    requested_by_user_id: Mapped[int] = mapped_column(
+    # NULL exactly for an automatic run (build step 4).
+    requested_by_user_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("users.id", name="fk_history_archive_runs_requested_by_user_id_users"),
-        nullable=False,
     )
     requested_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -3433,6 +3537,26 @@ class HistoryArchiveRun(Base):
     purged_flows: Mapped[int | None] = mapped_column(Integer)
     purged_movements: Mapped[int | None] = mapped_column(BigInteger)
     receipt_sha256: Mapped[str | None] = mapped_column(Text)
+    # Automatic runs (build step 4): who started the run (MANUAL or
+    # AUTOMATIC); the approval of a proposed run (its approver, time and
+    # reason, set once by a person); who dismissed a proposed run; the
+    # standing authorization an automatic run was created under (the audit
+    # row that switched the approval step off); and whether the run failed
+    # because the User of its authority may no longer run it.
+    trigger: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'MANUAL'"))
+    approved_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_history_archive_runs_approved_by_user_id_users")
+    )
+    approved_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    approval_reason: Mapped[str | None] = mapped_column(Text)
+    dismissed_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_history_archive_runs_dismissed_by_user_id_users")
+    )
+    authorization_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("audit_events.id", name="fk_history_archive_runs_authorization_id_audit_events"),
+    )
+    authorization_failed: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
 
     __table_args__ = (
         CheckConstraint(HISTORY_ARCHIVE_RUN_STATE_SQL, name=conv("ck_history_archive_runs_state")),
@@ -3487,8 +3611,25 @@ class HistoryArchiveRun(Base):
         CheckConstraint(
             HISTORY_ARCHIVE_RUN_RECEIPT_SQL, name=conv("ck_history_archive_runs_receipt_shape")
         ),
-        # At most one open run: a second request, or a request racing the
-        # first, is refused by the database itself.
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_TRIGGER_SQL, name=conv("ck_history_archive_runs_trigger")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_REQUESTER_SQL, name=conv("ck_history_archive_runs_requester_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_APPROVAL_SQL, name=conv("ck_history_archive_runs_approval_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_AUTHORITY_SQL, name=conv("ck_history_archive_runs_authority_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_RUN_AUTHORIZATION_FAILED_SQL,
+            name=conv("ck_history_archive_runs_authorization_failed_shape"),
+        ),
+        # At most one open run (PROPOSED included): a second request, or a
+        # request racing the first or the host job's evaluation, is refused by
+        # the database itself.
         Index(
             "uq_history_archive_runs_open",
             text("(true)"),

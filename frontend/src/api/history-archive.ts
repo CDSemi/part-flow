@@ -1,5 +1,5 @@
 // History archival runs API (Administration → History archival & purge;
-// Phase 16, archival design B steps 1 and 2).
+// Phase 16, archival design B steps 1, 2 and 4).
 //
 // What a run would archive at a cutoff (the preview), the runs newest
 // first, requesting a run (the request is the approval: the server
@@ -9,9 +9,13 @@
 // the history to archive files, copies them off the server, takes a
 // pre-purge backup and then purges the archived Movements (`PURGING`),
 // ending `COMPLETED` or `COMPLETED_WITH_SKIPS` with the result `PURGED`
-// or `NOTHING_PURGED`; runs that step 1 finished keep `EXPORT_ONLY`. The
-// server owns every rule (the cutoff, the one open run, the states); this
-// module only maps the wire shape.
+// or `NOTHING_PURGED`; runs that step 1 finished keep `EXPORT_ONLY`.
+// Step 4 adds automatic runs, which the server's archival job creates
+// (`AUTOMATIC`, no requester): `PROPOSED` until a person approves it with
+// a reason of their own or dismisses it (`DISMISSED`), or `APPROVED`
+// at once under the standing authorization of the approval setting. The
+// server owns every rule (the cutoff, the one open run, the states, who
+// may approve); this module only maps the wire shape.
 //
 // Production-safe: no mock data, no framework imports.
 
@@ -91,9 +95,12 @@ export async function previewArchive(
   };
 }
 
-/** The run states of steps 1 and 2 (`PURGING` is open, like `APPROVED`,
- * `RUNNING` and `WAITING_FOR_COPY`; the others are final). */
+/** The run states: `PROPOSED` (an automatic run waiting for approval),
+ * `APPROVED`, `RUNNING`, `WAITING_FOR_COPY` and `PURGING` are open (at
+ * most one run is open); the others are final (`DISMISSED`: a proposed
+ * run a person dismissed). */
 export type ArchiveRunState =
+  | 'PROPOSED'
   | 'APPROVED'
   | 'RUNNING'
   | 'WAITING_FOR_COPY'
@@ -101,8 +108,13 @@ export type ArchiveRunState =
   | 'COMPLETED'
   | 'COMPLETED_WITH_SKIPS'
   | 'NOTHING_ELIGIBLE'
+  | 'DISMISSED'
   | 'CANCELLED'
   | 'FAILED';
+
+/** Who started a run: `MANUAL` (requested in Administration) or
+ * `AUTOMATIC` (created by the server's archival job). */
+export type ArchiveRunTrigger = 'MANUAL' | 'AUTOMATIC';
 
 /** The results of a completed run: `PURGED` (at least one component
  * purged), `NOTHING_PURGED` (every component skipped), `EXPORT_ONLY`
@@ -121,15 +133,47 @@ export interface ArchivePurgedCounts {
   movements: number;
 }
 
+/** The approval of a proposed (automatic) run: who, when (the server's
+ * time) and the approver's own reason. */
+export interface ArchiveRunApproval {
+  approvedBy: ArchiveRunUser;
+  approvedAt: string;
+  reason: string;
+}
+
+/** The standing authorization an automatic run was started under without
+ * approval: the audited change that switched the approval step off, and
+ * who made it when (null when the server could not name them). */
+export interface ArchiveRunAuthorization {
+  auditEventId: number;
+  authorizedBy: ArchiveRunUser | null;
+  authorizedAt: string | null;
+}
+
 export interface ArchiveRun {
   id: number;
   /** The run's state as the server answered it (an `ArchiveRunState`;
    * a later step may add states, which the table shows as they are). */
   state: string;
+  /** An `ArchiveRunTrigger`, as the server answered it. */
+  trigger: string;
   cutoffDate: string;
+  /** The requester's reason, or the automatic reason of an automatic run. */
   reason: string;
-  requestedBy: ArchiveRunUser;
+  /** Null exactly for an automatic run. */
+  requestedBy: ArchiveRunUser | null;
   requestedAt: string;
+  /** Set once a proposed run was approved. */
+  approval: ArchiveRunApproval | null;
+  /** Who dismissed a proposed run: set exactly when it is `DISMISSED`
+   * (its time is `finishedAt`). */
+  dismissedBy: ArchiveRunUser | null;
+  /** Set for an automatic run started under the standing authorization. */
+  authorization: ArchiveRunAuthorization | null;
+  /** A `FAILED` run failed because the User of its authority (the
+   * requester, the approver or the standing authorization's User) is no
+   * longer active or no longer holds the key; `failureReason` says so. */
+  authorizationFailed: boolean;
   /** The preview stored with the request. */
   preview: ArchiveCounts;
   startedAt: string | null;
@@ -180,11 +224,24 @@ interface UserWire {
 interface ArchiveRunWire {
   id: number;
   state: string;
+  trigger: string;
   cutoff: string;
   cutoff_date: string;
   reason: string;
-  requested_by: UserWire;
+  requested_by: UserWire | null;
   requested_at: string;
+  approval: {
+    approved_by: UserWire;
+    approved_at: string;
+    reason: string;
+  } | null;
+  dismissed_by: UserWire | null;
+  authorization: {
+    audit_event_id: number;
+    authorized_by: UserWire | null;
+    authorized_at: string | null;
+  } | null;
+  authorization_failed: boolean;
   preview: ArchiveCountsWire;
   started_at: string | null;
   archive_name: string | null;
@@ -224,13 +281,32 @@ function toRun(wire: ArchiveRunWire): ArchiveRun {
   return {
     id: wire.id,
     state: wire.state,
+    trigger: wire.trigger,
     cutoffDate: wire.cutoff_date,
     reason: wire.reason,
-    requestedBy: {
-      userId: wire.requested_by.user_id,
-      displayName: wire.requested_by.display_name,
-    },
+    requestedBy: toUser(wire.requested_by),
     requestedAt: wire.requested_at,
+    approval:
+      wire.approval === null
+        ? null
+        : {
+            approvedBy: {
+              userId: wire.approval.approved_by.user_id,
+              displayName: wire.approval.approved_by.display_name,
+            },
+            approvedAt: wire.approval.approved_at,
+            reason: wire.approval.reason,
+          },
+    dismissedBy: toUser(wire.dismissed_by),
+    authorization:
+      wire.authorization === null
+        ? null
+        : {
+            auditEventId: wire.authorization.audit_event_id,
+            authorizedBy: toUser(wire.authorization.authorized_by),
+            authorizedAt: wire.authorization.authorized_at,
+          },
+    authorizationFailed: wire.authorization_failed,
     preview: toCounts(wire.preview),
     startedAt: wire.started_at,
     archiveName: wire.archive_name,
@@ -300,10 +376,35 @@ export async function requestArchiveRun(
 }
 
 /** Cancel a run that is requested or waiting for its off-host copy (a
- * cancelled run answers unchanged). */
+ * cancelled run answers unchanged; a proposed run is dismissed instead). */
 export async function cancelArchiveRun(runId: number): Promise<ArchiveRun> {
   return toRun(
     await apiRequest<ArchiveRunWire>(`${RUNS_PATH}/${runId}/cancel`, {
+      method: 'POST',
+    }),
+  );
+}
+
+/** Approve a proposed (automatic) run with a reason of the approver's
+ * own; it becomes `APPROVED` (approving it again as the same User answers
+ * unchanged). */
+export async function approveArchiveRun(
+  runId: number,
+  reason: string,
+): Promise<ArchiveRun> {
+  return toRun(
+    await apiRequest<ArchiveRunWire>(`${RUNS_PATH}/${runId}/approve`, {
+      method: 'POST',
+      body: { reason },
+    }),
+  );
+}
+
+/** Dismiss a proposed run, without a reason, as Cancel does (a dismissed
+ * run answers unchanged). */
+export async function dismissArchiveRun(runId: number): Promise<ArchiveRun> {
+  return toRun(
+    await apiRequest<ArchiveRunWire>(`${RUNS_PATH}/${runId}/dismiss`, {
       method: 'POST',
     }),
   );

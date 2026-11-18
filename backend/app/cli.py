@@ -107,12 +107,13 @@ Commands:
   linked to data that stays or another deletion request is open. Runs as
   the database owner role (``app.application.permanent_deletion``). 0 preview
   shown or request recorded, 1 refused, 2 failed or its outcome is unknown.
-- ``history-archive (settings | recover | next | export --run N | verify
-  --run N | copy --run N | purge --run N [--backup NAME --backup-started-at
-  UTC] | start-deletion --request N | delete --request N --backup NAME
-  --backup-started-at UTC | status)`` (Phase 16, history archival design B
-  steps 1 to 3; ``deploy/production/archive.sh``): the host job of
-  Movement-history archival and of permanent deletion requests, run as the
+- ``history-archive (settings | recover | evaluate | next | export --run N |
+  verify --run N | copy --run N | purge --run N [--backup NAME
+  --backup-started-at UTC] | start-deletion --request N | delete --request N
+  --backup NAME --backup-started-at UTC | status)`` (Phase 16, history
+  archival design B steps 1 to 4; ``deploy/production/archive.sh``): the
+  host job of Movement-history archival, of its automatic runs
+  (``evaluate``) and of permanent deletion requests, run as the
   maintenance database role with the archive folder in
   ``PARTFLOW_ARCHIVE_DIR`` and the optional off-host copy folder in
   ``PARTFLOW_ARCHIVE_COPY_DIR`` (``app.application.history_archive_job``).
@@ -1333,6 +1334,11 @@ _HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
         " FAILED, remove the unfinished entries of finished runs and copy missing purge"
         " receipts. A PURGING run is left for purge to resume."
     ),
+    "evaluate": (
+        "The hourly automatic decision, after recover and before the next loop: create the"
+        " automatic run the settings call for now (PROPOSED for approval, or APPROVED under the"
+        " standing authorization), and say what was decided and why."
+    ),
     "next": (
         "Print the work the job must do now: an open deletion request first, then the run and"
         " what to run for it."
@@ -1447,6 +1453,8 @@ def _run_history_archive(args: argparse.Namespace) -> int:
             report = history_archive_job.settings(engine, folders)
         elif args.step == "recover":
             report = history_archive_job.recover(engine, folders)
+        elif args.step == "evaluate":
+            report = history_archive_job.evaluate(engine, folders)
         elif args.step == "next":
             report = history_archive_job.next_run(engine, folders)
         elif args.step == "export":

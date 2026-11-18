@@ -50,7 +50,12 @@ DEFAULT_STATEMENT_TIMEOUT_SECONDS: Final = 20
 LOCK_TIMEOUT_SECONDS: Final = 5
 CONNECT_TIMEOUT_SECONDS: Final = 10
 BACKUP_LOCK_DIR: Final = ".backup.lock"
-ARCHIVAL_REASON: Final = "Archival proposals arrive with P16-S10."
+#: The ``archival`` section stays ``not_applicable``: history archival (its runs,
+#: proposals and reminders) is reported by ``history-archive status``.
+ARCHIVAL_REASON: Final = (
+    "History archival is reported by history-archive status (the archival_proposal line of"
+    " check.sh)."
+)
 #: A completion time further ahead than this is a clock problem, not a fresh backup.
 FUTURE_TOLERANCE: Final = datetime.timedelta(minutes=5)
 

@@ -3,9 +3,9 @@
 MR-10 (step 1), MR-11..MR-14 (step 2: the purge states and results, receipt_not_copied, the incident record of a
 reconcile after a purge, a pre-purge backup as the newest backup) and MR-15..MR-17 (step 3: the open and the last
 finished permanent deletion request, deletion_request_waiting and --deletion-wait-minutes, the incident record of a
-reconcile after a deletion, the waiting request while archival is not set up)). The helper runs as a subprocess of this
-interpreter
-on temporary report files; nothing touches Docker or a database.
+reconcile after a deletion, the waiting request while archival is not set up) and MR-18 (step 4: a PROPOSED run waiting
+for its approval, approval_overdue, authorization_failed instead of last_run_failed, standing_authorization_invalid)).
+The helper runs as a subprocess of this interpreter on temporary report files; nothing touches Docker or a database.
 
 Run with the other production tests:
   python -B -m unittest discover -s deploy/production/tests -p 'test*.py'
@@ -21,7 +21,8 @@ import unittest
 REPO = Path(__file__).resolve().parents[3]
 MONITOR_REPORT = REPO / "deploy" / "production" / "monitor_report.py"
 HEAD = "0032_phase14_route_adjusted"
-ARCHIVAL_REASON = "Archival proposals arrive with P16-S10."
+# The reason of the `status` report's archival section (backend system_status.ARCHIVAL_REASON since step 4).
+ARCHIVAL_REASON = "History archival is reported by history-archive status (the archival_proposal line of check.sh)."
 
 
 def status_doc(exit_code=0, findings=(), error=None, backup="ok", locks=None, database=True):
@@ -231,9 +232,15 @@ class Status(Helper):
         self.assertIn("line one?line two", lines[2])
 
 
-def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None, receipts=(), deletion=None):
+# The automatic runs of a `history-archive status` report (step 4): off, as initially.
+AUTOMATIC_OFF = {"enabled": False, "approval_required": True, "standing_authorization": None}
+
+
+def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None, receipts=(), deletion=None,
+                       automatic=AUTOMATIC_OFF):
     """A `python -m app.cli history-archive status` report (Movement-history archival steps 1 and 2; DELETION, a pair of
-    the open and the last finished deletion request, adds the keys of step 3)."""
+    the open and the last finished deletion request, adds the keys of step 3; AUTOMATIC, the automatic runs with their
+    standing authorization, the key of step 4, or None to leave it out)."""
     document = {
         "report_version": 1, "command": "history-archive status", "result": "finding" if findings else "ok",
         "exit_code": exit_code, "started_at": "2026-10-08T10:00:00Z", "finished_at": "2026-10-08T10:00:01Z",
@@ -246,6 +253,8 @@ def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error
     if deletion is not None:
         document["request_id"] = None
         document["open_deletion_request"], document["last_finished_deletion_request"] = deletion
+    if automatic is not None:
+        document["automatic_runs"] = automatic
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
 
 
@@ -275,14 +284,19 @@ def settings_doc(request=None, exit_code=0, error=None, started_at="2026-10-08T1
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
 
 
-def run_summary(run_id, state, result=None, purged=None, skipped=(None, None), failure=None):
-    """The run summary of `history-archive status` (contract §3)."""
-    return {"id": run_id, "state": state, "cutoff": "2024-10-08T07:00:00Z", "requested_at": "2026-10-08T09:00:00Z",
-            "archive_name": f"run-{run_id}-20261008T092000Z", "manifest_sha256": "a" * 64, "copied": True,
-            "copy_confirmed": False, "skipped_components": skipped[0], "skipped_flows": skipped[1],
-            "pre_purge_backup_name": None, "receipt_sha256": None, "finished_at": None, "result": result,
-            "failure_reason": failure,
-            "purged": None if purged is None else dict(zip(("components", "flows", "movements"), purged))}
+def run_summary(run_id, state, result=None, purged=None, skipped=(None, None), failure=None, **fields):
+    """The run summary of `history-archive status` (contract §3; step 4 adds trigger, reason, approved_by_user_id,
+    approved_at, authorization_id and authorization_failed): a requested run unless FIELDS say otherwise."""
+    document = {"id": run_id, "state": state, "trigger": "MANUAL", "reason": "Quarterly archival",
+                "cutoff": "2024-10-08T07:00:00Z", "requested_at": "2026-10-08T09:00:00Z", "approved_by_user_id": None,
+                "approved_at": None, "authorization_id": None, "authorization_failed": False,
+                "archive_name": f"run-{run_id}-20261008T092000Z", "manifest_sha256": "a" * 64, "copied": True,
+                "copy_confirmed": False, "skipped_components": skipped[0], "skipped_flows": skipped[1],
+                "pre_purge_backup_name": None, "receipt_sha256": None, "finished_at": None, "result": result,
+                "failure_reason": failure,
+                "purged": None if purged is None else dict(zip(("components", "flows", "movements"), purged))}
+    document.update(fields)
+    return document
 
 
 class Archive(Helper):
@@ -518,6 +532,58 @@ class Archive(Helper):
             with self.subTest(arguments=arguments):
                 rc, lines = self.run_helper(*arguments)
                 self.assertEqual((rc, lines), (2, []))
+
+    # MR-18 (archival step 4, contract B4 §6): the reminders of the automatic runs. A PROPOSED open run passes and says
+    # how long it has waited for its approval (age_seconds: it has no waiting_seconds); approval_overdue names it once it
+    # waited longer than max_wait_days. A run that failed because the User of its authority may no longer run it has both
+    # last_run_failed and authorization_failed: the line names it once, as authorization_failed, in the place of the
+    # findings' order. standing_authorization_invalid gives the problem of the standing authorization.
+    def test_mr18_automatic_runs(self):
+        proposed = run_summary(7, "PROPOSED", trigger="AUTOMATIC", reason="Live Movement rows 5,120,334 above the limit"
+                               " 5,000,000; retention 24 months", archive_name=None)
+        rc, lines = self.run_helper("archive", self.write("p.json", archive_status_doc(
+            open_run={**proposed, "age_seconds": 129600})), 0)
+        self.assertEqual((rc, lines), (0, ["PASS archival_proposal run 7 PROPOSED waiting 1.5 days for approval (limit 7"
+                                           " days); no finished run; archive folder 3.0 GiB free"]))
+        rc, lines = self.run_helper("archive", self.write("o.json", archive_status_doc(
+            1, ["approval_overdue"], open_run={**proposed, "age_seconds": 8 * 86400})), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal approval_overdue: run 7 PROPOSED has waited 8.0 days for"
+                                           " approval (limit 7 days); approve or dismiss it in Administration → History"
+                                           " archival & purge"]))
+        reason = ("The User who approved run 3, Ann (user 4), is no longer active, so its history was not purged. Nothing"
+                  " was deleted; a holder of Run history archival and purge may request a new run.")
+        failed = run_summary(3, "FAILED", failure=reason, trigger="AUTOMATIC", approved_by_user_id=4,
+                             approved_at="2026-10-08T09:30:00.000000Z", authorization_failed=True)
+        rc, lines = self.run_helper("archive", self.write("a.json", archive_status_doc(
+            1, ["last_run_failed", "authorization_failed"], last=failed)), 1)
+        self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal authorization_failed: run 3 FAILED: {reason}"]))
+        problem = ("The User who switched off the approval step of automatic runs, Ann (user 4), is no longer active. No"
+                   " automatic run is created until a holder of Run history archival and purge saves the approval"
+                   " setting again.")
+        automatic = {"enabled": True, "approval_required": False,
+                     "standing_authorization": {"audit_event_id": 12,
+                                                "authorized_by": {"user_id": 4, "display_name": "Ann"},
+                                                "authorized_at": "2026-10-01T09:00:00.000000Z",
+                                                "reason": "Weekly archival without approval", "valid": False,
+                                                "problem": problem}}
+        rc, lines = self.run_helper("archive", self.write("s.json", archive_status_doc(
+            1, ["standing_authorization_invalid"], automatic=automatic)), 1)
+        self.assertEqual((rc, lines), (1, [f"FAIL archival_proposal standing_authorization_invalid: {problem}"]))
+        # Several findings keep the report's order; the line is cut at 300 characters.
+        waiting = {**run_summary(5, "WAITING_FOR_COPY"), "age_seconds": 900000, "waiting_seconds": 9 * 86400}
+        rc, lines = self.run_helper("archive", self.write("m.json", archive_status_doc(
+            1, ["copy_confirmation_overdue", "last_run_failed", "authorization_failed", "archive_dir_unusable"],
+            open_run=waiting, last=failed)), 1)
+        self.assertEqual(rc, 1)
+        self.assertTrue(lines[0].startswith("FAIL archival_proposal copy_confirmation_overdue: run 5 WAITING_FOR_COPY has"
+                                            " waited 9.0 days for its off-host copy confirmation (limit 7 days);"
+                                            " authorization_failed: run 3 FAILED: The User who approved run 3"), lines)
+        self.assertNotIn("last_run_failed", lines[0])
+        # A report without the problem text still names the finding.
+        rc, lines = self.run_helper("archive", self.write("n.json", archive_status_doc(
+            1, ["standing_authorization_invalid"], automatic={**automatic, "standing_authorization": None})), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal standing_authorization_invalid: the standing"
+                                           " authorization of the automatic runs is not valid"]))
 
     # MR-14 (archival step 2): backup_age accepts a pre-purge backup as the newest backup.
     def test_mr14_pre_purge_backup_is_the_newest(self):

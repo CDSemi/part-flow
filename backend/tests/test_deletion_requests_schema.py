@@ -3,8 +3,9 @@
 Runs the real Alembic chain against isolated, temporary PostgreSQL databases
 (created and dropped by the fixtures) and verifies:
 
-- the exact head boundary (``0042_phase16_deletion_requests`` is the single
-  head, and the models match the schema migrated to it) and the migration's
+- the revision in the chain (``0043_phase16_automatic_runs``, history
+  archival step 4, is the head since; its own test pins the single head),
+  the models matching the schema migrated to head, and the migration's
   literals against the models, the enums, ``permanent_deletion`` and
   migrations 0040 and 0041;
 - the permission key: granted to every role that holds every other key
@@ -60,6 +61,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _VERSIONS = _BACKEND_DIR / "alembic" / "versions"
 _PREVIOUS_REVISION = "0041_phase16_history_purge"
 _HEAD_REVISION = "0042_phase16_deletion_requests"
+_CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _VERSIONS / "20261118_0042_phase16_deletion_requests.py"
 _PURGE_FILE = _VERSIONS / "20261118_0041_phase16_history_purge.py"
 _ARCHIVE_FILE = _VERSIONS / "20261117_0040_phase16_history_archive.py"
@@ -187,10 +189,10 @@ def _marked(request_id: int) -> tuple[str, dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_has_a_single_head() -> None:
+def test_the_revision_is_in_the_chain() -> None:
     config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-    assert schema_revision.code_head() == _HEAD_REVISION
+    revision = ScriptDirectory.from_config(config).get_revision(_HEAD_REVISION)
+    assert revision is not None and revision.down_revision == _PREVIOUS_REVISION
     assert schema_revision.non_transactional_revisions([_HEAD_REVISION]) == []
 
 
@@ -965,5 +967,5 @@ def test_the_downgrade_refuses_while_a_request_exists(head_database: URL, head: 
     with head.connect() as connection:
         assert (
             connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
-            == _HEAD_REVISION
+            == _CODE_HEAD
         )

@@ -39,8 +39,8 @@ def append_audit_event(
     actor_reference: str | None = None,
     actor_user_id: int | None = None,
     metadata: dict[str, Any] | None = None,
-) -> None:
-    """Stage one audit row in the caller's open transaction.
+) -> AuditEvent:
+    """Stage one audit row in the caller's open transaction; return it.
 
     ``before_data`` is NULL for creation events; edits append a new
     ``UPDATED`` row and never rewrite prior rows (the append-only
@@ -49,18 +49,20 @@ def append_audit_event(
     never from a request body; the Administration writers pass it since
     Phase 14 slice 2. ``actor_reference`` is the legacy text column, kept
     for history and never backfilled; the remaining callers keep passing
-    it until their Phase 14 slice converts them.
+    it until their Phase 14 slice converts them. The row's ``id`` is known
+    once the session flushes (the standing authorization of automatic
+    history archival runs keeps it, ``app.application.policies``).
     """
-    session.add(
-        AuditEvent(
-            event_type=event_type,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            actor_reference=actor_reference,
-            actor_user_id=actor_user_id,
-            occurred_at=func.now(),
-            before_data=before_data,
-            after_data=after_data,
-            metadata_=metadata,
-        )
+    event = AuditEvent(
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor_reference=actor_reference,
+        actor_user_id=actor_user_id,
+        occurred_at=func.now(),
+        before_data=before_data,
+        after_data=after_data,
+        metadata_=metadata,
     )
+    session.add(event)
+    return event

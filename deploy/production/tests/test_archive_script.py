@@ -24,6 +24,11 @@ Cases:
                status both ways, failed, refused), the reconcile after a deletion and its incident record, a request
                that waits while a run is RUNNING, a request failed by recover, an interruption during the deletion,
                the lock while a deletion runs, and check.sh's deletion_request_waiting and the deletion incident
+  AR-58..AR-64 step 4, automatic runs: `evaluate` in the hourly work after recover and before the `next` loop (each
+               decision and its EVALUATE line), an APPROVED automatic run worked on in the same start, a PROPOSED run
+               waiting, exit 1 and 2 of evaluate going on with the loop, no evaluate in a deletion-only start or while
+               the incident record exists, the help, and check.sh's approval_overdue, authorization_failed and
+               standing_authorization_invalid lines
 Nothing touches a Docker daemon, a database or the network.
 
 Run with the other production tests:
@@ -73,9 +78,10 @@ REQUEST_NEW = "Request a new run in Administration → History archival & purge 
 REQUEST_AGAIN = "Request the deletion again in PartFlow, or with pf delete-permanently (OPERATIONS_RUNBOOK §10)."
 # The refusal of a start while the incident record of a reconcile after a purge exists (after the record's path).
 INCIDENT_REFUSAL = (f" of a reconcile after a purge exists (run {RUN}, result mismatch): no run or deletion request is"
-                    " worked on while it exists, no export, verification, copy, pre-purge backup, purge or deletion, not"
-                    " even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after"
-                    " a purge); once the investigation is done and the reconciliation is clean, remove the record (rm ")
+                    " worked on while it exists, no evaluation of the automatic runs, export, verification, copy,"
+                    " pre-purge backup, purge or deletion, not even the resumed purge of a run left PURGING. Follow"
+                    " OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); once the investigation is done and the"
+                    " reconciliation is clean, remove the record (rm ")
 # Step 3: permanent deletion request 7, its pre-purge backup and the deletion.
 REQ = 7
 DEL_LABEL = "deletion-7-20261008T122031Z"
@@ -87,6 +93,31 @@ DEL_BACKUP_ARGUMENTS = ["--kind", "pre-purge", "--label", DEL_LABEL, "--operator
                         "--lock-wait-minutes", "60"]
 DELETION_ORDER = ["recover", "next", f"start-deletion --request {REQ}", "next", "backup.sh", DELETE_WITH_BACKUP,
                   "reconcile", "status"]
+# Step 4: a start due for the hourly work (a manual start, or a scheduled start at its slot) evaluates the automatic runs
+# after recover, also when a deletion request then comes first.
+DELETION_ORDER_DUE = ["recover", "evaluate", *DELETION_ORDER[1:]]
+# The messages of `history-archive evaluate` (contract B4 §3.1), for run 3 where a decision names a run.
+EVALUATE_MESSAGES = {
+    "off": "Automatic runs are off (History archival & purge), so no run was created.",
+    "no_retention_period": "No retention period is set, so no history is eligible and no run was created.",
+    "run_open": f"Run {RUN} is still open (WAITING_FOR_COPY); no automatic run is created while a run is open.",
+    "not_due": ("The last automatic run, run 2, ended at 2026-10-05T12:00:00.000000Z; the next automatic run is due from"
+                " 2026-10-12T12:00:00.000000Z (7 days between automatic runs)."),
+    "authorization_invalid": ("The User who switched off the approval step of automatic runs, Ann (user 4), no longer"
+                              " holds Run history archival and purge. No automatic run is created until a holder of the"
+                              " key saves the approval setting again."),
+    "below_limit": "Live Movement rows 4,000 are not above the limit 5,000,000, so no run was created.",
+    "nothing_eligible": "Nothing is eligible before 2024-10-08 (retention 24 months), so no run was created.",
+    "settings_changed": ("The settings of automatic runs or the retention period changed while the evaluation ran, so no"
+                         " run was created; the next hourly work evaluates again."),
+    "created": (f"Run {RUN} was proposed: Live Movement rows 5,120,334 above the limit 5,000,000; retention 24 months. It"
+                " waits for a holder of Run history archival and purge to approve or dismiss it."),
+}
+AUTOMATIC_REASON = "Live Movement rows 5,120,334 above the limit 5,000,000; retention 24 months"
+CREATED_APPROVED = (f"Run {RUN} was created APPROVED under the standing authorization of audit row 12:"
+                    f" {AUTOMATIC_REASON}. The host job works on it without approval.")
+TIMED_OUT = ("The evaluation of automatic runs did not finish within the preview time limit of 90 seconds, so no run was"
+             " created. The next hourly work evaluates again; raise the preview time limit if this repeats.")
 
 
 def fake_proc(root, processes=(), boot=BOOT):
@@ -135,9 +166,12 @@ def job_out(step, result, rc=0, run_id=None, state=None, error=None, request_id=
 
 
 def run_object(state, **fields):
-    """The run summary of `next` and `status` (contract §3)."""
-    document = {"id": RUN, "state": state, "cutoff": "2024-10-08T00:00:00Z", "requested_at": "2026-10-08T10:00:00Z",
-                "archive_name": None if state == "APPROVED" else ARCHIVE_NAME, "manifest_sha256": None,
+    """The run summary of `next`, `evaluate` and `status` (contract §3; step 4 adds trigger, reason, approved_by_user_id,
+    approved_at, authorization_id and authorization_failed): a requested (manual) run unless FIELDS say otherwise."""
+    document = {"id": RUN, "state": state, "trigger": "MANUAL", "reason": "Quarterly archival",
+                "cutoff": "2024-10-08T00:00:00Z", "requested_at": "2026-10-08T10:00:00Z", "approved_by_user_id": None,
+                "approved_at": None, "authorization_id": None, "authorization_failed": False,
+                "archive_name": None if state in ("PROPOSED", "APPROVED") else ARCHIVE_NAME, "manifest_sha256": None,
                 "copied": False, "copy_confirmed": False, "skipped_components": None, "skipped_flows": None,
                 "pre_purge_backup_name": None, "purged": None, "receipt_sha256": None, "finished_at": None,
                 "result": None, "failure_reason": None}
@@ -145,13 +179,19 @@ def run_object(state, **fields):
     return document
 
 
-def next_out(action, state=None, rc=0, error=None, request=None):
+def automatic_run(state, **fields):
+    """The summary of an automatic run created under the standing authorization of audit row 12 (contract B4 §3)."""
+    return run_object(state, trigger="AUTOMATIC", reason=AUTOMATIC_REASON, authorization_id=12, **fields)
+
+
+def next_out(action, state=None, rc=0, error=None, request=None, run=None):
     """A `history-archive next` answer: ACTION for run 3 in STATE (`none`: no open run); with `backup`, the pre-purge
-    backup's kind and label; exit 3: the requester re-check failed the run. REQUEST: an APPROVED deletion request that
-    waits while the run is RUNNING (step 3; `request_id` stays null)."""
+    backup's kind and label; exit 3: the re-check of the run's authority failed the run. REQUEST: an APPROVED deletion
+    request that waits while the run is RUNNING (step 3; `request_id` stays null). RUN: the run summary, when it is not
+    a requested run's (step 4: an automatic run)."""
     if action == "none":
         return job_out("next", "none", run=None, request=request)
-    fields = {"run": run_object(state), "request": request}
+    fields = {"run": run or run_object(state), "request": request}
     if action == "backup":
         fields["backup"] = {"kind": "pre-purge", "label": ARCHIVE_NAME}
     return job_out("next", "failed" if rc == 3 else action, rc=rc, run_id=RUN, state=state, error=error, **fields)
@@ -174,10 +214,38 @@ def purge_out(result="completed", rc=0, state="COMPLETED", resumed=False, starte
     return job_out("purge", result, rc=rc, run_id=RUN, state=state, error=error, **fields)
 
 
+# The automatic runs of a `history-archive status` report (step 4): off, as initially.
+AUTOMATIC_OFF = {"enabled": False, "approval_required": True, "standing_authorization": None}
+
+
 def status_ok():
     return job_out("status", "ok", open_run=None, last_finished_run=None,
                    archive_dir={"path": "/archive", "usable": True, "free_bytes": 1, "total_bytes": 2, "partial": []},
-                   copy_dir=None, max_wait_days=7, receipts_not_copied=[], findings=[])
+                   copy_dir=None, receipts_not_copied=[], open_deletion_request=None,
+                   last_finished_deletion_request=None, automatic_runs=AUTOMATIC_OFF, max_wait_days=7, findings=[])
+
+
+def evaluate_out(result="off", rc=0, run_id=None, state=None, error=None, message=None, run=None, approval=True):
+    """A `history-archive evaluate` answer (contract B4 §3.1): every decision exits 0 with its result and message; a
+    created run (RUN, PROPOSED or APPROVED) or the open run of `run_open` is named by run_id and state."""
+    if rc != 0:
+        return job_out("evaluate", "refused" if rc == 1 else "could_not_run", rc=rc, error=error)
+    enabled = result != "off"
+    if message is None:
+        message = CREATED_APPROVED if (result, state) == ("created", "APPROVED") else EVALUATE_MESSAGES[result]
+    if run is None and result == "created":
+        run = (automatic_run(state) if state == "APPROVED"
+               else run_object(state, trigger="AUTOMATIC", reason=AUTOMATIC_REASON))
+    measured = result in ("below_limit", "nothing_eligible", "settings_changed", "created")
+    return job_out(
+        "evaluate", result, run_id=run_id, state=state, automatic_runs=enabled, approval_required=approval,
+        retention_period_months=24 if enabled else None,
+        cutoff="2024-10-08T00:00:00.000000Z" if enabled else None, cutoff_date="2024-10-08" if enabled else None,
+        interval_days=7, open_run={"id": run_id, "state": state} if result == "run_open" else None,
+        last_automatic_run=None, next_due_at=None, standing_authorization=None,
+        measure=({"name": "LIVE_MOVEMENT_ROWS", "read": "count", "value": 5120334, "limit": 5000000, "threshold": None,
+                  "passes": True} if measured else None),
+        preview=None, message=message, run=run)
 
 
 def backup_line(name=BACKUP, started=DUMP_STARTED):
@@ -249,7 +317,8 @@ def deletion_status(open_request=None, last_request=None, rc=0):
     return job_out("status", "ok", rc=rc, open_run=None, last_finished_run=None,
                    archive_dir={"path": "/archive", "usable": True, "free_bytes": 1, "total_bytes": 2, "partial": []},
                    copy_dir=None, receipts_not_copied=[], open_deletion_request=open_request,
-                   last_finished_deletion_request=last_request, max_wait_days=7, findings=[])
+                   last_finished_deletion_request=last_request, automatic_runs=AUTOMATIC_OFF, max_wait_days=7,
+                   findings=[])
 
 
 def default_jobs(*nexts):
@@ -261,6 +330,8 @@ def default_jobs(*nexts):
                                           site_timezone="UTC")),
         rule(MAINT + "recover$", job_out("recover", "nothing_to_recover", failed_run_ids=[], removed_partial=[],
                                          kept_partial=[], copied_receipts=[], receipt_problems=[])),
+        # Step 4: the automatic runs are off, as initially.
+        rule(MAINT + "evaluate$", evaluate_out()),
         rule(MAINT + "next$", *[next_out(*answer) for answer in (nexts or HAPPY)]),
         rule(MAINT + f"export --run {RUN}$", job_out("export", "exported", run_id=RUN, state="RUNNING",
                                                      archive_name=ARCHIVE_NAME, manifest_sha256="a" * 64,
@@ -367,6 +438,18 @@ class ArchiveHarness(ScriptHarness):
     def set_purge(self, answer):
         self.set_rule(PURGE + "( |$)", answer)
 
+    def set_deletion(self, *nexts):
+        """An open deletion request 7: the cheap check finds it, `next` hands out its start and then its pre-purge
+        backup (a run waiting behind it is never asked for), start-deletion starts it, backup.sh takes its backup and
+        delete deletes it."""
+        self.set_rule(CHEAP, settings_out(pending=True))
+        answers = [next_deletion_out(*answer) for answer in (nexts or (("start_deletion", "APPROVED"),
+                                                                      ("deletion_backup", "RUNNING")))]
+        self.set_rule(MAINT + "next$", *answers, next_out("export", "APPROVED"))
+        self.set_job(f"start-deletion --request {REQ}", start_deletion_out())
+        self.set_rule(MAINT + f"delete --request {REQ} .*$", delete_out())
+        self.rules["backup.sh"] = [rule(r".*", backup_line(name=DEL_BACKUP, started=DEL_DUMP))]
+
     def write_stamp(self, value):
         self.stamp.parent.mkdir(parents=True, exist_ok=True)
         self.stamp.write_text(f"{value}\n", encoding="utf-8", newline="\n")
@@ -432,9 +515,9 @@ class HourlyWork(ArchiveHarness):
     def test_ar1_one_start_from_export_to_purge(self):
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}", "next",
-                                        f"copy --run {RUN}", "next", "backup.sh", PURGE_WITH_BACKUP, "reconcile",
-                                        "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "next",
+                                        f"verify --run {RUN}", "next", f"copy --run {RUN}", "next", "backup.sh",
+                                        PURGE_WITH_BACKUP, "reconcile", "status"])
         self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
         self.assertEqual(self.backup_calls(), [BACKUP_ARGUMENTS + ["60"]])
         for label in self.maintenance_calls():
@@ -456,9 +539,9 @@ class HourlyWork(ArchiveHarness):
         self.assertFalse(self.lock.exists())
         records = self.record_dirs()
         self.assertEqual(len(records), 1)
-        for name in ("recover.json", "next.json", "next-2.json", "next-3.json", "next-4.json", "export.json",
-                     "verify.json", "copy.json", "backup.out", "backup.log", "purge.json", "reconcile.json",
-                     "reconcile.log", "status.json", "messages.log"):
+        for name in ("recover.json", "evaluate.json", "next.json", "next-2.json", "next-3.json", "next-4.json",
+                     "export.json", "verify.json", "copy.json", "backup.out", "backup.log", "purge.json",
+                     "reconcile.json", "reconcile.log", "status.json", "messages.log"):
             self.assertTrue((records[0] / name).is_file(), name)
         self.assertIn("history-archive copy: run 3 copied (RUNNING)", self.result.stderr)
         self.assertIn(f"run 3: the pre-purge backup {BACKUP} is published and verified (its dump started at"
@@ -480,7 +563,7 @@ class HourlyWork(ArchiveHarness):
                                                     counts={"components": 0}))
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "status"])
         self.assertEqual(self.result.stdout, f"ARCHIVE nothing_eligible {RUN} NOTHING_ELIGIBLE\n")
         self.reset()
         self.set_next(("export", "APPROVED"), ("verify", "RUNNING"))
@@ -490,22 +573,24 @@ class HourlyWork(ArchiveHarness):
             receipt={"name": f"{ARCHIVE_NAME}.purged.json", "sha256": "d" * 64, "copied_to": None, "copy_problem": None}))
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}",
-                                        "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "next",
+                                        f"verify --run {RUN}", "status"])
         self.assertEqual(self.result.stdout, f"ARCHIVE nothing_to_purge {RUN} COMPLETED_WITH_SKIPS\n")
         self.assertIn("nothing is left to purge", self.result.stderr)
         self.assertEqual(self.backup_calls(), [])
 
-    # AR-3: nothing open, or a run that waits for its confirmation: no step for a run, no record kept.
+    # AR-3: nothing open, or a run that waits for its confirmation: no step for a run, no record kept. The hourly work
+    # worked on no run, so its final line is the decision of evaluate (step 4; the automatic runs are off) with the open
+    # run that `next` named.
     def test_ar3_nothing_to_do(self):
-        for answer, stdout in ((("none",), "ARCHIVE none - -\n"),
-                               (("wait", "WAITING_FOR_COPY"), f"ARCHIVE wait {RUN} WAITING_FOR_COPY\n")):
+        for answer, stdout in ((("none",), "EVALUATE off - -\n"),
+                               (("wait", "WAITING_FOR_COPY"), f"EVALUATE off {RUN} WAITING_FOR_COPY\n")):
             with self.subTest(answer=answer):
                 self.reset()
                 self.set_next(answer)
                 self.archive()
                 self.assertExit(0)
-                self.assertEqual(self.order(), ["recover", "next", "status"])
+                self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
                 self.assertEqual(self.result.stdout, stdout)
                 self.assertEqual(self.record_dirs(), [])
                 self.assertFalse(self.lock.exists())
@@ -518,8 +603,8 @@ class HourlyWork(ArchiveHarness):
                                                   archive_name=ARCHIVE_NAME, copied_to=None, copy_problem=None))
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"copy --run {RUN}", "next", "backup.sh", PURGE_WITH_BACKUP,
-                                        "reconcile", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"copy --run {RUN}", "next", "backup.sh",
+                                        PURGE_WITH_BACKUP, "reconcile", "status"])
         self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
         self.assertEqual(len(self.record_dirs()), 1)
         self.reset()
@@ -549,8 +634,8 @@ class ExitCodes(ArchiveHarness):
                                                     error=("run_failed", reason)))
         self.archive()
         self.assertExit(3)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}",
-                                        "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "next",
+                                        f"verify --run {RUN}", "status"])
         self.assertEqual(self.result.stdout, "")
         self.assertIn(f"archive: run {RUN} FAILED: {reason} Nothing was deleted. {REQUEST_NEW}", self.result.stderr)
         self.assertEqual(len(self.record_dirs()), 1)
@@ -571,14 +656,14 @@ class ExitCodes(ArchiveHarness):
         self.set_job(f"export --run {RUN}", out("", rc=2, stderr="Error response from daemon: oops\n"))
         self.archive()
         self.assertExit(2)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "status"])
         self.assertIn("history-archive export gave no valid report (exit 2;", self.result.stderr)
         self.assertIn("the outcome of export is unknown. The next start recovers a run left RUNNING", self.result.stderr)
         self.reset()
         self.set_job("next", out(job_doc("next", "none"), rc=1))
         self.archive()
         self.assertExit(2)
-        self.assertEqual(self.order(), ["recover", "next", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
         self.reset()
         self.set_job("recover", out("", rc=2, stderr="could not reach the database\n"))
         self.archive()
@@ -694,9 +779,10 @@ class CopyFolder(ArchiveHarness):
         self.archive()
         self.assertExit(0)
         calls = self.copy_calls()
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 11)
         self.assertTrue(all(used for _, used in calls), calls)
-        self.assertEqual(calls[8], (PURGE_WITH_BACKUP, True))
+        self.assertEqual(calls[1], ("evaluate", True))
+        self.assertEqual(calls[9], (PURGE_WITH_BACKUP, True))
         override = (self.state / "override.yaml").read_text(encoding="utf-8")
         self.assertIn("services:\n    maintenance:\n        volumes:\n            - type: bind\n", override)
         self.assertRegex(override, r"source: '\S*archive-copy'\n")
@@ -735,15 +821,15 @@ class CopyFolder(ArchiveHarness):
     def test_ar12b_dropped_out_before_the_copy(self):
         self.configure_copy()
         usb = out(df_text(1, 2, "/mnt/usb"))
-        self.prepend("df", rule(r"^-P .*archive-copy$", usb, usb, usb, usb, usb, usb, out(df_text(1, 2, "/"))))
+        self.prepend("df", rule(r"^-P .*archive-copy$", usb, usb, usb, usb, usb, usb, usb, out(df_text(1, 2, "/"))))
         self.set_job(f"copy --run {RUN}", job_out("copy", "waiting_for_copy", run_id=RUN, state="WAITING_FOR_COPY",
                                                   archive_name=ARCHIVE_NAME, copied_to=None,
                                                   copy_problem="The copy folder /archive-copy does not exist or cannot be written."))
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.copy_calls(), [("recover", True), ("next", True), (f"export --run {RUN}", True),
-                                             ("next", True), (f"verify --run {RUN}", True), ("next", True),
-                                             (f"copy --run {RUN}", False), ("status", False)])
+        self.assertEqual(self.copy_calls(), [("recover", True), ("evaluate", True), ("next", True),
+                                             (f"export --run {RUN}", True), ("next", True), (f"verify --run {RUN}", True),
+                                             ("next", True), (f"copy --run {RUN}", False), ("status", False)])
         self.assertIn("is on the host's root file system (/)", self.result.stderr)
         self.assertEqual(self.result.stdout, f"ARCHIVE waiting_for_copy {RUN} WAITING_FOR_COPY\n")
 
@@ -772,12 +858,13 @@ class Scheduled(ArchiveHarness):
         self.archive("--scheduled")
         self.assertEqual(self.result.stdout, "NOT_DUE\n")
         self.assertEqual(self.cheap_only(), True)
-        # 12:20: the first start at or after the Start minute does the hourly work.
+        # 12:20: the first start at or after the Start minute does the hourly work, the evaluation of the automatic runs
+        # first.
         self.reset_calls()
         self.at(12, 20)
         self.archive("--scheduled")
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next",
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "next",
                                         f"verify --run {RUN}", "next", f"copy --run {RUN}", "next", "backup.sh",
                                         PURGE_WITH_BACKUP, "reconcile", "status"])
         self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
@@ -1105,6 +1192,8 @@ class PfArchive(PfHarness):
         self.assertIn("backup and PURGE its archived Movement history", help_text)
         self.assertIn("carry out an open\n                            permanent deletion request", help_text)
         self.assertNotIn("never deletes", help_text)
+        # Step 4: pf archive runs the hourly work, the evaluation of the automatic runs included.
+        self.assertIn("evaluates the automatic runs: when Administration has them on", help_text)
 
 
 # ---------------------------------------------------------------------------
@@ -1113,7 +1202,7 @@ class PfArchive(PfHarness):
 
 
 def archive_status(findings=(), rc=None, open_run=None, last=None, copy=False, receipts=(), open_deletion=None,
-                   last_deletion=None):
+                   last_deletion=None, automatic=AUTOMATIC_OFF):
     rc = (1 if findings else 0) if rc is None else rc
     return job_doc("status", "finding" if findings else "ok", rc=rc, open_run=open_run, last_finished_run=last,
                    archive_dir={"path": "/archive", "usable": "archive_dir_unusable" not in findings,
@@ -1121,7 +1210,8 @@ def archive_status(findings=(), rc=None, open_run=None, last=None, copy=False, r
                    copy_dir=({"path": "/archive-copy", "usable": True, "free_bytes": 1073741824,
                               "total_bytes": 2 * 1073741824, "partial": []} if copy else None),
                    receipts_not_copied=list(receipts), open_deletion_request=open_deletion,
-                   last_finished_deletion_request=last_deletion, max_wait_days=7, findings=list(findings))
+                   last_finished_deletion_request=last_deletion, automatic_runs=automatic, max_wait_days=7,
+                   findings=list(findings))
 
 
 ARCHIVE_STATUS_RUN = (r"--profile ops run --rm --no-deps -T --user 1000:1000 --name"
@@ -1384,6 +1474,44 @@ class CheckArchival(CheckHarness):
                                                              " 30 s")
             self.assertExit(0)
 
+    # AR-64 (step 4, contract B4 §6): the reminders of the automatic runs. A PROPOSED run passes while it waits for its
+    # approval no longer than the setting (max_wait_days) and says how long it has waited (age_seconds); then it fails as
+    # approval_overdue. A run that failed because the User of its authority may no longer run it is named once, by
+    # authorization_failed instead of last_run_failed; standing_authorization_invalid gives the authorization's problem.
+    def test_ar64_automatic_run_reminders(self):
+        proposed = {**run_object("PROPOSED", trigger="AUTOMATIC", reason=AUTOMATIC_REASON), "id": 7,
+                    "age_seconds": 2 * 86400}
+        text = self.archival(archive_status(open_run=proposed), 0)
+        self.assertEqual(text, "PASS archival_proposal run 7 PROPOSED waiting 2.0 days for approval (limit 7 days); no"
+                               " finished run; archive folder 5.0 GiB free")
+        self.assertExit(0)
+        self.reset()
+        overdue = {**proposed, "age_seconds": 8 * 86400 + 8640}
+        text = self.archival(archive_status(findings=("approval_overdue",), open_run=overdue), 1)
+        self.assertEqual(text, "FAIL archival_proposal approval_overdue: run 7 PROPOSED has waited 8.1 days for approval"
+                               " (limit 7 days); approve or dismiss it in Administration → History archival & purge")
+        self.assertExit(1)
+        self.reset()
+        reason = ("The User who switched off the approval step of automatic runs, Ann (user 4), is no longer active, so"
+                  f" the history of run {RUN} was not purged.")
+        failed = automatic_run("FAILED", authorization_failed=True, failure_reason=reason,
+                               finished_at="2026-10-08T12:20:40Z")
+        text = self.archival(archive_status(findings=("last_run_failed", "authorization_failed"), last=failed), 1)
+        self.assertEqual(text, f"FAIL archival_proposal authorization_failed: run {RUN} FAILED: {reason}")
+        self.reset()
+        problem = ("The User who switched off the approval step of automatic runs, Ann (user 4), no longer holds Run"
+                   " history archival and purge. No automatic run is created until a holder of the key saves the"
+                   " approval setting again.")
+        automatic = {"enabled": True, "approval_required": False,
+                     "standing_authorization": {"audit_event_id": 12,
+                                                "authorized_by": {"user_id": 4, "display_name": "Ann"},
+                                                "authorized_at": "2026-10-01T09:00:00.000000Z",
+                                                "reason": "Weekly archival without approval", "valid": False,
+                                                "problem": problem}}
+        text = self.archival(archive_status(findings=("standing_authorization_invalid",), automatic=automatic), 1)
+        self.assertEqual(text, f"FAIL archival_proposal standing_authorization_invalid: {problem}")
+        self.assertExit(1)
+
 
 # ---------------------------------------------------------------------------
 # AR-29..AR-39: build step 2, the pre-purge backup, the purge and the reconcile after it
@@ -1424,7 +1552,7 @@ class Purge(ArchiveHarness):
                 self.rules["backup.sh"] = [rule(r".*", answer)]
                 self.archive()
                 self.assertExit(2)
-                self.assertEqual(self.order(), ["recover", "next", "backup.sh", "status"])
+                self.assertEqual(self.order(), ["recover", "evaluate", "next", "backup.sh", "status"])
                 self.assertEqual(self.result.stdout, "")
                 self.assertIn(f"archive: run {RUN}: {why}", self.result.stderr)
                 self.assertIn("Nothing was deleted. The run stays RUNNING, and the next start fails it (recover)."
@@ -1438,7 +1566,7 @@ class Purge(ArchiveHarness):
         self.set_purge(purge_out(resumed=True))
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"purge --run {RUN}", "reconcile", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"purge --run {RUN}", "reconcile", "status"])
         self.assertEqual(self.backup_calls(), [])
         self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
         self.assertIn(f"run {RUN} was left PURGING by an earlier start: its purge resumes without a new backup",
@@ -1452,7 +1580,7 @@ class Purge(ArchiveHarness):
         self.set_next(("backup", "FAILED", 3, ("run_failed", reason)))
         self.archive()
         self.assertExit(3)
-        self.assertEqual(self.order(), ["recover", "next", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
         self.assertEqual(self.backup_calls(), [])
         self.assertIn(f"archive: run {RUN} FAILED: {reason} Nothing was deleted. {REQUEST_NEW}", self.result.stderr)
 
@@ -1623,7 +1751,7 @@ class Purge(ArchiveHarness):
                 self.set_next(*answers)
                 self.archive()
                 self.assertExit(2)
-                self.assertEqual(self.order(), ["recover", "next", *steps, "next", "status"])
+                self.assertEqual(self.order(), ["recover", "evaluate", "next", *steps, "next", "status"])
                 self.assertIn(f"history-archive next answered {again} again for run {RUN}: a step of this start made no"
                               " progress", self.result.stderr)
                 self.assertEqual(self.backup_calls(), [])
@@ -1651,7 +1779,7 @@ class Purge(ArchiveHarness):
         self.reset_calls()
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"purge --run {RUN}", "reconcile", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"purge --run {RUN}", "reconcile", "status"])
         self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
         self.assertNotIn("refused", self.result.stderr)
         self.assertFalse(self.incident.exists())
@@ -1706,18 +1834,6 @@ class Purge(ArchiveHarness):
 
 
 class Deletion(ArchiveHarness):
-    def set_deletion(self, *nexts):
-        """An open deletion request 7: the cheap check finds it, `next` hands out its start and then its pre-purge
-        backup (a run waiting behind it is never asked for), start-deletion starts it, backup.sh takes its backup and
-        delete deletes it."""
-        self.set_rule(CHEAP, settings_out(pending=True))
-        answers = [next_deletion_out(*answer) for answer in (nexts or (("start_deletion", "APPROVED"),
-                                                                      ("deletion_backup", "RUNNING")))]
-        self.set_rule(MAINT + "next$", *answers, next_out("export", "APPROVED"))
-        self.set_job(f"start-deletion --request {REQ}", start_deletion_out())
-        self.set_rule(MAINT + f"delete --request {REQ} .*$", delete_out())
-        self.rules["backup.sh"] = [rule(r".*", backup_line(name=DEL_BACKUP, started=DEL_DUMP))]
-
     def set_delete(self, answer):
         self.set_rule(MAINT + f"delete --request {REQ} .*$", answer)
 
@@ -1765,17 +1881,17 @@ class Deletion(ArchiveHarness):
                 self.assertEqual((self.result.returncode, self.result.stdout, self.result.stderr), (0, "NOT_DUE\n", ""))
                 self.assertEqual(self.calls("docker"), [])
 
-    # AR-44: a request found at the Start minute is carried out first: recover → next → start-deletion → pre-purge
-    # backup → delete → reconcile → status, under the archive lock, with no run work, and the slot is left to the next
-    # start, which does the hourly work. A manual start (pf archive) runs no cheap check and works on the request first
-    # too.
+    # AR-44: a request found at the Start minute is carried out first: recover → evaluate (step 4: the start is due for
+    # the hourly work) → next → start-deletion → pre-purge backup → delete → reconcile → status, under the archive lock,
+    # with no run work, and the slot is left to the next start, which does the hourly work, evaluate included. A manual
+    # start (pf archive) runs no cheap check and works on the request first too.
     def test_ar44_deletion_order_and_the_slot(self):
         self.write_stamp(epoch_minute(11, 20))
         self.at(12, 20)
         self.set_deletion()
         self.archive("--scheduled")
         self.assertExit(0)
-        self.assertEqual(self.order(), DELETION_ORDER)
+        self.assertEqual(self.order(), DELETION_ORDER_DUE)
         self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
         self.assertEqual(self.stamp_value(), epoch_minute(11, 20))
         owner = self.lock_during("recover")
@@ -1803,16 +1919,16 @@ class Deletion(ArchiveHarness):
         self.at(12, 25)
         self.archive("--scheduled")
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}", "next",
-                                        f"copy --run {RUN}", "next", "backup.sh", PURGE_WITH_BACKUP, "reconcile",
-                                        "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "next",
+                                        f"verify --run {RUN}", "next", f"copy --run {RUN}", "next", "backup.sh",
+                                        PURGE_WITH_BACKUP, "reconcile", "status"])
         self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
         with self.subTest(case="a manual start"):
             self.reset()
             self.set_deletion()
             self.archive()
             self.assertExit(0)
-            self.assertEqual(self.order(), DELETION_ORDER)
+            self.assertEqual(self.order(), DELETION_ORDER_DUE)
             self.assertEqual(self.docker_entries(CHEAP), [])
             self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
             self.assertIsNone(self.stamp_value())
@@ -1842,7 +1958,8 @@ class Deletion(ArchiveHarness):
                 self.set_job(f"start-deletion --request {REQ}", answer)
                 self.archive()
                 self.assertExit(code)
-                self.assertEqual(self.order(), ["recover", "next", f"start-deletion --request {REQ}", "status"])
+                self.assertEqual(self.order(), ["recover", "evaluate", "next", f"start-deletion --request {REQ}",
+                                                "status"])
                 self.assertIn(text, self.result.stderr)
                 self.assertEqual((self.result.stdout, self.backup_calls()), ("", []))
                 self.assertFalse(self.incident.exists())
@@ -1862,8 +1979,8 @@ class Deletion(ArchiveHarness):
                 self.rules["backup.sh"] = [rule(r".*", answer)]
                 self.archive()
                 self.assertExit(2)
-                self.assertEqual(self.order(), ["recover", "next", f"start-deletion --request {REQ}", "next", "backup.sh",
-                                                "status"])
+                self.assertEqual(self.order(), ["recover", "evaluate", "next", f"start-deletion --request {REQ}", "next",
+                                                "backup.sh", "status"])
                 self.assertIn(f"archive: deletion request {REQ}: {why}", self.result.stderr)
                 self.assertIn("Nothing was deleted. The request stays RUNNING, and the next start makes it FAILED"
                               f" (recover). {REQUEST_AGAIN}", self.result.stderr)
@@ -1939,7 +2056,8 @@ class Deletion(ArchiveHarness):
                 self.assertExit(code)
                 for text in texts:
                     self.assertIn(text, self.result.stderr)
-                expected = ["recover", "next", f"start-deletion --request {REQ}", "next", "backup.sh", DELETE_WITH_BACKUP]
+                expected = ["recover", "evaluate", "next", f"start-deletion --request {REQ}", "next", "backup.sh",
+                            DELETE_WITH_BACKUP]
                 expected += (["status"] if status is not None else []) + (["reconcile"] if reconciled else []) + ["status"]
                 self.assertEqual(self.order(), expected)
                 self.assertEqual(self.result.stdout, stdout)
@@ -1991,9 +2109,9 @@ class Deletion(ArchiveHarness):
                       ("copy", "RUNNING", 0, None, waiting), ("backup", "RUNNING", 0, None, waiting))
         self.archive()
         self.assertExit(0)
-        self.assertEqual(self.order(), ["recover", "next", f"export --run {RUN}", "next", f"verify --run {RUN}", "next",
-                                        f"copy --run {RUN}", "next", "backup.sh", PURGE_WITH_BACKUP, "reconcile",
-                                        "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", f"export --run {RUN}", "next",
+                                        f"verify --run {RUN}", "next", f"copy --run {RUN}", "next", "backup.sh",
+                                        PURGE_WITH_BACKUP, "reconcile", "status"])
         self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
         message = f"deletion request {REQ} waits while run {RUN} is RUNNING in this start: a later start carries it out."
         self.assertEqual(self.result.stderr.count(message), 1)
@@ -2006,7 +2124,7 @@ class Deletion(ArchiveHarness):
         self.set_next(("none",))
         self.archive()
         self.assertExit(3)
-        self.assertEqual(self.order(), ["recover", "next", "status"])
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
         self.assertIn(f"deletion request(s) {REQ} stopped while RUNNING and are FAILED now (an interrupted job, a"
                       " pre-purge backup that failed, a deletion that stopped on a database error, or a database restored"
                       " from the pre-purge backup of a deletion). Nothing was deleted by them in this database."
@@ -2082,6 +2200,209 @@ class Deletion(ArchiveHarness):
             self.assertIn(text, result.stdout)
         header = ARCHIVE_SH.read_text(encoding="utf-8").split("\nset -eu\n", 1)[0]
         self.assertIn("`DELETION <outcome> <request id> <state>`", header)
+
+
+# ---------------------------------------------------------------------------
+# AR-58..AR-63: build step 4, automatic runs (AR-64, the check.sh lines, is in CheckArchival)
+# ---------------------------------------------------------------------------
+
+PROPOSED_RUN = run_object("PROPOSED", trigger="AUTOMATIC", reason=AUTOMATIC_REASON)
+# The whole hourly work on run 3, from its export to the reconcile after its purge.
+RUN_WORK = ["next", f"export --run {RUN}", "next", f"verify --run {RUN}", "next", f"copy --run {RUN}", "next",
+            "backup.sh", PURGE_WITH_BACKUP, "reconcile", "status"]
+
+
+class AutomaticRuns(ArchiveHarness):
+    def set_evaluate(self, answer):
+        self.set_job("evaluate", answer)
+
+    # AR-58: the hourly work evaluates the automatic runs after recover and before the `next` loop (contract B4 §3.2).
+    # Every decision exits 0: its result and message are logged (a created run with its state), and a start that then
+    # works on no run prints EVALUATE <result> <run> <state>, the open run that `next` named. Only a created run keeps the
+    # start's reports.
+    def test_ar58_each_decision_of_evaluate(self):
+        for result in ("off", "no_retention_period", "not_due", "authorization_invalid", "below_limit",
+                       "nothing_eligible", "settings_changed"):
+            with self.subTest(result=result):
+                self.reset()
+                self.set_evaluate(evaluate_out(result))
+                self.set_next(("none",))
+                self.archive()
+                self.assertExit(0)
+                self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
+                self.assertEqual(self.result.stdout, f"EVALUATE {result} - -\n")
+                self.assertIn(f"archive: history-archive evaluate: {result}\n", self.result.stderr)
+                self.assertIn(f"archive: evaluate: {result}. {EVALUATE_MESSAGES[result]}\n", self.result.stderr)
+                self.assertEqual(self.record_dirs(), [])
+                self.assertFalse(self.lock.exists())
+        with self.subTest(result="run_open"):
+            self.reset()
+            self.set_evaluate(evaluate_out("run_open", run_id=RUN, state="WAITING_FOR_COPY"))
+            self.set_next(("wait", "WAITING_FOR_COPY"))
+            self.archive()
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
+            self.assertEqual(self.result.stdout, f"EVALUATE run_open {RUN} WAITING_FOR_COPY\n")
+            self.assertIn(f"archive: evaluate: run_open, run {RUN} WAITING_FOR_COPY. {EVALUATE_MESSAGES['run_open']}\n",
+                          self.result.stderr)
+            self.assertIn(f"run {RUN} waits for its off-host copy to be confirmed", self.result.stderr)
+            self.assertEqual(self.record_dirs(), [])
+        with self.subTest(result="created, PROPOSED"):
+            self.reset()
+            self.set_evaluate(evaluate_out("created", run_id=RUN, state="PROPOSED"))
+            self.set_rule(MAINT + "next$", next_out("wait", "PROPOSED", run=PROPOSED_RUN))
+            self.archive()
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
+            self.assertEqual(self.result.stdout, f"EVALUATE created {RUN} PROPOSED\n")
+            self.assertIn(f"archive: history-archive evaluate: run {RUN} created (PROPOSED)\n", self.result.stderr)
+            self.assertIn(f"archive: evaluate: created, run {RUN} PROPOSED. {EVALUATE_MESSAGES['created']}\n",
+                          self.result.stderr)
+            records = self.record_dirs()
+            self.assertEqual(len(records), 1)
+            for name in ("evaluate.json", "evaluate.log", "next.json", "status.json", "messages.log"):
+                self.assertTrue((records[0] / name).is_file(), name)
+            self.assertEqual(self.backup_calls(), [])
+
+    # AR-59: a run created APPROVED under the standing authorization is worked on in the same start, like a requested
+    # run: export, verify, copy, the pre-purge backup, the purge and the reconcile after it; the final line is ARCHIVE.
+    def test_ar59_approved_automatic_run_worked_on_in_the_same_start(self):
+        self.set_evaluate(evaluate_out("created", run_id=RUN, state="APPROVED"))
+        self.set_rule(MAINT + "next$", *[next_out(action, state, run=automatic_run(state)) for action, state in HAPPY])
+        self.write_stamp(epoch_minute(11, 20))
+        self.at(12, 20)
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "evaluate", *RUN_WORK])
+        self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
+        self.assertIn(f"archive: evaluate: created, run {RUN} APPROVED. {CREATED_APPROVED}\n", self.result.stderr)
+        self.assertEqual(self.backup_calls(), [BACKUP_ARGUMENTS + ["60"]])
+        self.assertIn(f"the reconcile after the purge of run {RUN} is clean", self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        records = self.record_dirs()
+        self.assertEqual(len(records), 1)
+        self.assertTrue((records[0] / "evaluate.json").is_file())
+
+    # AR-60: a PROPOSED run waits for a person: `next` answers wait, the start works on no run and says who may approve
+    # or dismiss it, no lock and no report stay, and the slot is attempted (the next start within the hour runs nothing).
+    def test_ar60_proposed_run_waits(self):
+        self.set_evaluate(evaluate_out("run_open", run_id=RUN, state="PROPOSED", message=(
+            f"Run {RUN} is still open (PROPOSED); no automatic run is created while a run is open.")))
+        self.set_rule(MAINT + "next$", next_out("wait", "PROPOSED", run=PROPOSED_RUN))
+        self.write_stamp(epoch_minute(11, 20))
+        self.at(12, 20)
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
+        self.assertEqual(self.result.stdout, f"EVALUATE run_open {RUN} PROPOSED\n")
+        self.assertIn(f"archive: run {RUN} is PROPOSED: it waits for a holder of Run history archival and purge to"
+                      " approve or dismiss it in Administration → History archival & purge (OPERATIONS_RUNBOOK §11).",
+                      self.result.stderr)
+        self.assertNotIn("off-host copy", self.result.stderr)
+        self.assertEqual(self.backup_calls(), [])
+        self.assertEqual(self.record_dirs(), [])
+        self.assertFalse(self.lock.exists())
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        self.reset_calls()
+        self.at(12, 25)
+        self.archive("--scheduled")
+        self.assertEqual(self.result.stdout, "NOT_DUE\n")
+        self.assertTrue(self.cheap_only())
+
+    # AR-61: evaluate refused (exit 1) or unable to run (exit 2, also a time limit), or without a valid report: the
+    # error is logged, and the `next` loop goes on with the open run (here a requested run, through its purge and the
+    # reconcile after it). The start's exit status reports it (no final line), unless recover set one already; a
+    # scheduled start reports it once for its hour.
+    def test_ar61_evaluate_refused_or_failing_goes_on(self):
+        refused = "Another history-archive command is running. Nothing was changed."
+        cases = (
+            ("refused", evaluate_out(rc=1, error=("job_running", refused)), 1,
+             [f"archive: history-archive evaluate refused: {refused}"]),
+            ("timed out", evaluate_out(rc=2, error=("evaluation_timed_out", TIMED_OUT)), 2,
+             [f"archive: history-archive evaluate could not run (exit 2): {TIMED_OUT}"]),
+            ("no report", out("", rc=137, stderr="Error response from daemon: container killed\n"), 2,
+             ["archive: history-archive evaluate gave no valid report (exit 137;",
+              "archive: the outcome of evaluate is unknown: it may have created an automatic run, which next then"
+              " names; nothing was deleted."]),
+        )
+        for name, answer, code, texts in cases:
+            with self.subTest(case=name):
+                self.reset()
+                self.set_evaluate(answer)
+                self.archive()
+                self.assertExit(code)
+                self.assertEqual(self.order(), ["recover", "evaluate", *RUN_WORK])
+                self.assertEqual(self.result.stdout, "")
+                for text in texts:
+                    self.assertIn(text, self.result.stderr)
+                self.assertIn("archive: the work goes on (the next loop still works on an open run); the next hourly"
+                              " work evaluates the automatic runs again (OPERATIONS_RUNBOOK §11).", self.result.stderr)
+                self.assertIn(f"the reconcile after the purge of run {RUN} is clean", self.result.stderr)
+                self.assertEqual(len(self.record_dirs()), 1)
+        with self.subTest(case="the exit status of recover is kept"):
+            self.reset()
+            self.set_job("recover", job_out("recover", "recovered", failed_run_ids=[2], removed_partial=[],
+                                            kept_partial=[], copied_receipts=[], receipt_problems=[]))
+            self.set_evaluate(evaluate_out(rc=2, error=("evaluation_timed_out", TIMED_OUT)))
+            self.set_next(("none",))
+            self.archive()
+            self.assertExit(3)
+            self.assertEqual(self.order(), ["recover", "evaluate", "next", "status"])
+        with self.subTest(case="a scheduled start reports it once for its hour"):
+            self.reset()
+            self.set_evaluate(evaluate_out(rc=2, error=("evaluation_timed_out", TIMED_OUT)))
+            self.set_next(("none",))
+            self.write_stamp(epoch_minute(11, 20))
+            self.at(12, 20)
+            self.archive("--scheduled")
+            self.assertExit(2)
+            self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+            self.reset_calls()
+            self.at(12, 25)
+            self.archive("--scheduled")
+            self.assertEqual((self.result.returncode, self.result.stdout, self.result.stderr), (0, "NOT_DUE\n", ""))
+            self.assertTrue(self.cheap_only())
+
+    # AR-62: no evaluate in a start taken only for a deletion request (a scheduled start within the hour of its slot, or
+    # the first scheduled start), and none while the incident record exists (manual or scheduled, also at the slot).
+    def test_ar62_no_evaluate_for_a_deletion_alone_or_during_an_incident(self):
+        for name, stamp in (("within the hour", epoch_minute(12, 20)), ("first scheduled start", None)):
+            with self.subTest(case=name):
+                self.reset()
+                if stamp is not None:
+                    self.write_stamp(stamp)
+                self.at(12, 35)
+                self.set_deletion()
+                self.set_evaluate(evaluate_out("created", run_id=RUN, state="APPROVED"))
+                self.archive("--scheduled")
+                self.assertExit(0)
+                self.assertEqual(self.order(), DELETION_ORDER)
+                self.assertNotIn("evaluate", self.steps())
+                self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
+        for name, arguments in (("manual", ()), ("scheduled at the slot", ("--scheduled",))):
+            with self.subTest(case=f"incident record, {name}"):
+                self.reset()
+                self.write_incident(self.incident)
+                self.set_evaluate(evaluate_out("created", run_id=RUN, state="APPROVED"))
+                self.write_stamp(epoch_minute(11, 20))
+                self.at(12, 20)
+                self.archive(*arguments)
+                self.assertExit(1)
+                self.assertEqual(self.order(), ["recover", "status"])
+                self.assertIn(INCIDENT_REFUSAL, self.result.stderr)
+                self.assertEqual(self.result.stdout, "")
+
+    # AR-63: the help and the header name evaluate, where it runs and where it never runs, and the EVALUATE line.
+    def test_ar63_help(self):
+        result = self.archive("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in ("recover, at the hourly work evaluate,", "EVALUATE <result> <run id|-> <state|-> for an hourly work",
+                     "EVALUATE off - -, EVALUATE created 7 PROPOSED", "2 could not run (evaluate included)"):
+            self.assertIn(text, result.stdout)
+        header = ARCHIVE_SH.read_text(encoding="utf-8").split("\nset -eu\n", 1)[0]
+        for text in ("`EVALUATE <result> <run id|-> <state|->`", "build steps 1 to 4",
+                     "never in a start taken only for a deletion request and never while the incident record exists"):
+            self.assertIn(text, header)
 
 
 if __name__ == "__main__":

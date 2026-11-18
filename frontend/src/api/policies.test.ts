@@ -206,7 +206,27 @@ const RETENTION_WIRE = {
   archive_max_wait_days: 7,
   archive_purge_batch_movements: 50000,
   archive_purge_batch_part_numbers: 20,
+  archive_automatic_runs: false,
+  archive_measure: 'LIVE_MOVEMENT_ROWS',
+  archive_limit_movement_rows: 5000000,
+  archive_limit_history_months: 1,
+  archive_limit_database_gib: 20,
+  archive_approval_required: true,
+  archive_interval_days: 7,
+  standing_authorization: null,
   updated_at: '2026-11-18T08:00:00Z',
+};
+
+/** The settings of automatic runs as the model holds their defaults. */
+const AUTOMATIC_DEFAULTS = {
+  automaticRuns: false,
+  measure: 'LIVE_MOVEMENT_ROWS',
+  limitMovementRows: 5000000,
+  limitHistoryMonths: 1,
+  limitDatabaseGib: 20,
+  approvalRequired: true,
+  intervalDays: 7,
+  standingAuthorization: null,
 };
 
 test('the History archival & purge settings map the purge batch limits and send only the provided ones', async () => {
@@ -219,6 +239,7 @@ test('the History archival & purge settings map the purge batch limits and send 
     maxWaitDays: 7,
     purgeBatchMovements: 50000,
     purgeBatchPartNumbers: 20,
+    ...AUTOMATIC_DEFAULTS,
     updatedAt: '2026-11-18T08:00:00Z',
   });
   await updateRetentionPolicy({ purgeBatchMovements: 1000 });
@@ -236,6 +257,80 @@ test('the History archival & purge settings map the purge batch limits and send 
   answer({ ...RETENTION_WIRE, archive_purge_batch_part_numbers: undefined });
   await expect(getRetentionPolicy()).rejects.toThrow(
     'The server answered without the History archival & purge setting archive_purge_batch_part_numbers.',
+  );
+});
+
+test('the automatic-run settings map with the standing authorization and its validity, and travel with the reason and the typed confirmation', async () => {
+  answer({
+    ...RETENTION_WIRE,
+    archive_automatic_runs: true,
+    archive_measure: 'DATABASE_SIZE',
+    archive_limit_database_gib: 30,
+    archive_approval_required: false,
+    archive_interval_days: 14,
+    standing_authorization: {
+      audit_event_id: 12,
+      authorized_by: { user_id: 4, display_name: 'Ann Admin' },
+      authorized_at: '2026-11-18T09:00:00Z',
+      reason: 'Weekly archival without approval',
+      valid: false,
+      problem:
+        'The User who switched off the approval step of automatic runs, Ann Admin (user 4), is no longer active. No automatic run is created until a holder of Run history archival and purge saves the approval setting again.',
+    },
+  });
+  expect(await getRetentionPolicy()).toMatchObject({
+    automaticRuns: true,
+    measure: 'DATABASE_SIZE',
+    limitDatabaseGib: 30,
+    approvalRequired: false,
+    intervalDays: 14,
+    standingAuthorization: {
+      auditEventId: 12,
+      authorizedBy: { userId: 4, displayName: 'Ann Admin' },
+      authorizedAt: '2026-11-18T09:00:00Z',
+      reason: 'Weekly archival without approval',
+      valid: false,
+      problem:
+        'The User who switched off the approval step of automatic runs, Ann Admin (user 4), is no longer active. No automatic run is created until a holder of Run history archival and purge saves the approval setting again.',
+    },
+  });
+
+  // Switching the approval step off: the setting, the reason and the
+  // confirmation as typed (the server checks both).
+  await updateRetentionPolicy(
+    { approvalRequired: false, intervalDays: 14 },
+    'Weekly archival without approval',
+    'run without approval',
+  );
+  expect(lastRequest().body).toEqual({
+    archive_approval_required: false,
+    archive_interval_days: 14,
+    reason: 'Weekly archival without approval',
+    confirmation: 'run without approval',
+  });
+  // A renewal: no setting, the reason and the confirmation alone.
+  await updateRetentionPolicy({}, 'Renewed', 'RUN WITHOUT APPROVAL');
+  expect(lastRequest().body).toEqual({
+    reason: 'Renewed',
+    confirmation: 'RUN WITHOUT APPROVAL',
+  });
+  await updateRetentionPolicy({ measure: 'RETAINED_HISTORY_AGE' });
+  expect(lastRequest().body).toEqual({
+    archive_measure: 'RETAINED_HISTORY_AGE',
+  });
+
+  // A setting of the wrong type or a missing authorization is refused.
+  answer({ ...RETENTION_WIRE, archive_approval_required: 'yes' });
+  await expect(getRetentionPolicy()).rejects.toThrow(
+    'The server answered without the History archival & purge setting archive_approval_required.',
+  );
+  answer({ ...RETENTION_WIRE, archive_measure: undefined });
+  await expect(getRetentionPolicy()).rejects.toThrow(
+    'The server answered without the History archival & purge setting archive_measure.',
+  );
+  answer({ ...RETENTION_WIRE, standing_authorization: undefined });
+  await expect(getRetentionPolicy()).rejects.toThrow(
+    'The server answered without the History archival & purge setting standing_authorization.',
   );
 });
 

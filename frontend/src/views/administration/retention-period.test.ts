@@ -8,8 +8,9 @@ import { formatRetentionPeriod } from './retention-period';
 
 // The Movement-history retention period wording (Administration →
 // History archival & purge) and the guard that only the settings API and
-// that section read the stored period: production workflows never do
-// (PROJECT_PROFILE §28). The ranges are the server's.
+// that section (its Retention and schedule and Automatic runs cards) read
+// the stored settings: production workflows never do (PROJECT_PROFILE
+// §28). The ranges are the server's.
 
 test('RP-2: formatRetentionPeriod states the months in years and months', () => {
   expect(formatRetentionPeriod(1)).toBe('1 month');
@@ -49,6 +50,8 @@ test('RP-3: only the policy API and History archival & purge read the retention 
   ]);
   expect(sourcesMatching(/RetentionPolicy|retentionPeriodMonths/)).toEqual([
     'api/policies.ts',
+    'views/administration/AutomaticRunsCard.tsx',
     'views/administration/HistoryArchivalSection.tsx',
+    'views/administration/automatic-runs.ts',
   ]);
 });

@@ -1,6 +1,6 @@
 # Runbook vận hành PartFlow
 
-> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `d094f5e` cộng các thay đổi
+> **Bản gốc:** [`OPERATIONS_RUNBOOK.md`](./OPERATIONS_RUNBOOK.md). Đồng bộ với bản tiếng Anh tại commit `1874636` cộng các thay đổi
 > chưa commit ngày 2026-11-18. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
 > hiệu lực.
 
@@ -27,7 +27,7 @@ hệ thống được mô tả trong [`../DEPLOYMENT.vi.md`](../DEPLOYMENT.vi.md
 | Tìm xem một bản phát hành trước đây đã làm gì | §1 |
 | Dùng lệnh ngắn `pf` để cài đặt, cập nhật, sao lưu, khôi phục hoặc xem trạng thái | Trước khi chạy bất kỳ lệnh nào |
 | Xóa các Work Order và Part Number chỉ được nhập để thử nghiệm (một yêu cầu xóa vĩnh viễn) | §10 |
-| Hiểu job lưu trữ lịch sử, các bản sao lưu trước purge, việc purge của nó và cách nó thực hiện một yêu cầu xóa vĩnh viễn, kiểm tra hoặc xác nhận một lần lưu trữ, xử lý một lần lưu trữ thất bại, kiểm tra một bản lưu trữ, hoặc lấy lại dung lượng đĩa sau một lần purge | §11 |
+| Hiểu job lưu trữ lịch sử, các lần lưu trữ tự động của nó, các bản sao lưu trước purge, việc purge của nó và cách nó thực hiện một yêu cầu xóa vĩnh viễn, phê duyệt hoặc bác bỏ một lần lưu trữ được đề xuất, kiểm tra hoặc xác nhận một lần lưu trữ, xử lý một lần lưu trữ thất bại, kiểm tra một bản lưu trữ, hoặc lấy lại dung lượng đĩa sau một lần purge | §11 |
 | Xử lý một phát hiện của đối soát sau một lần purge lịch sử Movement (`archive.sh` thoát với mã 4) | §8 (Phát hiện của đối soát sau một lần purge) |
 | Xử lý một phát hiện của đối soát sau một lần xóa vĩnh viễn (`archive.sh` thoát với mã 4) | §8 (Phát hiện của đối soát sau một lần xóa) |
 
@@ -62,7 +62,7 @@ nó.
 | `pf restore <NAME> --approved-by <owner>` | Khôi phục vào instance mới (new-instance restore) của §6 vào một database trống, với sự phê duyệt của chủ sở hữu được ghi vào `restore.json` trước khi `backend` khởi động. |
 | `pf status [--url https://<partflow-host>]` | Các container, `/api/health` và tóm tắt của `status` (§2); với `--url`, `check.sh --no-state`. |
 | `pf delete-permanently --work-order <number> --part-number <PN> --reason TEXT [--confirm]` | Bản xem trước việc xóa các Work Order và Part Number chỉ nhập để thử nghiệm; với `--confirm`, một yêu cầu xóa vĩnh viễn, được job lưu trữ lịch sử thực hiện ngay (bản sao lưu trước purge của nó, việc xóa trong một transaction và đối soát), và trạng thái cuối cùng của yêu cầu (§10). Nó cần job lưu trữ lịch sử đã được thiết lập. |
-| `pf archive` | Chạy ngay job lưu trữ lịch sử, tức `archive.sh` không có `--scheduled` (§11): nó thực hiện trước một yêu cầu xóa vĩnh viễn đang mở (bản sao lưu trước purge của yêu cầu và việc xóa), hoặc làm phần việc hằng giờ: xuất, kiểm tra và sao chép một lần lưu trữ đã được yêu cầu, tạo bản sao lưu trước purge của lần đó và **purge** (xóa hẳn) lịch sử Movement đã lưu trữ khỏi database; rồi chạy đối soát. |
+| `pf archive` | Chạy ngay job lưu trữ lịch sử, tức `archive.sh` không có `--scheduled` (§11): trước hết nó đánh giá các lần lưu trữ tự động (nó tạo một lần khi chúng đang bật và đến hạn), rồi thực hiện một yêu cầu xóa vĩnh viễn đang mở (bản sao lưu trước purge của yêu cầu và việc xóa), hoặc làm phần còn lại của phần việc hằng giờ: xuất, kiểm tra và sao chép một lần lưu trữ đã được phê duyệt, tạo bản sao lưu trước purge của lần đó và **purge** (xóa hẳn) lịch sử Movement đã lưu trữ khỏi database; rồi chạy đối soát. |
 
 Quy ước: tác vụ chạy một lần (one-shot job) đọc hoặc ghi thư mục sao lưu chạy với `--user "$(id -u):$(id -g)"`, vì
 thư mục đó có mode 0700. `<partflow-host>` là tên miền truy cập (host name) mà mọi người gõ trên trình duyệt,
@@ -83,7 +83,7 @@ kiểm tra những gì.
 | `<UTC>-restore-test-<NAME>/` | `restore-test.sh` | `evidence.json`, kết quả của lần diễn tập (§4) |
 | thư mục của bản phát hành bị hoàn tác | bạn, khi quay lui theo đường 3 (path 3) (§6) | `rollback.json`, `rollback-reconcile.json` |
 | `<UTC>-restore-<NAME>/` | bạn, khi khôi phục sang bản cài mới (§6) | `restore.json` |
-| `archive/<UTC>/` | `archive.sh`, chỉ cho một lần khởi động đã làm gì đó hoặc thất bại (§11) | một báo cáo JSON và một log cho mỗi bước (`recover`; `next`, rồi `next-2`, `next-3` và tiếp theo; `export`, `verify`, `copy`, `purge`, `start-deletion`, `delete`, `status`); `check.json`, lần kiểm tra đã tìm thấy một yêu cầu xóa vĩnh viễn; `backup.out` và `backup.log` của bản sao lưu trước purge; `reconcile.json` và `reconcile.log`, đối soát sau một lần purge hoặc một lần xóa; và `messages.log` |
+| `archive/<UTC>/` | `archive.sh`, chỉ cho một lần khởi động đã làm gì đó hoặc thất bại (§11) | một báo cáo JSON và một log cho mỗi bước (`recover`; `evaluate`, việc đánh giá các lần lưu trữ tự động; `next`, rồi `next-2`, `next-3` và tiếp theo; `export`, `verify`, `copy`, `purge`, `start-deletion`, `delete`, `status`); `check.json`, lần kiểm tra đã tìm thấy một yêu cầu xóa vĩnh viễn; `backup.out` và `backup.log` của bản sao lưu trước purge; `reconcile.json` và `reconcile.log`, đối soát sau một lần purge hoặc một lần xóa; và `messages.log` |
 | `archive/hourly-slot` | `archive.sh --scheduled` (§11) | dấu mốc hằng giờ: phút của lần làm việc hằng giờ gần nhất đã được thử |
 | `archive/reconcile-after-purge` | `archive.sh` (§11) | bản ghi sự cố của một lần đối soát sau một lần purge hoặc một lần xóa vĩnh viễn chưa kết thúc sạch: lần lưu trữ hoặc yêu cầu xóa, kết quả, các kiểm tra thất bại và đường dẫn của báo cáo. Khi nó còn tồn tại, `archive.sh` không làm việc với lần lưu trữ nào và không thực hiện yêu cầu xóa nào; bạn xóa nó khi đóng sự cố (§8, Phát hiện của đối soát sau một lần purge, hoặc sau một lần xóa) |
 
@@ -145,7 +145,7 @@ Nó in một dòng cho mỗi kiểm tra, `PASS|FAIL|SKIP <id> <reason>`, theo th
 | `database` | báo cáo `status` không chạy được, không trả lời trong 120 s, hoặc báo lỗi database |
 | `schema` | `status` báo schema chưa sẵn sàng |
 | `backup_age` | không tìm thấy bản sao lưu đã công bố, không đọc được thư mục sao lưu, hoặc bản sao lưu mới nhất thuộc bất kỳ loại nào (kể cả bản sao lưu trước purge) hoàn tất cách đây lâu hơn khoảng thời gian sao lưu theo lịch của Administration → Backups cộng 2 giờ (ban đầu là 3 giờ; `--max-backup-age-hours` đặt giới hạn khác) |
-| `archival_proposal` | `history-archive status` chỉ đọc báo một phát hiện, được nêu tên trong dòng: `copy_confirmation_overdue`, `last_run_failed`, `archive_dir_unusable`, `copy_dir_unusable` hoặc `receipt_not_copied` (§11); một yêu cầu xóa vĩnh viễn vẫn còn mở (`APPROVED` hoặc `RUNNING`) hơn 15 phút sau khi được yêu cầu (`--deletion-wait-minutes`), tức tác vụ lưu trữ lịch sử chưa thực hiện hoặc chưa hoàn tất nó: `deletion_request_waiting` (§10), dòng này nêu tên lần lưu trữ mà một yêu cầu `APPROVED` đang chờ phía sau; hoặc đối soát sau một lần purge hoặc một lần xóa chưa kết thúc sạch, được nêu đầu tiên là `reconcile_after_purge` (§8); `SKIP` khi việc lưu trữ chưa được thiết lập, trừ `deletion_request_waiting`: PartFlow vẫn ghi lại các yêu cầu xóa, và khi đó không có gì thực hiện chúng |
+| `archival_proposal` | `history-archive status` chỉ đọc báo một phát hiện, được nêu tên trong dòng: `copy_confirmation_overdue`, `approval_overdue`, `last_run_failed` (thay vào đó là `authorization_failed`, với một lần lưu trữ đã thất bại vì nó không còn chạy được theo thẩm quyền của nó), `standing_authorization_invalid`, `archive_dir_unusable`, `copy_dir_unusable` hoặc `receipt_not_copied` (§11); một yêu cầu xóa vĩnh viễn vẫn còn mở (`APPROVED` hoặc `RUNNING`) hơn 15 phút sau khi được yêu cầu (`--deletion-wait-minutes`), tức tác vụ lưu trữ lịch sử chưa thực hiện hoặc chưa hoàn tất nó: `deletion_request_waiting` (§10), dòng này nêu tên lần lưu trữ mà một yêu cầu `APPROVED` đang chờ phía sau; hoặc đối soát sau một lần purge hoặc một lần xóa chưa kết thúc sạch, được nêu đầu tiên là `reconcile_after_purge` (§8); `SKIP` khi việc lưu trữ chưa được thiết lập, trừ `deletion_request_waiting`: PartFlow vẫn ghi lại các yêu cầu xóa, và khi đó không có gì thực hiện chúng |
 
 - Các dòng `database`, `schema` và `backup_age` đến từ một lần chạy `status` chỉ đọc, còn `archival_proposal` đến từ một
   lần chạy `history-archive status` chỉ đọc trong dịch vụ `maintenance` (§11) và từ bản ghi sự cố
@@ -1062,7 +1062,12 @@ chúng vào ticket hay email. Không công cụ nào xóa chúng; hãy xóa bằ
 | `archive.sh` thoát với mã 4, hoặc từ chối với mã thoát 1 vì bản ghi sự cố tồn tại; hoặc `check.sh`: `FAIL archival_proposal reconcile_after_purge` | Đối soát sau một lần purge hoặc một lần xóa vĩnh viễn chưa kết thúc sạch: một sự cố, và job lưu trữ không làm việc với lần lưu trữ nào và không thực hiện yêu cầu xóa nào cho đến khi sự cố được đóng (Phát hiện của đối soát sau một lần purge, hoặc sau một lần xóa, bên dưới). |
 | `check.sh`: `FAIL archival_proposal deletion_request_waiting` | Một yêu cầu xóa vĩnh viễn vẫn còn mở hơn 15 phút sau khi được yêu cầu (§10). `APPROVED`: tác vụ lưu trữ lịch sử chưa khởi động `archive.sh`, mọi lần khởi động đều thất bại, hoặc yêu cầu đang chờ phía sau lần lưu trữ mà dòng này nêu tên, phần việc của lần lưu trữ đó đi trước. `RUNNING`: một lần khởi động đã dừng trong lúc xóa, và chưa có lần khởi động nào sau đó chuyển yêu cầu sang `FAILED`. Kiểm tra tác vụ đã được bật chưa và đọc các email báo lỗi của nó, hoặc chạy `deploy/production/pf archive` và đọc nó báo gì. Khi dòng này nói việc lưu trữ chưa được thiết lập, không có gì thực hiện yêu cầu: hãy thiết lập tác vụ lưu trữ lịch sử ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8) hoặc hủy yêu cầu trong PartFlow. |
 | `archive.sh` hoặc `pf delete-permanently` thoát với mã 3: một yêu cầu xóa `FAILED` | Không có gì bị xóa. Lý do nêu nguyên nhân: dữ liệu đã thay đổi sau yêu cầu, user yêu cầu không còn hoạt động hoặc không còn giữ permission, hoặc job đã dừng khi yêu cầu ở `RUNNING`. Yêu cầu xóa lại nếu vẫn còn cần (§10). |
-| `archive.sh`: bản sao lưu trước purge thất bại | Không có gì bị xóa; lần khởi động hằng giờ kế tiếp chuyển lần lưu trữ sang `FAILED`. Sửa nguyên nhân (một bản sao lưu giữ khóa sao lưu lâu hơn `--backup-wait-minutes`, một khóa sao lưu cũ (§3), thư mục sao lưu thiếu dung lượng, một lỗi dump), rồi yêu cầu một lần lưu trữ mới (§11, Bản sao lưu trước purge). |
+| `check.sh`: `FAIL archival_proposal approval_overdue` | Một lần lưu trữ tự động đã chờ phê duyệt (`PROPOSED`) lâu hơn **Report a waiting run after** (ban đầu là 7 ngày). Một người giữ Run history archival and purge phê duyệt nó, kèm một lý do của riêng họ, hoặc bác bỏ nó trong Administration → History archival & purge (§11, Các lần lưu trữ tự động). |
+| `archive.sh` thoát với mã 3, hoặc `check.sh`: `FAIL archival_proposal authorization_failed` | Một lần lưu trữ đã thất bại trước bản sao lưu trước purge hoặc trước việc purge của nó vì nó không còn chạy được theo thẩm quyền của nó: user đã yêu cầu, đã phê duyệt nó hoặc đã tắt bước phê duyệt không còn hoạt động hoặc không còn giữ Run history archival and purge, hoặc bước phê duyệt đã được bật lại sau khi lần lưu trữ được tạo mà không cần phê duyệt. Không có gì bị xóa; lý do nêu nguyên nhân. Hãy yêu cầu một lần lưu trữ mới, phê duyệt lần được đề xuất kế tiếp, hoặc nhờ một người giữ permission lưu lại thiết lập phê duyệt (§11, Các lần lưu trữ tự động). |
+| `archive.sh` thoát với mã 3, hoặc `check.sh`: `FAIL archival_proposal last_run_failed`, với một lần lưu trữ tự động được tạo mà không cần phê duyệt | Ngoài các nguyên nhân của Một lần lưu trữ thất bại (§11), các thiết lập có thể đã chặn nó trước bản sao lưu trước purge hoặc trước việc purge của nó: **Automatic runs** đã bị tắt, hoặc thời hạn lưu giữ không còn cho phép mốc cắt của nó (thời hạn đã được kéo dài, hoặc bị xóa, sau khi lần lưu trữ được tạo). Không có gì bị xóa, và ủy quyền thường trực vẫn còn hiệu lực. Nếu đó là chủ ý thì không cần làm gì thêm, dù `check.sh` vẫn báo thất bại cho đến khi một lần lưu trữ sau kết thúc; nếu không, hãy bật lại Automatic runs hoặc yêu cầu một lần lưu trữ (§11, Các lần lưu trữ tự động). |
+| `check.sh`: `FAIL archival_proposal standing_authorization_invalid` | Các lần lưu trữ tự động đang bật mà không có bước phê duyệt, và ủy quyền thường trực của nó không còn hiệu lực: một lần lưu trữ được tạo theo ủy quyền đó đã thất bại vì user đã tắt bước đó không còn chạy được nó, hoặc user đó không còn hoạt động hoặc không còn giữ permission. Không lần lưu trữ tự động nào được tạo cho đến khi một người giữ Run history archival and purge lưu lại thiết lập phê duyệt (§11, Các lần lưu trữ tự động). |
+| `archive.sh` thoát với mã 2: "history-archive evaluate could not run" | Việc đánh giá các lần lưu trữ tự động không xong (ví dụ trong giới hạn thời gian của bản xem trước) và không tạo lần lưu trữ nào; phần việc với lần lưu trữ đang mở vẫn tiếp tục. Nếu nó lặp lại, hãy tăng **Preview time limit** trong Administration → History archival & purge, hoặc kiểm tra database (§2). |
+| `archive.sh`: bản sao lưu trước purge thất bại | Không có gì bị xóa; lần khởi động hằng giờ kế tiếp chuyển lần lưu trữ sang `FAILED`. Sửa nguyên nhân (một bản sao lưu giữ khóa sao lưu lâu hơn `--backup-wait-minutes`, một khóa sao lưu cũ (§3), thư mục sao lưu thiếu dung lượng, một lỗi dump), rồi yêu cầu một lần lưu trữ mới, hoặc chờ lần lưu trữ tự động kế tiếp (§11, Bản sao lưu trước purge). |
 | `archive.sh`: một lần lưu trữ `FAILED while purging` | Chỉ các thành phần flow trọn vẹn đã bị xóa, và biên nhận purge liệt kê chúng; đối soát đã chạy sau đó. Yêu cầu một lần lưu trữ mới cho phần còn lại (§11, Một lần lưu trữ thất bại). |
 | `archive.sh` thoát với mã 2: "the purge of run N stopped", lần lưu trữ ở lại `PURGING` | Một lỗi database tạm thời (mất kết nối, deadlock, hết thời gian chờ, máy chủ database tắt); lô đang chạy đã được rollback. Khi database trả lời trở lại, lần khởi động kế tiếp tiếp tục purge và đối soát khi nó kết thúc. Nếu nó cứ dừng lại, hãy kiểm tra database (§2). |
 | `check.sh` hoặc `release.sh`: một khóa cũ hơn 4 giờ, một bản phát hành khác đang giữ khóa, hoặc `backup_lock_stale` | Một lần chạy bị kill để lại khóa của nó: §3, Khóa sao lưu và khóa phát hành. |
@@ -1225,8 +1230,9 @@ nên hãy xử lý nó như một sự cố:
    cầu xóa nào khi bản ghi còn tồn tại. Báo mọi người có quyền **Run history archival and purge** hoặc **Delete Work
    Orders and Part Numbers permanently** không gửi yêu cầu nào, và hủy một lần lưu trữ hoặc một yêu cầu xóa đã được yêu
    cầu trong lúc đó (Cancel trong Administration → History archival & purge, làm được khi lần lưu trữ ở `APPROVED`
-   hoặc `WAITING_FOR_COPY` và khi yêu cầu xóa ở `APPROVED`): nếu không, job sẽ thực hiện nó khi sự cố được đóng. Để
-   dừng các email báo lỗi mỗi giờ, hãy tắt tác vụ lưu trữ lịch sử trong trình lập lịch của
+   hoặc `WAITING_FOR_COPY` và khi yêu cầu xóa ở `APPROVED`; một lần lưu trữ tự động được đề xuất, `PROPOSED`, thì bị
+   bác bỏ thay vì hủy, và job không tạo lần lưu trữ tự động nào khi bản ghi còn tồn tại): nếu không, job sẽ thực hiện
+   nó khi sự cố được đóng. Để dừng các email báo lỗi mỗi giờ, hãy tắt tác vụ lưu trữ lịch sử trong trình lập lịch của
    máy chủ (trên NAS: bỏ chọn **Enabled** trong Task Scheduler). Giữ bản sao lưu trước purge, thư mục lưu trữ và biên
    nhận purge: chúng là bằng chứng và là đường quay lại.
 2. **Khi đối soát không chạy được hoặc kết thúc bằng lỗi**, hãy chạy lại nó bằng tay (§7, Chạy đối soát). Khi nó sạch,
@@ -1373,10 +1379,10 @@ phục chấp nhận được; các giá trị ở đây là ví dụ làm việ
 | Khi nào | Tác vụ |
 | --- | --- |
 | Mỗi 15 phút (tự động) | `check.sh`: tình trạng, các lần khởi động lại, đĩa, chứng chỉ, tuổi bản sao lưu, lỗi backend và trạng thái lưu trữ (§2). Một thất bại không đổi được nhắc lại mỗi 6 giờ. |
-| Mỗi 5 phút (tự động) | `archive.sh --scheduled`: mỗi lần khởi động thực hiện ngay một yêu cầu xóa vĩnh viễn đang mở (bản sao lưu trước purge, việc xóa và đối soát sau đó, §10); mỗi giờ một lần, vào Start minute của Administration → History archival & purge, job lưu trữ lịch sử xử lý một lần lưu trữ đã được yêu cầu: export, kiểm tra, bản sao ngoài máy chủ, bản sao lưu trước purge, purge và đối soát sau đó (§11). |
+| Mỗi 5 phút (tự động) | `archive.sh --scheduled`: mỗi lần khởi động thực hiện ngay một yêu cầu xóa vĩnh viễn đang mở (bản sao lưu trước purge, việc xóa và đối soát sau đó, §10); mỗi giờ một lần, vào Start minute của Administration → History archival & purge, job lưu trữ lịch sử trước hết đánh giá các lần lưu trữ tự động (nó tạo một lần khi chúng đang bật và đến hạn), rồi xử lý một lần lưu trữ đã được phê duyệt: export, kiểm tra, bản sao ngoài máy chủ, bản sao lưu trước purge, purge và đối soát sau đó (§11). |
 | Hằng ngày | Sao lưu theo lịch (mỗi giờ) và đối soát theo lịch lúc 04:00 tự chạy. Đọc mọi email báo lỗi, kể cả của bản sao ngoài máy chủ; mã thoát 4 của một bản sao lưu bao gồm cả trường hợp một bản sao lưu theo lịch hoặc trước purge không qua kiểm tra, và mã thoát 4 của job lưu trữ lịch sử là một sự cố (§8). |
 | Hằng tuần | Xem xét mức tăng của database (`~/partflow-monitoring/growth.tsv`) và `docker stats --no-stream`. Xem xét các lần đăng nhập thất bại và quyền bị từ chối: `$PF logs --since 168h --no-log-prefix backend \| grep '"logger":"app.access"' \| grep -E '"status":(401\|403)'` (`refusal.type` và `refusal.code` phân biệt đăng nhập bị từ chối hoặc bị khóa, từ chối quyền, `station_device_required`, `station_device_mismatch` và `csrf_rejected`). Kiểm tra các bản cập nhật bảo mật đang chờ của máy chủ. |
-| Hằng tháng | Xác nhận bản sao ngoài máy chủ của mọi lần lưu trữ đang chờ việc đó (§11). Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch hoặc trước purge mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
+| Hằng tháng | Xác nhận bản sao ngoài máy chủ của mọi lần lưu trữ đang chờ việc đó, và phê duyệt hoặc bác bỏ mọi lần lưu trữ tự động đang chờ phê duyệt (§11). Xóa các báo cáo đối soát cũ sau khi xem xét. Xóa các bản sao lưu pre-release và manual đã hết thời gian theo dõi, và các bản sao lưu theo lịch hoặc trước purge mà việc xoay vòng báo là không hợp lệ, sau khi xem xét (bên dưới). Cài đặt các bản cập nhật, ưu tiên thử trên hệ thống kiểm thử trước nếu có thể. Xem xét người dùng và vai trò, quy tắc tường lửa và các bí mật. Chạy `reconcile --check h`. |
 | Hằng quý, và sau một thay đổi schema lớn | Diễn tập khôi phục (§4); so sánh các thời gian `restore_to_ready` và `total` của nó với thời gian nhà máy có thể làm việc mà không có PartFlow. |
 | Trước khi đổi image PostgreSQL hoặc glibc của máy chủ | `restore-test.sh --backup <latest> --db-image <candidate>` (§4, §7). |
 | Trước mỗi lần phát hành | Xem xét các migration, quyết định quay lui và các kiểm tra (§5); `release.sh` tạo bản sao lưu. |
@@ -1416,7 +1422,9 @@ nó, §2).
   (không có `~/partflow-deployments/.archive.lock`), tránh thời điểm Start minute của nó và khi không có yêu cầu xóa
   vĩnh viễn nào đang mở: chỉ job một lần (one-shot) đó dùng role này (§11), nên không cần tạm dừng ghi. Một lần purge
   không còn kết nối được tới database thì ở lại `PURGING`, và lần khởi động kế tiếp tiếp tục nó; một lần xóa không còn
-  kết nối được tới nó thì không xóa gì, và yêu cầu của nó chuyển sang `FAILED` ở lần khởi động kế tiếp.
+  kết nối được tới nó thì không xóa gì, và yêu cầu của nó chuyển sang `FAILED` ở lần khởi động kế tiếp; một lần đánh
+  giá các lần lưu trữ tự động không còn kết nối được tới nó thì không tạo lần lưu trữ nào, và phần việc hằng giờ kế
+  tiếp đánh giá lại.
 - **Mật khẩu chủ sở hữu** (`postgres_password`): đổi trong database trước, rồi thay tệp. Không cần khởi động lại,
   vì chỉ `migrate` và `db-roles` chạy một lần đọc nó.
 
@@ -1514,7 +1522,8 @@ Cách của người vận hành, `pf delete-permanently`:
    2. nó ghi lại yêu cầu: kế hoạch một lần nữa và yêu cầu trong một transaction (tài liệu JSON của nó, `result`
       `requested`, đi ra standard output); một lần từ chối dừng ở đây, không ghi lại gì;
    3. nó chạy ngay job lưu trữ lịch sử (`archive.sh`, như `pf archive`), job này bắt đầu yêu cầu, tạo bản sao lưu trước
-      purge của nó, xóa và chạy đối soát (§11);
+      purge của nó, xóa và chạy đối soát (§11); như mọi phần việc hằng giờ, lần khởi động này trước hết đánh giá các lần
+      lưu trữ tự động;
    4. nó đọc trạng thái cuối cùng của yêu cầu từ `history-archive status` và báo nó (Mã thoát, bên dưới).
 
    Khi một `archive.sh` khác đang giữ khóa lưu trữ (ví dụ việc purge dài của một lần lưu trữ), yêu cầu ở lại
@@ -1600,12 +1609,15 @@ xóa các Movement đã lưu trữ khỏi database và giữ một bản ghi chu
 trữ, để mọi số lượng, trạng thái và kiểm tra vẫn chính xác. Sau khi purge, lịch sử đó nằm trong thư mục lưu trữ và bản
 sao ngoài máy chủ của nó (và trong các bản sao lưu trước purge còn được giữ), không còn trong database; các lệnh có lịch
 sử đã được lưu trữ không thể hoàn tác (Undo) được nữa. Cùng job đó cũng thực hiện các yêu cầu xóa vĩnh viễn dữ liệu thử
-nghiệm (§10). Các lần lưu trữ tự động, các yêu cầu xem và các nhóm tùy chọn là những bước xây dựng sau.
+nghiệm (§10), và tạo các **lần lưu trữ tự động** (automatic runs) khi chúng được bật (Các lần lưu trữ tự động, bên
+dưới). Các yêu cầu xem và các nhóm tùy chọn là những bước xây dựng sau.
 
 Một người dùng có quyền **Run history archival and purge** đặt thời hạn lưu giữ và các thiết lập khác, xem bản xem
-trước và yêu cầu một lần lưu trữ trong **Administration → History archival & purge**; yêu cầu chính là sự phê duyệt.
-Ứng dụng web không bao giờ đụng đến thư mục lưu trữ. **Job lưu trữ lịch sử** (history archive job) trên máy chủ làm
-phần việc đó.
+trước và yêu cầu một lần lưu trữ trong **Administration → History archival & purge**. Một lần lưu trữ được yêu cầu
+(thủ công) không cần phê duyệt nào khác: yêu cầu chính là sự phê duyệt. Một lần lưu trữ tự động chờ một người dùng như
+vậy phê duyệt, trừ khi bước phê duyệt (approval step) bị tắt: khi đó nó chạy theo ủy quyền thường trực (standing
+authorization) của người dùng đã tắt bước đó (Các lần lưu trữ tự động, bên dưới). Ứng dụng web không bao giờ đụng đến
+thư mục lưu trữ. **Job lưu trữ lịch sử** (history archive job) trên máy chủ làm phần việc đó.
 
 ### Job lưu trữ làm gì (What the archive job does)
 
@@ -1615,18 +1627,20 @@ Một tác vụ trên máy chủ khởi động `deploy/production/archive.sh --
 đọc nhanh bằng role database của ứng dụng cho biết có yêu cầu xóa vĩnh viễn nào đang mở không và cho biết Start minute.
 Một lần khởi động tìm thấy một yêu cầu đang mở sẽ thực hiện nó ngay, bất kể giờ nào (các bước xóa bên dưới). Mỗi giờ một
 lần, ở lần khởi động đầu tiên vào hoặc sau **Start minute** đặt trong Administration (ban đầu là 20), nó làm **phần
-việc hằng giờ**; mọi lần khởi động khác kết thúc trong vài giây và in `NOT_DUE`. Lần khởi động đầu tiên sau khi tạo tác
-vụ chỉ ghi lại giờ hiện tại, nên phần việc hằng giờ đầu tiên đến vào Start minute kế tiếp. Một lần khởi động đã thực
-hiện một lần xóa không làm phần việc lưu trữ nào và để giờ đó cho lần khởi động kế tiếp, lần này làm phần việc hằng giờ
-5 phút sau. Khi kiểm tra không có câu trả lời (ví dụ `backend` đã dừng), lần khởi động coi như không có yêu cầu nào
-đang mở: phần việc hằng giờ vẫn diễn ra như thường (khi đó Start minute được đọc trong dịch vụ `maintenance`), và yêu
-cầu chờ một lần khởi động sau. `deploy/production/pf archive` chạy ngay, bất kể giờ nào: trước hết một yêu cầu xóa đang
-mở, nếu không thì phần việc hằng giờ.
+việc hằng giờ**, bắt đầu bằng việc đánh giá các lần lưu trữ tự động; mọi lần khởi động khác kết thúc trong vài giây và
+in `NOT_DUE`. Lần khởi động đầu tiên sau khi tạo tác vụ chỉ ghi lại giờ hiện tại, nên phần việc hằng giờ đầu tiên đến
+vào Start minute kế tiếp. Một lần khởi động đã thực hiện một lần xóa không làm phần việc lưu trữ nào và để giờ đó cho
+lần khởi động kế tiếp, lần này làm phần việc hằng giờ 5 phút sau. Khi kiểm tra không có câu trả lời (ví dụ `backend` đã
+dừng), lần khởi động coi như không có yêu cầu nào đang mở: phần việc hằng giờ vẫn diễn ra như thường (khi đó Start
+minute được đọc trong dịch vụ `maintenance`), và yêu cầu chờ một lần khởi động sau. `deploy/production/pf archive`
+chạy ngay phần việc hằng giờ, bất kể giờ nào: việc đánh giá các lần lưu trữ tự động, rồi trước hết một yêu cầu xóa đang
+mở, nếu không thì phần việc với một lần lưu trữ.
 
 Các bước chạy trong dịch vụ một lần (one-shot) `maintenance`, dịch vụ này kết nối bằng role database bảo trì
-(`partflow_maintenance`, được đọc lịch sử, ghi các bản ghi lưu trữ và chỉ xóa những gì các row guard cho phép: các
-Movement đã lưu trữ của một lần lưu trữ ở `PURGING`, và các dòng đã lưu của một yêu cầu xóa đang ở `RUNNING`) và là
-dịch vụ duy nhất mount thư mục lưu trữ:
+(`partflow_maintenance`, được đọc lịch sử, tạo các lần lưu trữ tự động (guard của bảng các lần lưu trữ không nhận lần
+lưu trữ nào khác từ nó), ghi các bản ghi lưu trữ và chỉ xóa những gì các row guard cho phép: các Movement đã lưu trữ
+của một lần lưu trữ ở `PURGING`, và các dòng đã lưu của một yêu cầu xóa đang ở `RUNNING`) và là dịch vụ duy nhất mount
+thư mục lưu trữ:
 
 1. `recover`: một lần lưu trữ bị bỏ lại ở `RUNNING` bởi một job đã dừng (khởi động lại, mất điện), hoặc có bản sao
    lưu trước purge thất bại, trở thành `FAILED`, và một yêu cầu xóa bị bỏ lại ở `RUNNING` cũng vậy (không có gì bị xóa:
@@ -1635,14 +1649,20 @@ dịch vụ duy nhất mount thư mục lưu trữ:
    lại ở `PURGING` không bị đụng đến: việc purge của nó được tiếp tục bên dưới. Khi `recover` không kết thúc với mã
    thoát 0, không lần lưu trữ hay yêu cầu nào được xử lý trong lần khởi động đó (chỉ `status` chạy). Cũng vậy khi bản
    ghi sự cố `<records-dir>/archive/reconcile-after-purge` còn tồn tại (§8, Phát hiện của đối soát sau một lần purge,
-   hoặc sau một lần xóa): lần khởi động khi đó chỉ chạy `recover` và `status`, không làm việc với lần lưu trữ nào, kể cả
-   việc tiếp tục purge một lần lưu trữ bị bỏ lại ở `PURGING`, không thực hiện yêu cầu xóa nào, và thoát với mã 1 (mã 3
-   khi `recover` đã chuyển một lần lưu trữ hoặc một yêu cầu sang thất bại).
-2. `next`, lặp lại sau mỗi bước: việc cần làm và bước kế tiếp của nó. Một yêu cầu xóa đang mở đi trước. Một yêu cầu được
+   hoặc sau một lần xóa): lần khởi động khi đó chỉ chạy `recover` và `status`, không tạo lần lưu trữ tự động nào, không
+   làm việc với lần lưu trữ nào, kể cả việc tiếp tục purge một lần lưu trữ bị bỏ lại ở `PURGING`, không thực hiện yêu
+   cầu xóa nào, và thoát với mã 1 (mã 3 khi `recover` đã chuyển một lần lưu trữ hoặc một yêu cầu sang thất bại).
+2. `evaluate`, chỉ trong phần việc hằng giờ, không bao giờ trong một lần khởi động chỉ thực hiện một yêu cầu xóa: việc
+   đánh giá các lần lưu trữ tự động (Các lần lưu trữ tự động, bên dưới). Nó tạo lần lưu trữ mà các thiết lập đòi hỏi
+   lúc này, hoặc cho biết vì sao nó không tạo lần nào, và `archive.sh` ghi log quyết định của nó. Khi nó bị từ chối
+   (mã thoát 1) hoặc không chạy được hay không xong (mã thoát 2, ví dụ trong giới hạn thời gian của bản xem trước), nó
+   không tạo lần lưu trữ nào, `archive.sh` báo lỗi trong mã thoát của mình, và phần việc vẫn tiếp tục với bước kế tiếp.
+3. `next`, lặp lại sau mỗi bước: việc cần làm và bước kế tiếp của nó. Một yêu cầu xóa đang mở đi trước. Một yêu cầu được
    tạo trong lúc lần khởi động này đang làm các bước của một lần lưu trữ sẽ chờ đến khi lần lưu trữ đó chờ bản sao,
    purge hoặc kết thúc, và một lần khởi động sau nhận nó. Mọi bước của một lần lưu trữ có thể diễn ra trong một lần
-   khởi động.
-3. Với một yêu cầu xóa, các bước mà `next` nêu:
+   khởi động, kể cả các bước của một lần lưu trữ tự động mà `evaluate` vừa tạo ở `APPROVED`. Một lần lưu trữ đang chờ
+   phê duyệt (`PROPOSED`) chờ một người: `next` trả lời `wait`, và job không làm gì với nó.
+4. Với một yêu cầu xóa, các bước mà `next` nêu:
    - `start_deletion`: `start-deletion` chuyển yêu cầu sang `RUNNING`, tại một giây tròn dùng để đặt tên bản sao lưu
      trước purge của nó, sau khi kiểm tra lại user đã yêu cầu (nếu không, nó chuyển sang `FAILED`, không xóa gì, mã
      thoát 3).
@@ -1655,8 +1675,8 @@ dịch vụ duy nhất mount thư mục lưu trữ:
      một yêu cầu `COMPLETED` được đối soát ngay, một yêu cầu `FAILED` đã không xóa gì (mã thoát 3), một yêu cầu vẫn
      `RUNNING` đã không xóa gì và lần khởi động kế tiếp chuyển nó sang `FAILED` (mã thoát 2), và khi `status` không cho
      biết được, đối soát vẫn chạy.
-   - Rồi đối soát đầy đủ (bước 5), và lần khởi động kết thúc.
-4. Với một lần lưu trữ, bước mà `next` nêu:
+   - Rồi đối soát đầy đủ (bước 6), và lần khởi động kết thúc.
+5. Với một lần lưu trữ, bước mà `next` nêu:
    - `export` ghi bản lưu trữ vào `<archive-dir>/.partial/`. Khi không có gì đủ điều kiện, lần lưu trữ kết thúc ở
      `NOTHING_ELIGIBLE`.
    - `verify` đọc lại mọi tệp, so sánh với database và công bố thư mục `<archive-dir>/run-<id>-<giờ UTC>/`. Một thành
@@ -1664,9 +1684,12 @@ dịch vụ duy nhất mount thư mục lưu trữ:
      trữ kết thúc ở `COMPLETED_WITH_SKIPS` với kết quả `NOTHING_PURGED`, không cần bản sao hay bản sao lưu.
    - `copy` sao chép bản lưu trữ sang thư mục sao chép ngoài máy chủ và kiểm tra bản sao, hoặc chấp nhận một xác nhận
      bản sao; nếu không có cả hai, lần lưu trữ chờ ở `WAITING_FOR_COPY` (Bản sao ngoài máy chủ, bên dưới).
-   - `backup`: bản sao lưu trước purge (bên dưới). `next` chỉ giao bước này sau khi kiểm tra rằng User đã yêu cầu lần
-     lưu trữ vẫn đang hoạt động và vẫn giữ Run history archival and purge; nếu không, lần lưu trữ trở thành `FAILED` và
-     không có gì bị xóa.
+   - `backup`: bản sao lưu trước purge (bên dưới). `next` chỉ giao bước này sau khi kiểm tra thẩm quyền của lần lưu
+     trữ, và `purge` kiểm tra lại trước khi lần lưu trữ trở thành `PURGING`: user đã yêu cầu lần lưu trữ, user đã phê
+     duyệt nó, hoặc, với một lần lưu trữ được tạo theo ủy quyền thường trực, các thiết lập (bước phê duyệt không được
+     bật lên kể từ đó, **Automatic runs** vẫn bật, mốc cắt vẫn được thời hạn lưu giữ cho phép) rồi đến user đã tắt
+     bước phê duyệt (Các lần lưu trữ tự động, bên dưới). Nếu không, lần lưu trữ trở thành `FAILED` và không có gì bị
+     xóa.
    - `purge` với bản sao lưu đó: lần lưu trữ trở thành `PURGING`, và các Movement đã lưu trữ của nó bị xóa theo từng lô
      gồm các thành phần flow trọn vẹn, tối đa **Movements per purge batch** và **Part Numbers per purge batch** của
      Administration (ban đầu 50,000 và 20). Mỗi lô là một transaction dưới các khóa của các Part Number của nó; một
@@ -1679,14 +1702,15 @@ dịch vụ duy nhất mount thư mục lưu trữ:
      mới: chỉ các thành phần trọn vẹn từng bị xóa. Mọi thất bại khác trong lúc purge (số bị xóa khác với các bản ghi,
      guard từ chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ) chuyển lần lưu trữ sang `FAILED`, kèm biên
      nhận của nó (Một lần lưu trữ thất bại, bên dưới).
-5. Sau một lần purge đã kết thúc, hoặc đã thất bại khi lần lưu trữ ở `PURGING`, và sau một lần xóa: đối soát đầy đủ
+6. Sau một lần purge đã kết thúc, hoặc đã thất bại khi lần lưu trữ ở `PURGING`, và sau một lần xóa: đối soát đầy đủ
    (§7), trong một container `backend` dùng một lần với role database của ứng dụng. Khi nó không kết thúc sạch, đó là
    một sự cố (§8, Phát hiện của đối soát sau một lần purge, hoặc sau một lần xóa). Một lần purge thoát với mã 2 không
    được đối soát trong lần khởi động đó: lần khởi động kế tiếp tiếp tục nó và đối soát khi nó kết thúc. Một lần khởi
    động không bao giờ bắt đầu thêm một lần lưu trữ khác sau một lần purge, và không làm phần việc lưu trữ nào sau một
    lần xóa.
-6. `status`: lần lưu trữ đang mở, lần đã kết thúc gần nhất, yêu cầu xóa đang mở và yêu cầu xóa đã kết thúc gần nhất,
-   và dung lượng trống, cho việc giám sát.
+7. `status`: lần lưu trữ đang mở, lần đã kết thúc gần nhất, yêu cầu xóa đang mở và yêu cầu xóa đã kết thúc gần nhất,
+   các lần lưu trữ tự động cùng ủy quyền thường trực của chúng, và dung lượng trống, cho việc giám sát, kèm các phát
+   hiện của nó (Kiểm tra một lần lưu trữ, bên dưới).
 
 Production vẫn tiếp tục trong một lần lưu trữ và một lần xóa: bước export đọc một snapshot database, mỗi lô purge chỉ
 giữ các khóa của các Part Number của nó trong transaction của chính nó, và một lần xóa giữ các khóa của các Part Number
@@ -1697,16 +1721,21 @@ tránh xa các thời điểm bạn cài bản phát hành: một bản phát h�
 thể kéo dài.
 
 **Mã thoát của `archive.sh`.** Email báo lỗi của tác vụ trên máy chủ là cảnh báo. Khi thành công, nó in một dòng:
-`NOT_DUE`, `DEFERRED archive_running` (lần khởi động trước vẫn đang làm việc), `ARCHIVE <outcome> <run> <state>`, ví dụ
-`ARCHIVE completed 3 COMPLETED`, hoặc, với một lần khởi động đã làm việc với một yêu cầu xóa,
-`DELETION <outcome> <request> <state>`, ví dụ `DELETION deleted 7 COMPLETED`.
+`NOT_DUE`; `DEFERRED archive_running` (lần khởi động trước vẫn đang làm việc); với một phần việc hằng giờ không làm việc
+với lần lưu trữ nào, `EVALUATE <result> <run> <state>`: kết quả của việc đánh giá các lần lưu trữ tự động (Các lần lưu
+trữ tự động, bên dưới), rồi lần lưu trữ đang mở mà job đã thấy và trạng thái của nó, hoặc `-` khi không có, ví dụ
+`EVALUATE off - -` (các lần lưu trữ tự động đang tắt, không lần lưu trữ nào đang mở), `EVALUATE created 7 PROPOSED`
+(một lần lưu trữ đã được đề xuất và chờ phê duyệt) hoặc `EVALUATE run_open 3 WAITING_FOR_COPY`; với một phần việc hằng
+giờ đã làm việc với một lần lưu trữ, `ARCHIVE <outcome> <run> <state>`, ví dụ `ARCHIVE completed 3 COMPLETED`; hoặc,
+với một lần khởi động đã làm việc với một yêu cầu xóa, `DELETION <outcome> <request> <state>`, ví dụ
+`DELETION deleted 7 COMPLETED`.
 
 | Mã thoát | Ý nghĩa | Cần làm gì |
 | --- | --- | --- |
 | 0 | Xong, hoặc không có gì đến hạn. | Không cần gì. |
-| 1 | Bị từ chối, không có gì thay đổi: một bản phát hành đang chạy, một `archive.sh` khác giữ khóa lưu trữ, một lệnh history-archive khác đang chạy, một bước bị từ chối, hoặc bản ghi sự cố của một lần đối soát sau một lần purge hoặc một lần xóa còn tồn tại. | Không cần gì: lần khởi động sau sẽ thử lại. Nếu bị từ chối lặp lại: Các khóa, bên dưới; bản ghi sự cố: §8. |
-| 2 | Không thể chạy: cấu hình, Docker hoặc database, hoặc một bước có kết quả không xác định; hoặc một bản sao lưu trước purge thất bại; hoặc một lần purge hay một lần xóa dừng vì một lỗi database tạm thời (lần lưu trữ ở lại `PURGING`, yêu cầu xóa ở lại `RUNNING`). | Đọc email; sửa nguyên nhân. Một lần lưu trữ hoặc một yêu cầu xóa bị bỏ lại ở `RUNNING` sẽ được bước `recover` của lần khởi động sau chuyển sang thất bại, và không có gì bị xóa (khi đó hãy yêu cầu lại); một lần lưu trữ bị bỏ lại ở `PURGING` được lần khởi động sau tiếp tục, và lần đó đối soát khi việc purge kết thúc. |
-| 3 | Một lần lưu trữ hoặc một yêu cầu xóa thất bại: nó hiện là `FAILED`. Một yêu cầu xóa thất bại đã không xóa gì. | Một lần lưu trữ thất bại, bên dưới; yêu cầu xóa lại nếu vẫn còn cần (§10). |
+| 1 | Bị từ chối, không có gì thay đổi: một bản phát hành đang chạy, một `archive.sh` khác giữ khóa lưu trữ, một lệnh history-archive khác đang chạy, một bước bị từ chối (kể cả việc đánh giá các lần lưu trữ tự động), hoặc bản ghi sự cố của một lần đối soát sau một lần purge hoặc một lần xóa còn tồn tại. | Không cần gì: lần khởi động sau sẽ thử lại. Nếu bị từ chối lặp lại: Các khóa, bên dưới; bản ghi sự cố: §8. |
+| 2 | Không thể chạy: cấu hình, Docker hoặc database, hoặc một bước có kết quả không xác định; hoặc việc đánh giá các lần lưu trữ tự động không chạy được hoặc không xong trong giới hạn thời gian của bản xem trước (nó không tạo lần lưu trữ nào, và phần việc với lần lưu trữ đang mở vẫn tiếp tục); hoặc một bản sao lưu trước purge thất bại; hoặc một lần purge hay một lần xóa dừng vì một lỗi database tạm thời (lần lưu trữ ở lại `PURGING`, yêu cầu xóa ở lại `RUNNING`). | Đọc email; sửa nguyên nhân. Một lần lưu trữ hoặc một yêu cầu xóa bị bỏ lại ở `RUNNING` sẽ được bước `recover` của lần khởi động sau chuyển sang thất bại, và không có gì bị xóa (khi đó hãy yêu cầu lại); một lần lưu trữ bị bỏ lại ở `PURGING` được lần khởi động sau tiếp tục, và lần đó đối soát khi việc purge kết thúc. Một lần đánh giá cứ hết thời gian: hãy tăng **Preview time limit** trong Administration → History archival & purge. |
+| 3 | Một lần lưu trữ hoặc một yêu cầu xóa thất bại: nó hiện là `FAILED`. Một yêu cầu xóa thất bại đã không xóa gì. | Một lần lưu trữ thất bại, bên dưới (một lần lưu trữ không còn chạy được theo thẩm quyền của nó: Các lần lưu trữ tự động, bên dưới); yêu cầu xóa lại nếu vẫn còn cần (§10). |
 | 4 | Đối soát sau một lần purge hoặc một lần xóa phát hiện sai lệch, kết thúc bằng lỗi hoặc không chạy được. | Một sự cố: §8, Phát hiện của đối soát sau một lần purge, hoặc sau một lần xóa. Cho đến khi bản ghi của nó bị xóa, mọi lần khởi động đều từ chối làm việc với lần lưu trữ hay yêu cầu xóa (mã thoát 1). |
 
 `archive.sh --help` liệt kê các tùy chọn của nó; `--backup-wait-minutes N` (0 đến 1440, mặc định 60) là thời gian một
@@ -1742,26 +1771,130 @@ docker ps --filter label=com.docker.compose.service=maintenance   # must list no
 rm -r ~/partflow-deployments/.archive.lock
 ```
 
+### Các lần lưu trữ tự động (Automatic runs)
+
+Khi **Automatic runs** được bật trong Administration → History archival & purge (ban đầu chúng tắt), phần việc hằng
+giờ bắt đầu bằng `history-archive evaluate`, lệnh này quyết định có cần một lần lưu trữ ngay lúc này không và, nếu cần,
+tạo lần đó. Bản thân việc đánh giá không xóa gì: một lần lưu trữ tự động được xuất, kiểm tra, sao chép, sao lưu và
+purge đúng như một lần lưu trữ được yêu cầu. Không có tác vụ lưu trữ lịch sử
+([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8) thì không bao giờ có lần lưu trữ tự động nào được tạo. Các thiết
+lập, trong Administration → History archival & purge:
+
+- **Automatic runs**: bật hoặc tắt. Tắt chúng thì không lần lưu trữ tự động mới nào được tạo, và cũng chặn một lần lưu
+  trữ được tạo mà không cần phê duyệt trước khi nó purge (Việc kiểm tra lại thẩm quyền của một lần lưu trữ, bên dưới).
+- **Thước đo** (measure) quyết định rằng cần một lần lưu trữ, với giới hạn riêng của nó: số dòng Movement đang có (ban
+  đầu là trên 5,000,000), tuổi của lịch sử đang giữ (Movement cũ nhất của nó cũ hơn mốc cắt lưu giữ hơn 1 tháng, ban
+  đầu) hoặc kích thước database (ban đầu là trên 20 GiB). Giới hạn 0 cho phép mọi lần đánh giá tìm thấy lịch sử đủ
+  điều kiện tạo một lần lưu trữ.
+- **Bước phê duyệt** (approval step, ban đầu bật): một lần lưu trữ tự động có chờ một người phê duyệt hay không.
+- **Số ngày giữa các lần lưu trữ tự động** (ban đầu là 7), tính từ lúc kết thúc của lần lưu trữ tự động gần nhất, dù nó
+  kết thúc thế nào (hoàn tất, bị bác bỏ, bị hủy hoặc thất bại); các lần lưu trữ được yêu cầu không được tính.
+- **Report a waiting run after** (ban đầu là 7 ngày) cũng giới hạn thời gian một lần lưu trữ được đề xuất được chờ phê
+  duyệt.
+
+`evaluate` kiểm tra các điều kiện theo thứ tự này và dừng ở điều kiện đầu tiên không thỏa. `archive.sh` ghi log kết
+quả của nó kèm một thông điệp nêu các giá trị nó đã đọc:
+
+| Kết quả | Ý nghĩa |
+| --- | --- |
+| `off` | Các lần lưu trữ tự động đang tắt. |
+| `no_retention_period` | Chưa đặt thời hạn lưu giữ, nên không có lịch sử nào đủ điều kiện. |
+| `run_open` | Có một lần lưu trữ đang mở, kể cả một lần được đề xuất: không lần lưu trữ tự động nào được tạo khi có một lần đang mở. |
+| `not_due` | Lần lưu trữ tự động gần nhất kết thúc chưa đủ số ngày giữa các lần lưu trữ tự động; thông điệp cho biết khi nào lần kế tiếp đến hạn. |
+| `authorization_invalid` | Bước phê duyệt đang tắt, và ủy quyền thường trực của nó không còn hiệu lực (bên dưới); thông điệp cho biết vì sao. |
+| `below_limit` | Thước đo không vượt quá giới hạn của nó. |
+| `nothing_eligible` | Thước đo vượt giới hạn, nhưng không có gì đủ điều kiện tại mốc cắt lưu giữ. Khi đó mỗi phần việc hằng giờ đọc lại bản xem trước. |
+| `settings_changed` | Công tắc bật hoặc thiết lập phê duyệt đã thay đổi trong lúc đánh giá: không lần lưu trữ nào được tạo, và phần việc hằng giờ kế tiếp đánh giá lại. |
+| `created` | Một lần lưu trữ đã được tạo: `PROPOSED`, hoặc `APPROVED` theo ủy quyền thường trực. |
+
+Tất cả các kết quả này thoát với mã 0. Thước đo và bản xem trước của lịch sử đủ điều kiện dùng chung **Preview time
+limit** của Administration (ban đầu là 90 giây): một lần đánh giá hết thời gian đó thì không tạo lần lưu trữ nào và
+thoát với mã 2, giống như khi nó không kết nối được tới database, và một lệnh history-archive khác đang giữ khóa của job
+thì làm nó bị từ chối với mã thoát 1. Khi đó `archive.sh` báo lỗi trong mã thoát của mình, và lần khởi động vẫn làm
+việc với lần lưu trữ đang mở. Hãy tăng giới hạn thời gian của bản xem trước khi việc đánh giá cứ hết thời gian.
+
+**Một lần lưu trữ được đề xuất.** Khi bước phê duyệt bật, một lần lưu trữ tự động được tạo ở `PROPOSED`, kèm các số
+đếm của bản xem trước và một lý do tự động, ví dụ "Live Movement rows 5,120,334 above the limit 5,000,000; retention 24
+months". Job không làm gì với nó. Một người giữ Run history archival and purge quyết định trong Administration →
+History archival & purge:
+
+- **Approve…** (phê duyệt), kèm một lý do của riêng họ: lần lưu trữ trở thành `APPROVED`, và phần việc hằng giờ kế tiếp
+  xuất nó. User đã phê duyệt nó là user mang thẩm quyền của nó.
+- **Dismiss…** (bác bỏ), không cần lý do: lần lưu trữ trở thành `DISMISSED` và kết thúc; số ngày giữa các lần lưu trữ
+  tự động được tính từ lúc nó bị bác bỏ.
+
+Một lần lưu trữ được đề xuất không thể bị hủy. Trong khi nó chờ, không thể yêu cầu lần lưu trữ nào khác và không lần lưu
+trữ tự động nào khác được tạo. Khi nó đã chờ lâu hơn **Report a waiting run after**, `check.sh` báo
+`FAIL archival_proposal approval_overdue` cho đến khi nó được phê duyệt hoặc bị bác bỏ.
+
+**Ủy quyền thường trực (standing authorization).** Tắt bước phê duyệt cần Run history archival and purge, một lý do và
+lời xác nhận gõ lại `RUN WITHOUT APPROVAL`. Dòng audit của thay đổi đó là **ủy quyền thường trực**: từ đó, một lần lưu
+trữ tự động được tạo ở `APPROVED`, ghi lại ủy quyền đó, và chính lần khởi động đó làm việc với nó, nên không ai xem xét
+bản xem trước của nó trước khi nó chạy. Lưu lại thiết lập phê duyệt kèm một lý do và lời xác nhận trong khi bước đó đang
+tắt sẽ gia hạn nó (một ủy quyền thường trực mới); bật bước đó lên sẽ thu hồi nó. Ủy quyền thường trực còn hiệu lực khi
+user đã tắt bước đó vẫn đang hoạt động và vẫn giữ Run history archival and purge, và khi chưa có lần lưu trữ nào được
+tạo theo nó thất bại vì user đó. Sau một thất bại như vậy, nó vẫn mất hiệu lực, kể cả khi user đó hoạt động lại và giữ
+lại permission, cho đến khi một người giữ permission lưu lại thiết lập phê duyệt (gia hạn nó, hoặc bật bước phê
+duyệt). Khi nó không còn hiệu lực, `evaluate` trả lời `authorization_invalid` và không tạo lần lưu trữ nào,
+Administration hiển thị lý do, và `check.sh` báo `FAIL archival_proposal standing_authorization_invalid` khi các lần lưu
+trữ tự động đang bật.
+
+**Việc kiểm tra lại thẩm quyền của một lần lưu trữ.** Ngay trước khi giao bản sao lưu trước purge, và một lần nữa ngay
+trước khi purge, job kiểm tra thẩm quyền của lần lưu trữ:
+
+- một lần lưu trữ được yêu cầu: user đã yêu cầu nó;
+- một lần được đề xuất đã được phê duyệt: user đã phê duyệt nó;
+- một lần lưu trữ được tạo theo ủy quyền thường trực, mà không người nào đã xem xét, theo thứ tự này: bước phê duyệt,
+  bước này không được bật lên kể từ khi lần lưu trữ được tạo (gia hạn ủy quyền thì không tính); **Automatic runs**,
+  phải vẫn bật; mốc cắt của lần lưu trữ, mà thời hạn lưu giữ như nó đang được đặt lúc này phải vẫn cho phép (nó không
+  còn cho phép khi thời hạn đã được kéo dài qua mốc đó, hoặc bị xóa); rồi đến user của ủy quyền mà lần lưu trữ được tạo
+  theo.
+
+User đó phải vẫn đang hoạt động và vẫn giữ Run history archival and purge. Dù kiểm tra nào thất bại, lần lưu trữ trở
+thành `FAILED` và không có gì bị xóa, và `archive.sh` thoát với mã 3:
+
+- Khi một user không còn hoạt động hoặc không còn giữ permission, hoặc bước phê duyệt đã được bật lên, `check.sh` báo
+  `authorization_failed` kèm lý do (thay cho `last_run_failed`) cho đến khi một lần lưu trữ sau kết thúc. Khi đó hãy
+  yêu cầu một lần lưu trữ mới, hoặc phê duyệt lần được đề xuất kế tiếp. Khi user của ủy quyền thường trực làm lần lưu
+  trữ thất bại, ủy quyền đó vẫn mất hiệu lực, và các lần lưu trữ tự động chờ cho đến khi một người giữ permission lưu
+  lại thiết lập phê duyệt.
+- Khi **Automatic runs** đang tắt hoặc thời hạn lưu giữ không còn cho phép mốc cắt, lần lưu trữ thất bại như mọi lần
+  lưu trữ thất bại khác: `check.sh` báo `last_run_failed` kèm lý do cho đến khi một lần lưu trữ sau kết thúc, và ủy
+  quyền thường trực vẫn còn hiệu lực cho lần lưu trữ tự động kế tiếp.
+
+Vì vậy, một lần lưu trữ được tạo mà không cần phê duyệt vẫn có thể bị chặn trước khi nó purge: hãy tắt **Automatic
+runs**, hoặc bật bước phê duyệt (việc này cũng thu hồi ủy quyền thường trực), và lần kiểm tra lại kế tiếp của nó làm
+nó thất bại, không xóa gì. Kéo dài thời hạn lưu giữ sẽ chặn một lần lưu trữ như vậy có mốc cắt mà thời hạn mới không
+còn cho phép. Một lần lưu trữ đã ở `PURGING` thì đã qua cả hai lần kiểm tra lại. Các thiết lập này không bao giờ chặn
+một lần lưu trữ được yêu cầu hay một lần được đề xuất đã được phê duyệt: hãy hủy một lần như vậy trong Administration
+khi nó đang `APPROVED` hoặc `WAITING_FOR_COPY`.
+
 ### Kiểm tra một lần lưu trữ (Checking a run)
 
 - **Administration → History archival & purge** liệt kê mọi lần lưu trữ với trạng thái, các số đếm và, khi đã xuất,
   tên bản lưu trữ và SHA-256 của manifest.
 - `check.sh` in dòng `archival_proposal` (§2): `PASS` với lần đang mở (một lần ở `PURGING` kèm những gì nó đã purge
-  tới lúc đó), lần đã kết thúc gần nhất (kết quả của nó, những gì nó đã purge và đã bỏ qua), dung lượng trống, và yêu
-  cầu xóa vĩnh viễn đang mở và yêu cầu đã kết thúc gần nhất (`deletion request 7 APPROVED for 2 min`, `last deletion
-  request 6 COMPLETED`), hoặc `FAIL` nêu tên từng phát hiện: `copy_confirmation_overdue` (một lần lưu trữ đã chờ xác
-  nhận bản sao lâu hơn thiết lập **Report a waiting run after**), `last_run_failed` (lần đã kết thúc gần nhất là
-  `FAILED`), `archive_dir_unusable` (thư mục lưu trữ không tồn tại hoặc không ghi được), `copy_dir_unusable` (thư mục
-  sao chép đã được đặt nhưng chưa mount, không tồn tại, không ghi được hoặc nằm trên chính hệ thống tệp của thư mục
-  lưu trữ), `receipt_not_copied` (biên nhận purge của một lần lưu trữ mà job đã sao chép ra ngoài máy chủ bị thiếu hoặc
-  khác trong thư mục sao chép; lần khởi động kế tiếp sao chép lại nó) hoặc `deletion_request_waiting` (một yêu cầu xóa
-  vẫn còn mở, `APPROVED` hoặc `RUNNING`, hơn 15 phút sau khi được yêu cầu, `--deletion-wait-minutes`: tác vụ lưu trữ
-  lịch sử chưa thực hiện hoặc chưa hoàn tất nó, nên hãy kiểm tra tác vụ đã được bật chưa; một yêu cầu `APPROVED` đang
-  chờ phía sau một lần lưu trữ ở `RUNNING` hoặc `PURGING` nêu tên lần lưu trữ đó). Một yêu cầu xóa `FAILED` không phải
-  là phát hiện. Sự cố của một lần đối soát sau một lần purge hoặc
-  một lần xóa đứng đầu, là `reconcile_after_purge` (§8).
-- Báo cáo đầy đủ, chỉ đọc; nó cũng nêu yêu cầu xóa đang mở (`open_deletion_request`, kèm thời gian chờ của nó) và yêu
-  cầu đã kết thúc gần nhất (`last_finished_deletion_request`):
+  tới lúc đó; một lần đang chờ phê duyệt kèm thời gian nó đã chờ,
+  `run 7 PROPOSED waiting 2.0 days for approval (limit 7 days)`), lần đã kết thúc gần nhất (kết quả của nó, những gì
+  nó đã purge và đã bỏ qua), dung lượng trống, và yêu cầu xóa vĩnh viễn đang mở và yêu cầu đã kết thúc gần nhất
+  (`deletion request 7 APPROVED for 2 min`, `last deletion request 6 COMPLETED`), hoặc `FAIL` nêu tên từng phát hiện:
+  `copy_confirmation_overdue` (một lần lưu trữ đã chờ xác nhận bản sao lâu hơn thiết lập **Report a waiting run
+  after**), `approval_overdue` (một lần lưu trữ tự động đã chờ phê duyệt, `PROPOSED`, lâu hơn thiết lập đó: hãy phê
+  duyệt hoặc bác bỏ nó), `last_run_failed` (lần đã kết thúc gần nhất là `FAILED`), `authorization_failed` (được nêu
+  thay cho `last_run_failed` khi lần đó thất bại vì nó không còn chạy được theo thẩm quyền của nó, kèm lý do: Các lần
+  lưu trữ tự động, ở trên), `standing_authorization_invalid` (các lần lưu trữ tự động đang bật mà không có bước phê
+  duyệt, và ủy quyền thường trực của nó không còn hiệu lực, kèm lý do: Các lần lưu trữ tự động, ở trên),
+  `archive_dir_unusable` (thư mục lưu trữ không tồn tại hoặc không ghi được), `copy_dir_unusable` (thư mục sao chép đã
+  được đặt nhưng chưa mount, không tồn tại, không ghi được hoặc nằm trên chính hệ thống tệp của thư mục lưu trữ),
+  `receipt_not_copied` (biên nhận purge của một lần lưu trữ mà job đã sao chép ra ngoài máy chủ bị thiếu hoặc khác
+  trong thư mục sao chép; lần khởi động kế tiếp sao chép lại nó) hoặc `deletion_request_waiting` (một yêu cầu xóa vẫn
+  còn mở, `APPROVED` hoặc `RUNNING`, hơn 15 phút sau khi được yêu cầu, `--deletion-wait-minutes`: tác vụ lưu trữ lịch
+  sử chưa thực hiện hoặc chưa hoàn tất nó, nên hãy kiểm tra tác vụ đã được bật chưa; một yêu cầu `APPROVED` đang chờ
+  phía sau một lần lưu trữ ở `RUNNING` hoặc `PURGING` nêu tên lần lưu trữ đó). Một yêu cầu xóa `FAILED` không phải là
+  phát hiện. Sự cố của một lần đối soát sau một lần purge hoặc một lần xóa đứng đầu, là `reconcile_after_purge` (§8).
+- Báo cáo đầy đủ, chỉ đọc; nó cũng nêu yêu cầu xóa đang mở (`open_deletion_request`, kèm thời gian chờ của nó), yêu
+  cầu đã kết thúc gần nhất (`last_finished_deletion_request`) và các lần lưu trữ tự động (`automatic_runs`: chúng có
+  đang bật không, bước phê duyệt có đang bật không, và ủy quyền thường trực cùng hiệu lực và `problem` của nó):
 
   ```sh
   $PF --profile ops run --rm --no-deps -T --user "$(id -u):$(id -g)" maintenance status
@@ -1769,15 +1902,17 @@ rm -r ~/partflow-deployments/.archive.lock
 
 | Trạng thái | Ý nghĩa |
 | --- | --- |
-| `APPROVED` | Đã được yêu cầu trong Administration; phần việc hằng giờ kế tiếp sẽ xuất nó. Vẫn có thể hủy. |
+| `PROPOSED` | Một lần lưu trữ tự động đang chờ một người giữ Run history archival and purge phê duyệt hoặc bác bỏ (Các lần lưu trữ tự động, ở trên). Job không làm gì với nó. Không thể hủy: hãy bác bỏ nó. |
+| `APPROVED` | Đã được yêu cầu trong Administration, là một lần được đề xuất đã được phê duyệt, hoặc là một lần lưu trữ tự động được tạo theo ủy quyền thường trực; phần việc hằng giờ kế tiếp sẽ xuất nó (một lần lưu trữ tự động được tạo ở `APPROVED` thì ngay trong lần khởi động đó). Vẫn có thể hủy. |
 | `RUNNING` | Job đang xuất, kiểm tra hoặc sao chép nó, hoặc tạo bản sao lưu trước purge của nó. Không thể hủy. |
 | `WAITING_FOR_COPY` | Đã kiểm tra và công bố; đang chờ bản sao ngoài máy chủ hoặc một xác nhận. Có thể hủy. |
 | `PURGING` | Job đang xóa các Movement đã lưu trữ của nó, từng lô một. Không thể hủy; một lần purge đã dừng (khởi động lại, hoặc một lỗi database tạm thời như mất kết nối hay deadlock) được lần khởi động kế tiếp tiếp tục. |
 | `COMPLETED` | Đã sao chép ra ngoài máy chủ và đã purge: kết quả là `PURGED`. Một lần lưu trữ kết thúc trước khi có việc purge có kết quả `EXPORT_ONLY` (đã xuất, không có gì bị xóa). |
 | `COMPLETED_WITH_SKIPS` | Đã kết thúc, nhưng một số thành phần đã thay đổi sau khi export và ở lại trong database; biên nhận liệt kê chúng. Kết quả là `PURGED`, hoặc `NOTHING_PURGED` khi mọi thành phần đều bị bỏ qua. `check.sh` cho qua và nêu các phần bỏ qua. |
 | `NOTHING_ELIGIBLE` | Không có gì đủ điều kiện tại mốc cắt (cutoff) của nó khi bước export bắt đầu. |
-| `CANCELLED` | Đã bị hủy trong Administration. Thư mục lưu trữ đã công bố vẫn được giữ. |
-| `FAILED` | Một kiểm tra thất bại; lý do được hiển thị. Không có gì bị xóa, trừ khi lần lưu trữ thất bại khi đang `PURGING` (số bị xóa khác với các bản ghi của nó, guard từ chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ; một lỗi database tạm thời thì để nó ở lại `PURGING`): khi đó nó giữ các thành phần trọn vẹn đã purge, và biên nhận của nó liệt kê chúng. |
+| `DISMISSED` | Một lần được đề xuất đã bị một người giữ Run history archival and purge bác bỏ. Không có gì được xuất hay bị xóa. |
+| `CANCELLED` | Đã bị hủy trong Administration (làm được khi đang `APPROVED` hoặc `WAITING_FOR_COPY`). Thư mục lưu trữ đã công bố vẫn được giữ. |
+| `FAILED` | Một kiểm tra thất bại; lý do được hiển thị (với một lần lưu trữ không còn chạy được theo thẩm quyền của nó, cũng là một thất bại về ủy quyền: Các lần lưu trữ tự động, ở trên). Không có gì bị xóa, trừ khi lần lưu trữ thất bại khi đang `PURGING` (số bị xóa khác với các bản ghi của nó, guard từ chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ; một lỗi database tạm thời thì để nó ở lại `PURGING`): khi đó nó giữ các thành phần trọn vẹn đã purge, và biên nhận của nó liệt kê chúng. |
 
 ### Bản sao lưu trước purge (The pre-purge backup)
 
@@ -1868,22 +2003,29 @@ máy chủ trước khi bị purge. Có hai cách:
 
 Một lần lưu trữ chờ xác nhận lâu hơn thiết lập **Report a waiting run after** trong Administration (ban đầu là
 7 ngày) khiến `check.sh` báo
-`FAIL archival_proposal copy_confirmation_overdue`. Một lần lưu trữ đang chờ không bao giờ chặn một bản phát hành.
+`FAIL archival_proposal copy_confirmation_overdue`; cùng thiết lập đó giới hạn thời gian một lần lưu trữ được đề xuất
+chờ phê duyệt (`approval_overdue`, Các lần lưu trữ tự động, ở trên). Một lần lưu trữ đang chờ không bao giờ chặn một
+bản phát hành.
 
 ### Một lần lưu trữ thất bại (A failed run)
 
 Một lần lưu trữ trở thành `FAILED` khi một kiểm tra thất bại: ví dụ mốc cắt trở nên mới hơn thời hạn ngắn nhất được
-phép, số đếm vượt quá bản xem trước, các tệp khác với database, thư mục đã công bố bị thay đổi hoặc biến mất, User đã
-yêu cầu nó không còn hoạt động hoặc không còn giữ Run history archival and purge, hoặc job dừng khi lần lưu trữ đang
-`RUNNING` (kể cả sau một bản sao lưu trước purge thất bại). Khi đó `archive.sh` thoát với mã 3 một lần, và `check.sh`
-báo `last_run_failed` cho đến khi một lần lưu trữ sau kết thúc.
+phép, số đếm vượt quá bản xem trước, các tệp khác với database, thư mục đã công bố bị thay đổi hoặc biến mất, lần lưu
+trữ không còn chạy được theo thẩm quyền của nó (user đã yêu cầu, đã phê duyệt nó hoặc đã tắt bước phê duyệt không còn
+hoạt động hoặc không còn giữ Run history archival and purge, hoặc bước phê duyệt đã được bật lại sau khi một lần lưu
+trữ tự động được tạo mà không cần phê duyệt), các thiết lập không còn cho phép một lần lưu trữ tự động được tạo mà
+không cần phê duyệt chạy (**Automatic runs** đã bị tắt, hoặc thời hạn lưu giữ không còn cho phép mốc cắt của nó: Các
+lần lưu trữ tự động, ở trên), hoặc job dừng khi lần lưu trữ đang `RUNNING` (kể cả sau một bản sao lưu trước purge thất
+bại). Khi đó `archive.sh` thoát với mã 3 một lần, và `check.sh` báo `last_run_failed`, hoặc `authorization_failed` với
+một lần lưu trữ không còn chạy được theo thẩm quyền của nó, cho đến khi một lần lưu trữ sau kết thúc.
 
 1. Đọc lý do: trong Administration, trong email báo lỗi, hoặc trong `<records-dir>/archive/<UTC>/` (tệp `.json` và
    `.log` của bước đó).
 2. Sửa nguyên nhân, ví dụ giải phóng dung lượng trong thư mục lưu trữ hoặc thư mục sao lưu, hoặc mount thư mục sao
-   chép.
-3. Yêu cầu một lần lưu trữ mới trong Administration. Một lần thất bại không bao giờ được tiếp tục; lần mới ghi một thư
-   mục lưu trữ mới.
+   chép. Khi user của ủy quyền thường trực làm lần lưu trữ thất bại, một người giữ Run history archival and purge lưu
+   lại thiết lập phê duyệt (Các lần lưu trữ tự động, ở trên).
+3. Yêu cầu một lần lưu trữ mới trong Administration, hoặc để các lần lưu trữ tự động tạo lần kế tiếp. Một lần thất bại
+   không bao giờ được tiếp tục; lần mới ghi một thư mục lưu trữ mới.
 
 Không có gì bị xóa, trừ khi lần lưu trữ thất bại khi đang `PURGING` (số bị xóa khác với các bản ghi của nó, guard từ
 chối, bản lưu trữ đã công bố bị thay đổi, một lỗi nội bộ): khi đó nó giữ các thành phần trọn vẹn đã purge, biên nhận
@@ -1931,7 +2073,8 @@ chủ mới ([`SYNOLOGY_NAS.vi.md`](./SYNOLOGY_NAS.vi.md) §11.8), và xóa nó 
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §10: các yêu cầu xóa vĩnh viễn, được tạo trong PartFlow bởi người giữ Delete Work Orders and Part Numbers permanently hoặc bằng `pf delete-permanently`, được job lưu trữ lịch sử thực hiện trong vòng 5 phút sau một bản sao lưu trước purge, và cần job đó đã được thiết lập; các dòng audit của các lần xóa trước được giữ lại; §11: kiểm tra nhẹ ở mỗi lần khởi động, các bước xóa, nhãn sao lưu `deletion-<id>-<giờ UTC>`, dòng `DELETION` và mọi mã thoát 2 của `delete` được làm rõ qua `status`; §8: sự cố của một phát hiện đối soát sau một lần xóa, và `deletion_request_waiting`; §3 và §11: các lần xóa và các lần purge dùng chung Pre-purge backups kept; §6: hủy các yêu cầu `APPROVED` không còn cần sau một lần khôi phục; §2, §7, §9 và bảng `pf` cho các yêu cầu. |
+| 2026-11-18 | uncommitted | §11: các lần lưu trữ tự động: `evaluate` ở đầu phần việc hằng giờ và dòng `EVALUATE` của `archive.sh`, các trạng thái `PROPOSED` và `DISMISSED`, việc phê duyệt và bác bỏ trong Administration, ủy quyền thường trực và việc kiểm tra lại thẩm quyền của một lần lưu trữ, việc này cũng chặn một lần lưu trữ được tạo mà không cần phê duyệt trước khi nó purge khi Automatic runs bị tắt, bước phê duyệt được bật lên hoặc thời hạn lưu giữ không còn cho phép mốc cắt của nó; §2, §8 và §11: `approval_overdue`, `authorization_failed` và `standing_authorization_invalid`; §1, §8, §9, §10 và bảng `pf` cho việc đánh giá và các lần lưu trữ được đề xuất. |
+| 2026-11-18 | `1874636` | §10: các yêu cầu xóa vĩnh viễn, được tạo trong PartFlow bởi người giữ Delete Work Orders and Part Numbers permanently hoặc bằng `pf delete-permanently`, được job lưu trữ lịch sử thực hiện trong vòng 5 phút sau một bản sao lưu trước purge, và cần job đó đã được thiết lập; các dòng audit của các lần xóa trước được giữ lại; §11: kiểm tra nhẹ ở mỗi lần khởi động, các bước xóa, nhãn sao lưu `deletion-<id>-<giờ UTC>`, dòng `DELETION` và mọi mã thoát 2 của `delete` được làm rõ qua `status`; §8: sự cố của một phát hiện đối soát sau một lần xóa, và `deletion_request_waiting`; §3 và §11: các lần xóa và các lần purge dùng chung Pre-purge backups kept; §6: hủy các yêu cầu `APPROVED` không còn cần sau một lần khôi phục; §2, §7, §9 và bảng `pf` cho các yêu cầu. |
 | 2026-11-18 | `d094f5e` | §6 và §8: tắt tác vụ lưu trữ lịch sử trước mọi lần khôi phục, vì một lần lưu trữ `PURGING` được khôi phục sẽ tiếp tục purge; §8 và §11: một lỗi database tạm thời để lần purge ở lại `PURGING` cho lần khởi động kế tiếp, lần đó đối soát khi nó kết thúc. |
 | 2026-11-18 | `d094f5e` | §11: job lưu trữ lịch sử purge lịch sử Movement đã lưu trữ sau bản sao ngoài máy chủ và một bản sao lưu trước purge, rồi đối soát; các trạng thái `PURGING` và `COMPLETED_WITH_SKIPS`, các kết quả `PURGED` và `NOTHING_PURGED`, biên nhận purge, việc tiếp tục một lần purge, bản sao lưu trước purge và thời gian chờ của nó, và lấy lại dung lượng đĩa bằng `VACUUM FULL`; §8: sự cố của một phát hiện đối soát sau một lần purge, trong lúc đó job lưu trữ không làm việc với lần lưu trữ nào; §3: loại sao lưu `pre-purge`, việc xoay vòng nó và `--lock-wait-minutes`; §1, §2, §7, §9, §10 và bảng `pf` cho việc purge. |
 | 2026-11-17 | `2f12d33` | §11 và bảng `pf`: job lưu trữ lịch sử (`archive.sh`, `pf archive`), chỉ xuất và sao chép bản lưu trữ và không bao giờ xóa gì; §1, §2, §6, §8 và §9 cho hồ sơ, các dòng kiểm tra, việc chuyển máy chủ, sự cố và lịch làm việc của nó. |

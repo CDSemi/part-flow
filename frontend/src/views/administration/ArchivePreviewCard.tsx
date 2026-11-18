@@ -9,10 +9,12 @@ import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ModalDialog } from '../../components/ModalDialog';
 import { formatIsoDate } from '../dates';
 import {
+  AFTER_PURGE,
   countsLine,
   eligibleRange,
   formatArchiveSize,
   formatPreviewDuration,
+  runEffectText,
 } from './archive-runs';
 import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
@@ -33,10 +35,6 @@ import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
 const REQUEST_UNKNOWN =
   'The server did not answer, so the run may or may not have been requested. Check the runs table before requesting again.';
-
-/** What follows a purge, said on the card and in the request. */
-const AFTER_PURGE =
-  'Tracking then shows one “History archived in run N” line per archived flow, and archived commands can no longer be undone.';
 
 export function ArchivePreviewCard({
   previewSeconds,
@@ -275,9 +273,7 @@ function RequestRunDialog({
   return (
     <ModalDialog label={title} onClose={guard.requestClose}>
       <h3>{title}</h3>
-      <p className="admin-idnote">
-        {`The run exports the Movement history before ${formatIsoDate(preview.cutoffDate)} to archive files on the server and, after the off-host copy and a pre-purge backup, deletes it from the database. ${AFTER_PURGE}`}
-      </p>
+      <p className="admin-idnote">{runEffectText(preview.cutoffDate)}</p>
       <div className="admin-identity">
         <div className="idrow">
           <span className="k">Cutoff date</span>

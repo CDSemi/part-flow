@@ -17,15 +17,18 @@ line from `archive` instead of this one. backup_age names the newest backup of a
 
 `archive` (deploy/production/check.sh): prints exactly one line, `PASS|FAIL archival_proposal <reason>`, from the report
 of `python -m app.cli history-archive status` (the `maintenance` service): FAIL naming each finding
-(copy_confirmation_overdue, last_run_failed, archive_dir_unusable, copy_dir_unusable, receipt_not_copied), and
-deletion_request_waiting when the open permanent deletion request, APPROVED or RUNNING, was requested longer ago than
---deletion-wait-minutes (1-1440, default 15: the history archive task has not carried it out, or has not finished it;
-an APPROVED request behind a run that is RUNNING or PURGING names that run); FAIL when the report is not valid
-(report_version 1, command `history-archive status`, exit_code equal to RC) or carries an error; otherwise PASS with
-the open run (a PURGING run with what it purged so far), the last finished run (its result, what it purged and what it
-skipped), the archive folder's free space, and the open and the last finished deletion request in the terms of
-archive.sh's DELETION line (`deletion request <id> <state>`). A FAILED deletion request is not a FAIL: its requester
-sees it in PartFlow. Exit 0 PASS, 1 FAIL, 2 usage error only.
+(copy_confirmation_overdue, approval_overdue, last_run_failed, authorization_failed, standing_authorization_invalid,
+archive_dir_unusable, copy_dir_unusable, receipt_not_copied; a run that failed because the User of its authority may no
+longer run it is named once, by authorization_failed instead of last_run_failed), and deletion_request_waiting when the
+open permanent deletion request, APPROVED or RUNNING, was requested longer ago than --deletion-wait-minutes (1-1440,
+default 15: the history archive task has not carried it out, or has not finished it; an APPROVED request behind a run
+that is RUNNING or PURGING names that run); FAIL when the report is not valid (report_version 1, command
+`history-archive status`, exit_code equal to RC) or carries an error; otherwise PASS with the open run (a PURGING run
+with what it purged so far, a run waiting for its copy confirmation or a PROPOSED run waiting for its approval with how
+long it has waited), the last finished run (its result, what it purged and what it skipped), the archive folder's free
+space, and the open and the last finished deletion request in the terms of archive.sh's DELETION line
+(`deletion request <id> <state>`). A FAILED deletion request is not a FAIL: its requester sees it in PartFlow. Exit 0
+PASS, 1 FAIL, 2 usage error only.
 --copy-reason: why check.sh did not mount the copy folder; it explains copy_dir_unusable. --purge-reconcile: the
 incident record that archive.sh writes when the reconcile after a purge or a deletion did not end clean
 (<records-dir>/archive/reconcile-after-purge, key=value lines; `request` names the deletion request of an incident after
@@ -427,10 +430,23 @@ def archive_line(document, rc, copy_reason=None, incident=None, wait_minutes=DEL
             if code == "copy_confirmation_overdue":
                 texts.append(f"{code}: {run_text(open_run)} has waited {days(open_run.get('waiting_seconds'))} for its"
                              f" off-host copy confirmation (limit {document.get('max_wait_days')} days)")
+            elif code == "approval_overdue":
+                texts.append(f"{code}: {run_text(open_run)} has waited {days(open_run.get('age_seconds'))} for approval"
+                             f" (limit {document.get('max_wait_days')} days); approve or dismiss it in Administration →"
+                             " History archival & purge")
+            elif code == "last_run_failed" and "authorization_failed" in findings:
+                # The same run (the last finished one): authorization_failed names it, with its reason.
+                continue
             elif code == "last_run_failed":
                 purged = purged_text(last)
                 after = f" after purging {purged}" if purged else ""
                 texts.append(f"{code}: {run_text(last)}{after}: {last.get('failure_reason') or 'no reason recorded'}")
+            elif code == "authorization_failed":
+                texts.append(f"{code}: {run_text(last)}: {last.get('failure_reason') or 'no reason recorded'}")
+            elif code == "standing_authorization_invalid":
+                authorization = section(section(document, "automatic_runs"), "standing_authorization")
+                problem = authorization.get("problem") or "the standing authorization of the automatic runs is not valid"
+                texts.append(f"{code}: {problem}")
             elif code == "archive_dir_unusable":
                 texts.append(f"{code}: the archive folder (PARTFLOW_ARCHIVE_DIR) is missing or not writable")
             elif code == "copy_dir_unusable" and copy_reason:
@@ -453,6 +469,10 @@ def archive_line(document, rc, copy_reason=None, incident=None, wait_minutes=DEL
             text += f" ({purged} purged so far)"
         if is_int(open_run.get("waiting_seconds")):
             text += (f" waiting {days(open_run.get('waiting_seconds'))} for its copy confirmation"
+                     f" (limit {document.get('max_wait_days')} days)")
+        elif open_run.get("state") == "PROPOSED" and is_int(open_run.get("age_seconds")):
+            # A proposed run waits for its approval since it was created (it has no waiting_seconds).
+            text += (f" waiting {days(open_run.get('age_seconds'))} for approval"
                      f" (limit {document.get('max_wait_days')} days)")
         parts.append(text)
     else:

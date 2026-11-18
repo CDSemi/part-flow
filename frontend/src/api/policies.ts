@@ -18,9 +18,10 @@
 // replaced as a whole (its fields share a cross-field rule). It also
 // holds the settings of History archival & purge (the Movement-history
 // retention period, the shortest allowed period, the Start minute of the
-// host job, the preview time limit, the wait limit and the purge batch
-// limits; a partial merge, Phase 16), which the host job and the preview
-// read. Security → User sign-in reads the user sign-in
+// host job, the preview time limit, the wait limit, the purge batch
+// limits and the automatic runs with the standing authorization of their
+// approval step; a partial merge, Phase 16), which the host job and the
+// preview read. Security → User sign-in reads the user sign-in
 // policy (how long a user's sign-in lasts, when failed sign-ins lock an
 // account, whether an administrator-set password must be replaced) —
 // readable by any signed-in user, written as a partial merge by users
@@ -212,6 +213,33 @@ export async function updateDueSoonPolicy(
   return toDueSoonPolicy(wire);
 }
 
+/** What decides that an automatic archival run is needed: the live
+ * Movement rows, the age of the oldest retained Movement, or the size of
+ * the database. */
+export const ARCHIVE_MEASURES = [
+  'LIVE_MOVEMENT_ROWS',
+  'RETAINED_HISTORY_AGE',
+  'DATABASE_SIZE',
+] as const;
+
+export type ArchiveMeasure = (typeof ARCHIVE_MEASURES)[number];
+
+/** The standing authorization of automatic runs (while their approval
+ * step is off): the audited change that switched the step off, with its
+ * User as they stand now. */
+export interface StandingAuthorization {
+  auditEventId: number;
+  /** Who switched the approval step off (null: the server names nobody). */
+  authorizedBy: { userId: number; displayName: string } | null;
+  authorizedAt: string | null;
+  reason: string | null;
+  /** That User is still active and still holds Run history archival and
+   * purge (read live by the server). */
+  valid: boolean;
+  /** Why it is no longer valid, as the server words it; null while valid. */
+  problem: string | null;
+}
+
 /** The settings of Administration → History archival & purge. */
 export interface RetentionPolicy {
   /** The Movement-history retention period in whole months; null = no
@@ -224,19 +252,44 @@ export interface RetentionPolicy {
   startMinute: number;
   /** The time limit of a preview, in seconds. */
   previewSeconds: number;
-  /** Days a run may wait for its off-host copy confirmation (or a failed
-   * last run may stand) before the monitoring line fails. */
+  /** Days a run may wait for its approval or its off-host copy
+   * confirmation (or a failed last run may stand) before the monitoring
+   * line fails. */
   maxWaitDays: number;
   /** The most Movements one purge batch deletes (whole components; a
    * larger component is a batch of its own). */
   purgeBatchMovements: number;
   /** The most Part Numbers one purge batch locks. */
   purgeBatchPartNumbers: number;
+  /** The host job creates runs by itself (archival design B step 4). */
+  automaticRuns: boolean;
+  /** What decides that an automatic run is needed (an `ArchiveMeasure`,
+   * as the server answered it). */
+  measure: string;
+  /** Live Movement rows above which the row measure passes. */
+  limitMovementRows: number;
+  /** Months the oldest retained Movement must be older than the cutoff
+   * by more than, for the age measure to pass. */
+  limitHistoryMonths: number;
+  /** Database size in GiB above which the size measure passes. */
+  limitDatabaseGib: number;
+  /** An automatic run waits for a person's approval (`PROPOSED`). */
+  approvalRequired: boolean;
+  /** Days between automatic runs, from the end of the last one. */
+  intervalDays: number;
+  /** Set exactly while the approval step is off. */
+  standingAuthorization: StandingAuthorization | null;
   /** The policy singleton's timestamp (shared by every section). */
   updatedAt: string;
 }
 
-export type RetentionSetting = Exclude<keyof RetentionPolicy, 'updatedAt'>;
+export type RetentionSetting = Exclude<
+  keyof RetentionPolicy,
+  'updatedAt' | 'standingAuthorization'
+>;
+
+/** Some settings of History archival & purge (a partial merge). */
+export type RetentionPatch = Partial<Pick<RetentionPolicy, RetentionSetting>>;
 
 /** The wire name of each setting. */
 const RETENTION_WIRE: Record<RetentionSetting, string> = {
@@ -247,25 +300,79 @@ const RETENTION_WIRE: Record<RetentionSetting, string> = {
   maxWaitDays: 'archive_max_wait_days',
   purgeBatchMovements: 'archive_purge_batch_movements',
   purgeBatchPartNumbers: 'archive_purge_batch_part_numbers',
+  automaticRuns: 'archive_automatic_runs',
+  measure: 'archive_measure',
+  limitMovementRows: 'archive_limit_movement_rows',
+  limitHistoryMonths: 'archive_limit_history_months',
+  limitDatabaseGib: 'archive_limit_database_gib',
+  approvalRequired: 'archive_approval_required',
+  intervalDays: 'archive_interval_days',
 };
 
+/** The settings that are not whole numbers (all others are). */
+const RETENTION_TYPES: Partial<Record<RetentionSetting, 'boolean' | 'string'>> =
+  {
+    automaticRuns: 'boolean',
+    measure: 'string',
+    approvalRequired: 'boolean',
+  };
+
 const RETENTION_POLICY_PATH = '/api/policies/data-retention';
+
+/** An ApiError, so the card states this reason (a plain Error reads as
+ * "could not be reached", which a 200 answer was not). */
+function missingSetting(name: string): ApiError {
+  return new ApiError(
+    200,
+    `The server answered without the History archival & purge setting ${name}.`,
+  );
+}
+
+interface StandingAuthorizationWire {
+  audit_event_id: number;
+  authorized_by: { user_id: number; display_name: string } | null;
+  authorized_at: string | null;
+  reason: string | null;
+  valid: boolean;
+  problem: string | null;
+}
+
+function toStandingAuthorization(value: unknown): StandingAuthorization | null {
+  if (value === null) return null;
+  if (typeof value !== 'object') {
+    throw missingSetting('standing_authorization');
+  }
+  const wire = value as StandingAuthorizationWire;
+  return {
+    auditEventId: wire.audit_event_id,
+    authorizedBy:
+      wire.authorized_by === null
+        ? null
+        : {
+            userId: wire.authorized_by.user_id,
+            displayName: wire.authorized_by.display_name,
+          },
+    authorizedAt: wire.authorized_at,
+    reason: wire.reason,
+    valid: wire.valid,
+    problem: wire.problem,
+  };
+}
 
 function toRetentionPolicy(wire: Record<string, unknown>): RetentionPolicy {
   const policy: Record<string, unknown> = { updatedAt: wire.updated_at };
   for (const [setting, name] of Object.entries(RETENTION_WIRE)) {
     const value = wire[name];
+    const expected = RETENTION_TYPES[setting as RetentionSetting] ?? 'number';
     const nullable = setting === 'retentionPeriodMonths';
-    if (typeof value !== 'number' && !(nullable && value === null)) {
-      // An ApiError, so the card states this reason (a plain Error reads
-      // as "could not be reached", which a 200 answer was not).
-      throw new ApiError(
-        200,
-        `The server answered without the History archival & purge setting ${name}.`,
-      );
+    if (typeof value !== expected && !(nullable && value === null)) {
+      throw missingSetting(name);
     }
     policy[setting] = value;
   }
+  policy.standingAuthorization = toStandingAuthorization(
+    wire.standing_authorization,
+  );
   return policy as unknown as RetentionPolicy;
 }
 
@@ -277,13 +384,19 @@ export async function getRetentionPolicy(): Promise<RetentionPolicy> {
   );
 }
 
-/** Store ONLY the provided settings (a partial merge: every other setting
+/**
+ * Store ONLY the provided settings (a partial merge: every other setting
  * keeps its stored value). `retentionPeriodMonths: null` clears the
- * retention period; `reason` is sent with a change of the shortest
- * allowed period (the server requires it then). */
+ * retention period. `reason` is sent with a change of the shortest
+ * allowed period and with `confirmation`, the typed confirmation that
+ * switches the approval step of automatic runs off or, while it is off,
+ * renews its standing authorization; the server checks both and answers
+ * its own message.
+ */
 export async function updateRetentionPolicy(
-  patch: Partial<Omit<RetentionPolicy, 'updatedAt'>>,
+  patch: RetentionPatch,
   reason?: string,
+  confirmation?: string,
 ): Promise<RetentionPolicy> {
   const body: Record<string, unknown> = {};
   for (const [setting, name] of Object.entries(RETENTION_WIRE)) {
@@ -291,6 +404,7 @@ export async function updateRetentionPolicy(
     if (value !== undefined) body[name] = value;
   }
   if (reason !== undefined) body.reason = reason;
+  if (confirmation !== undefined) body.confirmation = confirmation;
   return toRetentionPolicy(
     await apiRequest<Record<string, unknown>>(RETENTION_POLICY_PATH, {
       method: 'PUT',

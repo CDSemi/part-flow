@@ -30,8 +30,12 @@ before the host job's status reports it (1-365, initially 7), the Start
 minute of the host job's hourly work (0-59, initially 20), the preview
 time limit (10-600 seconds, initially 90) and (design B step 2) the purge
 batch limits — Movements per batch (100-1,000,000, initially 50,000) and
-Part Numbers per batch (1-1000, initially 20) —, a partial merge guarded by
-Run history archival and purge. Only the
+Part Numbers per batch (1-1000, initially 20) — and (design B step 4) the
+automatic runs — on or off (off), the measure and the limit of each, the
+approval step (on) and the days between automatic runs (7); switching the
+approval step off needs a reason and a typed confirmation, and the setting
+keeps the id of that audit row, the standing authorization —, a partial
+merge guarded by Run history archival and purge. Only the
 archival module (``app.application.history_archive``) and the host job read
 them — never production workflow logic (PROJECT_PROFILE §28 "retention
 settings live in Administration/configuration"). Audited under its own
@@ -108,9 +112,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.application import audit, users
-from app.application.common import UNSET, UnsetType, commit
+from app.application.common import UNSET, UnsetType, commit, flush
 from app.application.errors import InvalidInputError, NotFoundError
-from app.domain.enums import AuditEntityType, AuditEventType, MailSecurity
+from app.domain.enums import AuditEntityType, AuditEventType, HistoryArchiveMeasure, MailSecurity
 from app.domain.password_policy import PasswordRules
 from app.infrastructure.mail import SmtpServer
 from app.infrastructure.models import (
@@ -379,7 +383,9 @@ def update_due_soon_policy(
 
 
 #: The settings of Administration → History archival & purge, in the order
-#: of its audited snapshot (``entity_id`` ``data-retention``).
+#: of its audited snapshot (``entity_id`` ``data-retention``). The standing
+#: authorization's audit row id (``archive_authorization_id``) is not part of
+#: it: the audit row that grants it is the authorization itself.
 HISTORY_ARCHIVE_COLUMNS: Final = (
     "retention_period_months",
     "shortest_retention_months",
@@ -388,7 +394,22 @@ HISTORY_ARCHIVE_COLUMNS: Final = (
     "archive_preview_seconds",
     "archive_purge_batch_movements",
     "archive_purge_batch_part_numbers",
+    "archive_automatic_runs",
+    "archive_measure",
+    "archive_limit_movement_rows",
+    "archive_limit_history_months",
+    "archive_limit_database_gib",
+    "archive_approval_required",
+    "archive_interval_days",
 )
+#: What a holder of the archival key types to switch the approval step of
+#: automatic runs off (compared without regard to letter case or spacing).
+STANDING_AUTHORIZATION_CONFIRMATION: Final = "RUN WITHOUT APPROVAL"
+#: The audit row metadata ``standing_authorization`` of a change that switches
+#: the approval step off or renews its authorization, and of one that switches
+#: it on again (the host job reads the latter: design §6.2).
+STANDING_AUTHORIZATION_GRANTED: Final = "granted"
+STANDING_AUTHORIZATION_WITHDRAWN: Final = "withdrawn"
 _SHORTEST_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["shortest_retention_months"]
 _MAX_WAIT_DAYS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_max_wait_days"]
 _START_MINUTE_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_start_minute"]
@@ -419,8 +440,45 @@ _BATCH_PART_NUMBERS_MESSAGE: Final = (
     "The Part Numbers per purge batch must be a whole number from"
     f" {_BATCH_PART_NUMBERS_RANGE[0]} to {_BATCH_PART_NUMBERS_RANGE[1]}."
 )
+_LIMIT_ROWS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_limit_movement_rows"]
+_LIMIT_MONTHS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_limit_history_months"]
+_LIMIT_GIB_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_limit_database_gib"]
+_INTERVAL_DAYS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_interval_days"]
+_LIMIT_ROWS_MESSAGE: Final = (
+    "The limit of live Movement rows must be a whole number from"
+    f" {_LIMIT_ROWS_RANGE[0]} to {_LIMIT_ROWS_RANGE[1]}."
+)
+_LIMIT_MONTHS_MESSAGE: Final = (
+    "The limit of the age of retained history must be a whole number of months from"
+    f" {_LIMIT_MONTHS_RANGE[0]} to {_LIMIT_MONTHS_RANGE[1]}."
+)
+_LIMIT_GIB_MESSAGE: Final = (
+    "The limit of the database size must be a whole number of GiB from"
+    f" {_LIMIT_GIB_RANGE[0]} to {_LIMIT_GIB_RANGE[1]}."
+)
+_INTERVAL_DAYS_MESSAGE: Final = (
+    "The days between automatic runs must be a whole number from"
+    f" {_INTERVAL_DAYS_RANGE[0]} to {_INTERVAL_DAYS_RANGE[1]}."
+)
+_AUTOMATIC_RUNS_MESSAGE: Final = "Automatic runs must be On or Off."
+_APPROVAL_REQUIRED_MESSAGE: Final = "The approval step of automatic runs must be On or Off."
+_MEASURE_MESSAGE: Final = (
+    "Choose the measure of automatic runs: live Movement rows (LIVE_MOVEMENT_ROWS), the age of"
+    " retained history (RETAINED_HISTORY_AGE) or the database size (DATABASE_SIZE)."
+)
 _HISTORY_ARCHIVE_REASON_MESSAGE: Final = (
     "Enter the reason for changing the shortest allowed period: 1 to 500 characters of plain text."
+)
+_AUTHORIZATION_REASON_MESSAGE: Final = (
+    "Enter the reason for letting automatic runs start without approval: 1 to 500 characters of"
+    " plain text."
+)
+_CONFIRMATION_MESSAGE: Final = (
+    f"Type {STANDING_AUTHORIZATION_CONFIRMATION} to confirm that automatic runs archive and purge"
+    " history without anyone approving them first."
+)
+_CONFIRMATION_UNNEEDED_MESSAGE: Final = (
+    "Type the confirmation only to switch off the approval step of automatic runs."
 )
 
 
@@ -446,8 +504,42 @@ def maintenance_reason(value: object, message: str) -> str:
     return trimmed
 
 
+def _grants_standing_authorization(
+    before: dict[str, Any], after: dict[str, Any], confirmation: object
+) -> bool:
+    """Whether this change switches the approval step off, or renews its authorization.
+
+    Switching the approval step of automatic runs off needs the typed
+    confirmation; with the step already off, a confirmation renews the
+    standing authorization (a holder of the key "saves the approval setting
+    again", for example after the User who switched it off lost the key, or
+    after a run failed under it). A confirmation while the step stays on is
+    refused.
+    """
+    given = not isinstance(confirmation, UnsetType) and confirmation is not None
+    if after["archive_approval_required"]:
+        if given:
+            raise InvalidInputError(_CONFIRMATION_UNNEEDED_MESSAGE)
+        return False
+    if not given:
+        if before["archive_approval_required"]:
+            raise InvalidInputError(_CONFIRMATION_MESSAGE)
+        return False
+    if (
+        not isinstance(confirmation, str)
+        or " ".join(confirmation.split()).upper() != STANDING_AUTHORIZATION_CONFIRMATION
+    ):
+        raise InvalidInputError(_CONFIRMATION_MESSAGE)
+    return True
+
+
 def update_history_archive_policy(
-    session: Session, *, changes: dict[str, object], reason: object = UNSET, actor_user_id: int
+    session: Session,
+    *,
+    changes: dict[str, object],
+    reason: object = UNSET,
+    confirmation: object = UNSET,
+    actor_user_id: int,
 ) -> ApplicationPolicy:
     """Merge the given History archival & purge settings; a no-op writes and audits nothing.
 
@@ -456,14 +548,28 @@ def update_history_archive_policy(
     period to 1200, or ``None`` (no retention period: nothing is eligible);
     the shortest allowed period (1-1200 months) changes only with a
     ``reason``, which the audit row's metadata keeps; the waiting limit of a
-    copy confirmation is 1-365 days, the Start minute 0-59, the preview
-    time limit 10-600 seconds, the Movements per purge batch 100-1,000,000
-    and the Part Numbers per purge batch 1-1000. Saving archives, deletes or
-    schedules nothing: the host job and the preview read the settings (a
-    purge reads its batch limits at each start).
+    copy confirmation or of an approval is 1-365 days, the Start minute 0-59,
+    the preview time limit 10-600 seconds, the Movements per purge batch
+    100-1,000,000 and the Part Numbers per purge batch 1-1000.
+
+    Automatic runs (design B step 4): on or off; the measure
+    (``HistoryArchiveMeasure``) and the limit of each measure — live Movement
+    rows 0-1,000,000,000, the months the oldest retained Movement is older
+    than the cutoff 0-1200, the database size 0-100,000 GiB —; the approval
+    step, on or off; the days between automatic runs 1-365. Switching the
+    approval step off needs a ``reason`` and the typed ``confirmation``
+    (``STANDING_AUTHORIZATION_CONFIRMATION``); the audit row of that change is
+    the standing authorization, and the setting keeps its id. A confirmation
+    with the step already off renews it (a new audit row and id); switching
+    the step on clears the id. The audit row's metadata says
+    ``standing_authorization`` ``granted`` or ``withdrawn`` and keeps the
+    reason. Saving archives, deletes or schedules nothing: the host job and
+    the preview read the settings (a purge reads its batch limits at each
+    start, ``history-archive evaluate`` the automatic runs at each hourly
+    work).
     """
     policy = _policy_for_edit(session)
-    if not changes:
+    if not changes and isinstance(confirmation, UnsetType):
         raise InvalidInputError("Change at least one setting of History archival & purge.")
     for column, message in (
         ("shortest_retention_months", _SHORTEST_RETENTION_MESSAGE),
@@ -472,11 +578,25 @@ def update_history_archive_policy(
         ("archive_preview_seconds", _PREVIEW_SECONDS_MESSAGE),
         ("archive_purge_batch_movements", _BATCH_MOVEMENTS_MESSAGE),
         ("archive_purge_batch_part_numbers", _BATCH_PART_NUMBERS_MESSAGE),
+        ("archive_limit_movement_rows", _LIMIT_ROWS_MESSAGE),
+        ("archive_limit_history_months", _LIMIT_MONTHS_MESSAGE),
+        ("archive_limit_database_gib", _LIMIT_GIB_MESSAGE),
+        ("archive_interval_days", _INTERVAL_DAYS_MESSAGE),
     ):
         if column in changes and not _is_whole_in(
             changes[column], *HISTORY_ARCHIVE_POLICY_RANGES[column]
         ):
             raise InvalidInputError(message)
+    for column, message in (
+        ("archive_automatic_runs", _AUTOMATIC_RUNS_MESSAGE),
+        ("archive_approval_required", _APPROVAL_REQUIRED_MESSAGE),
+    ):
+        if column in changes and not isinstance(changes[column], bool):
+            raise InvalidInputError(message)
+    if "archive_measure" in changes and changes["archive_measure"] not in set(
+        HistoryArchiveMeasure
+    ):
+        raise InvalidInputError(_MEASURE_MESSAGE)
     before = history_archive_snapshot(policy)
     after = {**before, **changes}
     shortest = after["shortest_retention_months"]
@@ -489,26 +609,41 @@ def update_history_archive_policy(
             f"The shortest allowed period cannot be longer than the retention period ({retention}"
             " months). Lengthen the retention period first, or in the same change."
         )
-    if after == before:
+    granted = _grants_standing_authorization(before, after, confirmation)
+    withdrawn = not before["archive_approval_required"] and after["archive_approval_required"]
+    if after == before and not granted:
         return policy
-    metadata: dict[str, Any] | None = None
-    if after["shortest_retention_months"] != before["shortest_retention_months"]:
-        if isinstance(reason, UnsetType):
-            raise InvalidInputError(_HISTORY_ARCHIVE_REASON_MESSAGE)
-        metadata = {"reason": maintenance_reason(reason, _HISTORY_ARCHIVE_REASON_MESSAGE)}
-    for column, value in changes.items():
-        setattr(policy, column, value)
-    policy.updated_at = func.now()
-    audit.append_audit_event(
+    metadata: dict[str, Any] = {}
+    if granted:
+        metadata["reason"] = maintenance_reason(reason, _AUTHORIZATION_REASON_MESSAGE)
+        metadata["standing_authorization"] = STANDING_AUTHORIZATION_GRANTED
+    elif withdrawn:
+        metadata["standing_authorization"] = STANDING_AUTHORIZATION_WITHDRAWN
+    if (
+        after["shortest_retention_months"] != before["shortest_retention_months"]
+        and "reason" not in metadata
+    ):
+        metadata["reason"] = maintenance_reason(reason, _HISTORY_ARCHIVE_REASON_MESSAGE)
+    # The audit row first: when it grants the standing authorization, the
+    # setting keeps its id, in the same transaction.
+    event = audit.append_audit_event(
         session,
         event_type=AuditEventType.UPDATED,
         entity_type=AuditEntityType.APPLICATION_POLICY,
         entity_id=DATA_RETENTION_SECTION,
         before_data=before,
-        after_data=history_archive_snapshot(policy),
+        after_data=after,
         actor_user_id=actor_user_id,
-        metadata=metadata,
+        metadata=metadata or None,
     )
+    flush(session, {})
+    for column, value in changes.items():
+        setattr(policy, column, value)
+    if granted:
+        policy.archive_authorization_id = event.id
+    elif withdrawn:
+        policy.archive_authorization_id = None
+    policy.updated_at = func.now()
     commit(session, {})
     return policy
 

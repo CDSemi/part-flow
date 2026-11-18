@@ -317,13 +317,14 @@ def test_the_migration_literals_match_the_model() -> None:
     assert migration._ENTITY_TYPES == deletion._PREVIOUS_ENTITY_TYPES
     assert migration._PREVIOUS_RETENTION_SQL == retention._RETENTION_SQL
     assert migration._RETENTION_SQL == models.POLICY_RETENTION_PERIOD_SQL
-    # Step 1's settings; step 2 (0041) adds the purge batch limits after them.
+    # Step 1's settings; step 2 (0041) adds the purge batch limits after them, and step 4
+    # (0043) the limits of the automatic runs and the days between them.
     assert {
         column: (minimum, maximum) for column, _, minimum, maximum in migration._POLICY_COLUMNS
     } == {
         column: bounds
         for column, bounds in models.HISTORY_ARCHIVE_POLICY_RANGES.items()
-        if not column.startswith("archive_purge_")
+        if not column.startswith(("archive_purge_", "archive_limit_", "archive_interval_"))
     }
     assert migration._POLICY_COLUMNS[0][1] == models.SHORTEST_RETENTION_MONTHS_DEFAULT
     assert migration._SECTION == policies.DATA_RETENTION_SECTION
@@ -956,13 +957,15 @@ def test_the_roles_split_the_runs_between_the_application_and_the_job(
     assert _as(head, roles.maintenance, [marked, start, insert_record]) is None
     assert _as(head, roles.maintenance, [start]) == "P0001"
     # It never requests a run, confirms a copy or cancels, with the setting or without it.
+    # Since step 4 (0043) it holds INSERT for automatic runs only: the run guard refuses a
+    # requested (manual) run from it.
     request = (
         "INSERT INTO history_archive_runs (state, cutoff, reason, requested_by_user_id,"
         " preview_components, preview_flows, preview_movements, preview_archive_bytes)"
         " VALUES ('APPROVED', :cutoff, 'job', :user, 1, 1, 1, 0)",
         {"cutoff": _old_cutoff(), "user": user_id},
     )
-    assert _as(head, roles.maintenance, [request]) == "42501"
+    assert _as(head, roles.maintenance, [request]) == "P0001"
     cancel = (
         "UPDATE history_archive_runs SET state = 'CANCELLED', finished_at = now(),"
         " cancelled_by_user_id = :user WHERE id = :id",

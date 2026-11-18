@@ -1,6 +1,6 @@
 """The host job of Movement-history archival (Phase 16, history archival design §5, §7;
 build step 1: runs without deletion; build step 2: the purge; build step 3: permanent
-deletion requests, design §6.3 and D17).
+deletion requests, design §6.3 and D17; build step 4: automatic runs, design §6.2).
 
 ``python -m app.cli history-archive <command>`` runs these steps for the host
 script ``deploy/production/archive.sh``, as the maintenance database role
@@ -26,6 +26,16 @@ Commands (each prints one JSON report; ``JobReport``):
   unfinished ``.partial`` entries of finished runs are removed; the purge
   receipt of a finished run the job copied off the host is copied again
   where the copy is missing;
+- ``evaluate`` — the automatic decision of the hourly work, run by the host
+  script after ``recover`` and before the ``next`` loop: under the job's
+  lock it reads, in one ``REPEATABLE READ, READ ONLY`` snapshot, whether a
+  run is needed now (``history_archive.evaluate_automatic``: automatic runs
+  on, a retention period, no run open, the interval since the last
+  automatic run, the standing authorization valid while the approval step
+  is off, the measure above its limit, something eligible), and creates at
+  most one automatic run with its preview, its automatic reason and its
+  ``CREATED`` audit row — ``PROPOSED`` for approval, or ``APPROVED`` under
+  the standing authorization —; one stable ``result`` per reason;
 - ``next`` — the work the job must do now. An open deletion request comes
   first: ``start_deletion`` (APPROVED; it waits while a run is RUNNING in
   this start) or ``deletion_backup`` (RUNNING: the host script takes its
@@ -34,8 +44,12 @@ Commands (each prints one JSON report; ``JobReport``):
   ``verify`` (exported), ``copy`` (verified, not yet copied or confirmed;
   or WAITING_FOR_COPY that is confirmed or whose copy folder is usable
   now), ``backup`` (copied or confirmed: the host script takes the
-  pre-purge backup — after the requester was re-checked), ``purge``
-  (PURGING: resume), ``wait``, ``running`` or ``none``;
+  pre-purge backup — after the run was re-checked: its requester, its
+  approver or the User of its standing authorization; for a run created
+  without approval also the approval step still off since, automatic runs
+  still on and its cutoff still allowed by the retention period),
+  ``purge`` (PURGING: resume), ``wait`` (also a PROPOSED run, which waits for
+  a person), ``running`` or ``none``;
 - ``start-deletion --request N`` — an APPROVED deletion request whose
   requester (a User) is still active and still holds Delete Work Orders and
   Part Numbers permanently becomes RUNNING at a whole second, with the label
@@ -73,15 +87,23 @@ Commands (each prints one JSON report; ``JobReport``):
 - ``purge --run N [--backup NAME --backup-started-at UTC]`` — a ``RUNNING``
   run with its verified, copied archive: the backup must be of the kind
   ``pre-purge`` with the run's archive name as its label, its dump must have
-  started after the verification and not in the future, the requester must
-  still be active and still hold the archival key, and the published folder
-  must still be the verified one; then ``RUNNING`` → ``PURGING`` with the
-  backup recorded, the batches, the receipt and ``COMPLETED`` /
-  ``COMPLETED_WITH_SKIPS``; a ``PURGING`` run is resumed without a backup;
-- ``status`` — the open run, the last finished run and the archive folder's
-  space, for ``check.sh``; a run waiting for its copy confirmation longer
-  than the waiting limit of the settings, a failed last run and a purge
-  receipt missing from the copy folder are findings.
+  started after the verification and not in the future, the User of the
+  run's authority (its requester, its approver, or the User who switched
+  the approval step off) must still be active and still hold the archival
+  key, a run created without approval needs the approval step still off
+  since, automatic runs still on and its cutoff still allowed by the
+  retention period, and the published folder must still be the verified
+  one; then
+  ``RUNNING`` → ``PURGING`` with the backup recorded, the batches, the
+  receipt and ``COMPLETED`` / ``COMPLETED_WITH_SKIPS``; a ``PURGING`` run is
+  resumed without a backup;
+- ``status`` — the open run, the last finished run, the archive folder's
+  space and the automatic runs' standing authorization, for ``check.sh``; a
+  run waiting for its copy confirmation, or a PROPOSED run waiting for its
+  approval, longer than the waiting limit of the settings, a failed last run
+  (and one that failed because its authority was no longer valid), a
+  standing authorization that is no longer valid while automatic runs are
+  on, and a purge receipt missing from the copy folder are findings.
 
 The purge (design §7.5) works in batches of whole components, at most the
 Movements and Part Numbers per batch of the settings (a larger component
@@ -164,7 +186,7 @@ from pathlib import Path
 from typing import Any, Final, NamedTuple, cast
 
 from sqlalchemy import Connection, Engine, RowMapping, Table, insert, select, text, update
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 
 from app.application import backups, history_archive, permanent_deletion, system_status
 from app.application.migration import RunError, is_connection_failure
@@ -175,6 +197,7 @@ from app.domain.enums import (
     DeletionRequestState,
     HistoryArchiveRunResult,
     HistoryArchiveRunState,
+    HistoryArchiveRunTrigger,
     MovementType,
     Permission,
 )
@@ -418,7 +441,10 @@ def _run_row(connection: Connection, run_id: int, *, lock: bool) -> RowMapping |
     return connection.execute(query).mappings().one_or_none()
 
 
-def _audit(connection: Connection, before: RowMapping, after: RowMapping, command: str) -> None:
+def _audit(
+    connection: Connection, before: RowMapping | None, after: RowMapping, command: str
+) -> None:
+    """One ``HistoryArchiveRun`` audit row: ``CREATED`` (no ``before``) or ``UPDATED``."""
     connection.execute(
         text(
             "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at,"
@@ -426,10 +452,12 @@ def _audit(connection: Connection, before: RowMapping, after: RowMapping, comman
             " now(), CAST(:before AS jsonb), CAST(:after AS jsonb), CAST(:metadata AS jsonb))"
         ),
         {
-            "event_type": AuditEventType.UPDATED.value,
+            "event_type": (
+                AuditEventType.CREATED if before is None else AuditEventType.UPDATED
+            ).value,
             "entity_type": "HistoryArchiveRun",
             "entity_id": str(after["id"]),
-            "before": json.dumps(history_archive.run_snapshot(before)),
+            "before": None if before is None else json.dumps(history_archive.run_snapshot(before)),
             "after": json.dumps(history_archive.run_snapshot(after)),
             "metadata": json.dumps({"source": "maintenance", "command": command}),
         },
@@ -462,8 +490,15 @@ def _change(
 FailRun = Callable[[Engine, int, str, str], str | None]
 
 
-def _fail_run(engine: Engine, run_id: int, reason: str, command: str) -> str | None:
-    """Make the run FAILED with its reason, unless it is finished; returns its state."""
+def _fail_run(
+    engine: Engine, run_id: int, reason: str, command: str, *, authorization_failed: bool = False
+) -> str | None:
+    """Make the run FAILED with its reason, unless it is finished; returns its state.
+
+    ``authorization_failed``: the reason is the run's authority (``_recheck``):
+    its User may no longer run it, or the approval step was switched on again
+    after it was created without approval.
+    """
     with engine.connect() as connection, connection.begin():
         run = _run_row(connection, run_id, lock=True)
         if run is None:
@@ -477,6 +512,7 @@ def _fail_run(engine: Engine, run_id: int, reason: str, command: str) -> str | N
             state=_STATE.FAILED.value,
             failure_reason=reason[:2000],
             finished_at=_now(),
+            authorization_failed=authorization_failed,
         )
         return str(after["state"])
 
@@ -496,8 +532,14 @@ def _run_summary(run: RowMapping | None) -> dict[str, Any] | None:
     return {
         "id": int(run["id"]),
         "state": str(run["state"]),
+        "trigger": str(run["trigger"]),
+        "reason": run["reason"],
         "cutoff": iso(run["cutoff"]),
         "requested_at": iso(run["requested_at"]),
+        "approved_by_user_id": run["approved_by_user_id"],
+        "approved_at": iso(run["approved_at"]),
+        "authorization_id": run["authorization_id"],
+        "authorization_failed": bool(run["authorization_failed"]),
         "archive_name": run["archive_name"],
         "manifest_sha256": run["manifest_sha256"],
         "copied": run["copied_at"] is not None,
@@ -774,6 +816,7 @@ def _open_run(connection: Connection) -> RowMapping | None:
 
 
 _OPEN_STATES: Final = (
+    _STATE.PROPOSED,
     _STATE.APPROVED,
     _STATE.RUNNING,
     _STATE.WAITING_FOR_COPY,
@@ -803,6 +846,9 @@ def _next_action(run: RowMapping | None, folders: JobFolders) -> str:
     if run is None:
         return "none"
     state = run["state"]
+    if state == _STATE.PROPOSED:
+        # An automatic run waiting for a person to approve or dismiss it.
+        return "wait"
     if state == _STATE.APPROVED:
         return "export"
     if state == _STATE.PURGING:
@@ -822,40 +868,115 @@ def _next_action(run: RowMapping | None, folders: JobFolders) -> str:
     return "backup"
 
 
-#: The key the requester of a run must still hold when the run purges (design §6.2).
-_ARCHIVAL_KEY: Final = Permission.RUN_HISTORY_ARCHIVAL_AND_PURGE.value
+class _Recheck(NamedTuple):
+    """Why a run may no longer go on to its pre-purge backup or its purge."""
+
+    reason: str
+    #: Its authority failed — its requester, its approver or the User of its
+    #: standing authorization may no longer run it, or the approval step was
+    #: switched on again since it was created without approval — the run's
+    #: ``authorization_failed``. A run stopped by the settings (automatic runs
+    #: off, a retention period that no longer allows its cutoff) is a plain
+    #: failure, and its standing authorization stays valid.
+    authorization_failed: bool
 
 
-def _requester_problem(connection: Connection, run: RowMapping) -> str | None:
-    """Why the User who requested the run may no longer have it purged (None: they may)."""
-    row = (
-        connection.execute(
-            text(
-                "SELECT u.display_name, u.is_active, EXISTS (SELECT 1 FROM role_permissions p"
-                " WHERE p.role_id = u.role_id AND p.permission = :key) AS holds"
-                " FROM users u WHERE u.id = :id"
-            ),
-            {"id": int(run["requested_by_user_id"]), "key": _ARCHIVAL_KEY},
-        )
-        .mappings()
-        .one_or_none()
-    )
-    who = (
-        f"user {int(run['requested_by_user_id'])}"
-        if row is None
-        else f"{row['display_name']} (user {int(run['requested_by_user_id'])})"
-    )
-    if row is None or not row["is_active"]:
-        return (
-            f"The User who requested run {int(run['id'])}, {who}, is no longer active, so its"
+def _recheck(connection: Connection, run: RowMapping) -> _Recheck | None:
+    """Why the run may no longer be purged (None: it may), re-checked by the job
+    before it hands out the pre-purge backup and again before the purge.
+
+    The authority of a manual run is the User who requested it; of an
+    approved proposal, the User who approved it: still active, still holding
+    Run history archival and purge. Both keep the cutoff a person chose.
+
+    A run created under the standing authorization (design §6.2, D9), which
+    nobody reviewed, is checked in this order:
+
+    1. the approval step stayed off since it was created (on now, or withdrawn
+       and switched off again since, fails it; a renewal keeps it going) —
+       ``authorization_failed``;
+    2. automatic runs are still on (review B4, minor 3) — a plain failure;
+    3. the retention period as it stands now still allows its cutoff
+       (``history_archive.retention_problem``; review B4, minor 1) — a plain
+       failure;
+    4. the User who switched the approval step off, for the authorization the
+       run was created under, is still active and still holds the key —
+       ``authorization_failed`` (the authorization then stays invalid until
+       the approval setting is saved again, if the setting still holds it).
+    """
+    run_id = int(run["id"])
+    if run["authorization_id"] is not None:
+        authorization_id = int(run["authorization_id"])
+        settings = history_archive.read_automatic_settings(connection)
+        if settings.approval_required or history_archive.withdrawn_since(
+            connection, authorization_id
+        ):
+            return _Recheck(
+                "The approval step of automatic runs was switched on again after run"
+                f" {run_id} was created without approval, so its history was not purged. Nothing"
+                " was deleted; while the step is on, the next automatic run waits for approval,"
+                " and a holder of Run history archival and purge may request a new run.",
+                True,
+            )
+        if not settings.enabled:
+            return _Recheck(
+                f"Automatic runs were switched off after run {run_id} was created without"
+                " approval, so its history was not purged. Nothing was deleted; a holder of Run"
+                " history archival and purge may request a new run.",
+                False,
+            )
+        cutoff = history_archive.retention_problem(connection, run_id, run["cutoff"])
+        if cutoff is not None:
+            return _Recheck(cutoff, False)
+        authorization = history_archive.standing_authorization(connection, authorization_id)
+        authority = None if authorization is None else authorization.authority
+
+        def then(holder: str) -> str:
+            if settings.authorization_id != authorization_id:
+                # Renewed since the run was created: the renewal is checked on its own.
+                return "the next automatic run follows the renewed standing authorization."
+            return (
+                f"automatic runs wait until a holder of {holder} saves the approval setting again."
+            )
+
+        if authority is None:  # pragma: no cover - the row names its User
+            return _Recheck(
+                f"The standing authorization of run {run_id} names no User, so its history was"
+                f" not purged. Nothing was deleted; {then('Run history archival and purge')}",
+                True,
+            )
+        if not authority.active:
+            return _Recheck(
+                "The User who switched off the approval step of automatic runs,"
+                f" {authority.who}, is no longer active, so the history of run {run_id} was not"
+                f" purged. Nothing was deleted; {then('Run history archival and purge')}",
+                True,
+            )
+        if not authority.holds_key:
+            return _Recheck(
+                "The User who switched off the approval step of automatic runs,"
+                f" {authority.who}, no longer holds Run history archival and purge, so the"
+                f" history of run {run_id} was not purged. Nothing was deleted; {then('the key')}",
+                True,
+            )
+        return None
+    approver = run["approved_by_user_id"]
+    action = "requested" if approver is None else "approved"
+    user_id = int(run["requested_by_user_id"] if approver is None else approver)
+    authority = history_archive.archival_authority(connection, user_id)
+    if not authority.active:
+        return _Recheck(
+            f"The User who {action} run {run_id}, {authority.who}, is no longer active, so its"
             " history was not purged. Nothing was deleted; a holder of Run history archival and"
-            " purge may request a new run."
+            " purge may request a new run.",
+            True,
         )
-    if not row["holds"]:
-        return (
-            f"The User who requested run {int(run['id'])}, {who}, no longer holds Run history"
+    if not authority.holds_key:
+        return _Recheck(
+            f"The User who {action} run {run_id}, {authority.who}, no longer holds Run history"
             " archival and purge, so its history was not purged. Nothing was deleted; a holder"
-            " of the key may request a new run."
+            " of the key may request a new run.",
+            True,
         )
     return None
 
@@ -878,10 +999,15 @@ def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
     APPROVED request waits while the open run is RUNNING: that run's next
     steps belong to the same start, and the next start's ``recover`` would
     fail a run left RUNNING; ``request`` then names the waiting request.
-    Before it hands out the ``backup`` step of a run it re-checks the
-    requester (so no backup is taken for a run that may not purge): a
-    requester who is no longer active or no longer holds the archival key
-    makes the run FAILED (exit 3).
+    A PROPOSED run waits for a person (``wait``). Before it hands out the
+    ``backup`` step of a run it re-checks the run (``_recheck``; so no backup
+    is taken for a run that may not purge): its requester, its approver or
+    the User of its standing authorization, no longer active or no longer
+    holding the archival key, makes the run FAILED (exit 3) with
+    ``authorization_failed`` set, and so does the approval step switched on
+    again since a run was created under the standing authorization; such a
+    run also fails, as a plain failure, once automatic runs are off or the
+    retention period no longer allows its cutoff.
     """
 
     def work(engine: Engine, report: JobReport) -> None:
@@ -912,17 +1038,19 @@ def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
         with engine.connect() as connection:
             run = _open_run(connection)
             action = _next_action(run, folders)
-            problem = (
-                _requester_problem(connection, run)
-                if run is not None and action == "backup"
-                else None
-            )
+            problem = _recheck(connection, run) if run is not None and action == "backup" else None
         if run is not None:
             report.run_id, report.state = int(run["id"]), str(run["state"])
             if problem is not None:
                 with _job_lock(engine):
-                    report.state = _fail_run(engine, int(run["id"]), problem, "next")
-                raise _RunFailed(problem)
+                    report.state = _fail_run(
+                        engine,
+                        int(run["id"]),
+                        problem.reason,
+                        "next",
+                        authorization_failed=problem.authorization_failed,
+                    )
+                raise _RunFailed(problem.reason)
         report.details["run"] = _run_summary(run)
         if action == "backup" and run is not None:
             report.details["backup"] = {"kind": PRE_PURGE_KIND, "label": run["archive_name"]}
@@ -935,15 +1063,26 @@ def status(engine: Engine | None, folders: JobFolders) -> JobReport:
     """The open run and its age, the last finished run and the archive folder's space.
 
     A run waiting for its copy confirmation longer than the waiting limit
-    of the settings (``archive_max_wait_days``) is a finding, and so is the
-    purge receipt of a run the job copied off the host that is missing (or
-    differs) beside the archive's copy in a usable copy folder
-    (``receipt_not_copied``; the next ``recover`` copies it again).
+    of the settings (``archive_max_wait_days``) is a finding, and so is a
+    PROPOSED run waiting that long for its approval (``approval_overdue``),
+    a last finished run that FAILED (``last_run_failed``; also
+    ``authorization_failed`` when it failed on its authority:
+    ``_recheck``), a standing authorization that is no longer
+    valid while automatic runs are on (``standing_authorization_invalid``:
+    its User no longer active or holding the key, or a run that failed under
+    it until the approval setting is saved again), and the purge receipt of
+    a run the job copied off the host that is missing (or differs) beside
+    the archive's copy in a usable copy folder (``receipt_not_copied``; the
+    next ``recover`` copies it again).
     """
 
     def work(engine: Engine, report: JobReport) -> None:
         with engine.connect() as connection:
             max_wait_days = history_archive.read_settings(connection).max_wait_days
+            automatic = history_archive.read_automatic_settings(connection)
+            authorization = history_archive.standing_authorization(
+                connection, automatic.authorization_id
+            )
             run = _open_run(connection)
             last = (
                 connection.execute(
@@ -957,16 +1096,23 @@ def status(engine: Engine | None, folders: JobFolders) -> JobReport:
             )
         findings: list[str] = []
         moment = _now()
+        limit = datetime.timedelta(days=max_wait_days)
         open_summary = _run_summary(run)
         if run is not None and open_summary is not None:
             open_summary["age_seconds"] = int((moment - run["requested_at"]).total_seconds())
             if run["state"] == _STATE.WAITING_FOR_COPY and run["copy_confirmed_at"] is None:
                 waiting = moment - (run["verified_at"] or run["requested_at"])
                 open_summary["waiting_seconds"] = int(waiting.total_seconds())
-                if waiting > datetime.timedelta(days=max_wait_days):
+                if waiting > limit:
                     findings.append("copy_confirmation_overdue")
+            if run["state"] == _STATE.PROPOSED and moment - run["requested_at"] > limit:
+                findings.append("approval_overdue")
         if last is not None and last["state"] == _STATE.FAILED:
             findings.append("last_run_failed")
+            if last["authorization_failed"]:
+                findings.append("authorization_failed")
+        if automatic.enabled and authorization is not None and not authorization.valid:
+            findings.append("standing_authorization_invalid")
         report.details["open_run"] = open_summary
         report.details["last_finished_run"] = _run_summary(last)
         report.details["archive_dir"] = _folder_status(folders.archive_dir)
@@ -999,6 +1145,11 @@ def status(engine: Engine | None, folders: JobFolders) -> JobReport:
         report.details["last_finished_deletion_request"] = (
             None if last_request is None else permanent_deletion.request_summary(last_request)
         )
+        report.details["automatic_runs"] = {
+            "enabled": automatic.enabled,
+            "approval_required": automatic.approval_required,
+            "standing_authorization": (None if authorization is None else authorization.document()),
+        }
         report.details["max_wait_days"] = max_wait_days
         report.details["findings"] = findings
         report.result = "finding" if findings else "ok"
@@ -1025,6 +1176,147 @@ def _folder_status(path: Path | None) -> dict[str, Any]:
         "total_bytes": total,
         "partial": partial,
     }
+
+
+# ---------------------------------------------------------------------------
+# evaluate (build step 4: automatic runs, design §6.2)
+# ---------------------------------------------------------------------------
+
+_OPEN_RUN_INDEX: Final = "uq_history_archive_runs_open"
+#: The "constraint" the run guard names when it refuses a cutoff newer than the
+#: shortest allowed period (SQLSTATE 23514).
+_CUTOFF_FLOOR: Final = "trg_history_archive_runs_guard_mutation"
+#: The run guard's refusal (SQLSTATE P0001) of an automatic run whose state and
+#: authorization the approval setting no longer admits.
+_AUTOMATIC_INSERT_REFUSED: Final = (
+    "an automatic history archive run is created PROPOSED, or APPROVED under the standing"
+    " authorization of the approval setting"
+)
+
+
+def _settings_changed_meanwhile(exc: DBAPIError) -> bool:
+    """Whether the run guard refused the automatic insert because a setting changed
+    after the job's own check in the insert's transaction: the approval setting
+    (``P0001``) or the shortest allowed period past the cutoff (``23514``)."""
+    diag = getattr(exc.orig, "diag", None)
+    if isinstance(exc, IntegrityError):
+        return getattr(diag, "constraint_name", None) == _CUTOFF_FLOOR
+    return getattr(exc.orig, "sqlstate", None) == "P0001" and (
+        getattr(diag, "message_primary", None) or ""
+    ).startswith(_AUTOMATIC_INSERT_REFUSED)
+
+
+def _create_automatic_run(
+    engine: Engine, decision: history_archive.AutomaticDecision
+) -> RowMapping | str:
+    """Insert the decided automatic run and its CREATED audit row in one transaction.
+
+    Returns the run, or the result when none was created: ``settings_changed``
+    when a setting the decision was made from changed while the evaluation
+    ran — automatic runs, the measure or its limits, the approval step or its
+    authorization, the days between automatic runs, the retention period
+    (``AutomaticDecision.settings_hold``, read again in the insert's
+    transaction), or one the run guard reads itself at the insert (the
+    approval setting, the shortest allowed period) —, ``run_open`` when a run
+    was opened meanwhile (``uq_history_archive_runs_open``). The run guard
+    admits the insert only from a role that may write archive records,
+    PROPOSED without an authorization or APPROVED with the standing
+    authorization the setting holds.
+    """
+    preview, cutoff = decision.preview, decision.cutoff
+    if preview is None or cutoff is None or decision.state is None or decision.reason is None:
+        raise RuntimeError("an automatic run is created only from a created decision")
+    approved = decision.state == _STATE.APPROVED
+    try:
+        with engine.connect() as connection, connection.begin():
+            if not decision.settings_hold(connection):
+                return "settings_changed"
+            run = (
+                connection.execute(
+                    insert(_RUNS)
+                    .values(
+                        state=decision.state,
+                        trigger=HistoryArchiveRunTrigger.AUTOMATIC.value,
+                        cutoff=cutoff.instant,
+                        reason=decision.reason,
+                        authorization_id=decision.settings.authorization_id if approved else None,
+                        preview_components=preview.components,
+                        preview_flows=preview.flows,
+                        preview_movements=preview.movements,
+                        preview_first_occurred_at=preview.first_occurred_at,
+                        preview_last_occurred_at=preview.last_occurred_at,
+                        preview_archive_bytes=preview.estimated_archive_bytes,
+                    )
+                    .returning(*_RUNS.c)
+                )
+                .mappings()
+                .one()
+            )
+            _audit(connection, None, run, "evaluate")
+    except DBAPIError as exc:
+        if isinstance(exc, IntegrityError) and (
+            getattr(getattr(exc.orig, "diag", None), "constraint_name", None) == _OPEN_RUN_INDEX
+        ):
+            return "run_open"
+        if _settings_changed_meanwhile(exc):
+            return "settings_changed"
+        raise
+    return run
+
+
+def evaluate(engine: Engine | None, folders: JobFolders) -> JobReport:
+    """Create the automatic run the settings call for now, if any (design §6.2, D9-D11).
+
+    The host script runs it at the hourly work, after ``recover`` and before
+    the ``next`` loop. Under the job's lock, the decision is read in one
+    ``REPEATABLE READ, READ ONLY`` snapshot (``history_archive.evaluate_automatic``);
+    a ``created`` decision inserts the run — PROPOSED, or APPROVED under the
+    standing authorization — with its preview and automatic reason, and its
+    ``CREATED`` audit row. Every decision exits 0 with its ``result`` and the
+    facts it read; the measure and the preview share the preview time limit,
+    and running out of it is could not run (exit 2,
+    ``evaluation_timed_out``), with no run created.
+    """
+
+    def work(engine: Engine, report: JobReport) -> None:
+        with _job_lock(engine):
+            try:
+                with engine.connect() as base:
+                    connection = base.execution_options(isolation_level="REPEATABLE READ")
+                    with connection.begin():
+                        connection.execute(text("SET TRANSACTION READ ONLY"))
+                        decision = history_archive.evaluate_automatic(connection)
+            except history_archive.EvaluationTimeoutError as exc:
+                raise _CouldNotRun("evaluation_timed_out", str(exc)) from exc
+            run: RowMapping | None = None
+            if decision.result == "created":
+                created = _create_automatic_run(engine, decision)
+                if isinstance(created, str):
+                    with engine.connect() as connection:
+                        open_run = _open_run(connection)
+                    if created == "run_open" and open_run is not None:
+                        decision.open_run = (int(open_run["id"]), str(open_run["state"]))
+                    decision.decided(
+                        created,
+                        "The settings of automatic runs or the retention period changed while"
+                        " the evaluation ran, so no run was created; the next hourly work"
+                        " evaluates again."
+                        if created == "settings_changed"
+                        else "Another run was opened while the evaluation ran, so no automatic"
+                        " run was created.",
+                    )
+                else:
+                    run = created
+                    decision.message = decision.created_message(int(run["id"]))
+            report.details.update(decision.facts())
+            report.details["run"] = _run_summary(run)
+            if run is not None:
+                report.run_id, report.state = int(run["id"]), str(run["state"])
+            elif decision.open_run is not None:
+                report.run_id, report.state = decision.open_run
+            report.result, report.exit_code = decision.result, EXIT_DONE
+
+    return _command("evaluate", engine, work)
 
 
 # ---------------------------------------------------------------------------
@@ -1639,14 +1931,33 @@ _RECORD_COLUMNS: Final = (
 )
 
 
+def _run_users(connection: Connection, run: RowMapping) -> set[int]:
+    """The Users of the run's authority: its requester, its approver, or the User of
+    its standing authorization (an automatic run has no requester)."""
+    users = {
+        int(value)
+        for value in (run["requested_by_user_id"], run["approved_by_user_id"])
+        if value is not None
+    }
+    if run["authorization_id"] is not None:
+        actor = connection.execute(
+            text("SELECT actor_user_id FROM audit_events WHERE id = :id"),
+            {"id": int(run["authorization_id"])},
+        ).scalar_one_or_none()
+        if actor is not None:
+            users.add(int(actor))
+    return users
+
+
 def _context_sections(
-    connection: Connection, run_id: int, context: _Context, requester_id: int
+    connection: Connection, run_id: int, context: _Context, run_users: set[int]
 ) -> Iterator[tuple[str, Iterator[dict[str, Any]]]]:
     """``context.json`` in key order: the master data the archived rows name, streamed.
 
     The demand lines are those the records name, their Work Orders those
     lines', and the Part Numbers the archived flows'; the database selects
-    them, so nothing that grows with the archived flows is held here.
+    them, so nothing that grows with the archived flows is held here. The
+    Users are those the rows name and those of the run's authority.
     """
     tables = {name: (table, key, columns) for name, table, key, columns in _CONTEXT_TABLES}
     demands = "SELECT received_demand_id FROM history_archived_flows WHERE run_id = :run_id"
@@ -1656,7 +1967,7 @@ def _context_sections(
         "operations": sorted(context.operations),
         "part_numbers": f"SELECT part_number FROM {SELECTION}",
         "scan_stations": sorted(context.stations),
-        "users": sorted(context.users | {requester_id}),
+        "users": sorted(context.users | run_users),
         "work_order_demands": demands,
         "work_orders": f"SELECT work_order_id FROM work_order_demands WHERE id IN ({demands})",
         "workers": sorted(context.workers),
@@ -1768,7 +2079,8 @@ context.json
     names as they were when the archive was written.
 
 manifest.json
-    The format and its version, the run (number, cutoff, reason, requester),
+    The format and its version, the run (number, trigger, cutoff, reason,
+    requester, approver with time and reason, standing authorization),
     the archive's groups, the database revision, the release, the counts,
     and for every other file its SHA-256, size, rows and id-set hash (the
     SHA-256 of the sorted ids, one decimal number and a line break each).
@@ -1869,7 +2181,7 @@ def _write_archive(
 
     archive_files.write_readable_sections(
         folder / CONTEXT_FILE,
-        _context_sections(connection, run_id, context, int(run["requested_by_user_id"])),
+        _context_sections(connection, run_id, context, _run_users(connection, run)),
     )
     archive_files.write_document(folder / README_FILE, _README.encode("utf-8"))
 
@@ -1926,11 +2238,16 @@ def _manifest(
         "groups": [history_archive.GROUP_MOVEMENT_HISTORY],
         "run": {
             "id": int(run["id"]),
+            "trigger": str(run["trigger"]),
             "cutoff": iso(run["cutoff"]),
             "cutoff_date": history_archive.site_date_of(run["cutoff"], zone).isoformat(),
             "reason": run["reason"],
-            "requested_by_user_id": int(run["requested_by_user_id"]),
+            "requested_by_user_id": run["requested_by_user_id"],
             "requested_at": iso(run["requested_at"]),
+            "approved_by_user_id": run["approved_by_user_id"],
+            "approved_at": iso(run["approved_at"]),
+            "approval_reason": run["approval_reason"],
+            "authorization_id": run["authorization_id"],
         },
         "site_timezone": configured.site_timezone,
         "alembic_revision": ",".join(revisions) or None,
@@ -2923,9 +3240,16 @@ def _start_purge(
         )
     started = _parsed_backup(run, backup)
     with engine.connect() as connection:
-        problem = _requester_problem(connection, run)
+        problem = _recheck(connection, run)
     if problem is not None:
-        raise _RunFailed(problem)
+        _fail_run(
+            engine,
+            run_id,
+            problem.reason,
+            "purge",
+            authorization_failed=problem.authorization_failed,
+        )
+        raise _RunFailed(problem.reason)
     # Right before the purge: the published archive is still the verified one.
     _check_published_folder(source, run)
     with engine.connect() as connection, connection.begin():

@@ -402,13 +402,30 @@
   gap: 8px;
 }
 
-/* A section of two cards of values (History archival & purge): two equal
-   columns when two fit, else one full-width column. 25rem holds the
-   widest label-and-value row of those cards (`First and last Movement` —
-   `Jan 03, 2023 – Nov 16, 2024`, 342px measured) on one line. */
-.admin-cards.admin-cards-two {
-  --admin-card-min: 25rem;
-  columns: var(--admin-card-min) 2;
+/* A section whose cards of values stand in two columns (History archival
+   & purge): two equal columns when two fit, else one full-width column.
+   25rem holds the widest label-and-value row of those cards (`First and
+   last Movement` — `Jan 03, 2023 – Nov 16, 2024`, 342px measured) on one
+   line. Each column is a stack of its own cards, so a card that grows
+   (the Preview's result) never moves a card of the other column. */
+.admin-cardcolumns {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.admin-cardcolumn {
+  flex: 1 1 25rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.admin-cardcolumn > .admin-card {
+  margin-bottom: 0;
 }
 
 /* A section whose cards hold a table or a wide form: one full-width
@@ -625,9 +642,12 @@
   margin-top: 4px;
 }
 
-/* The wide table keeps each run to a few lines: tighter cells, and a
-   date and time, the cutoff and the Movements each on one line (the
-   stacked phone layout keeps its own spacing). */
+/* The wide table keeps each run to a few lines: tighter cells, a date
+   and time (or the cutoff date) on one line, and room in the cutoff and
+   counts for a typical `4,210 Movements` on one line (the stacked phone
+   layout keeps its own spacing). The Movements may still wrap between
+   the number and the word, so that a run of millions of Movements fits a
+   1024 px window. */
 @media (min-width: 801px) {
   .admin-runtable th,
   .admin-runtable td {
@@ -635,10 +655,12 @@
     padding-right: 9px;
   }
 
-  .admin-runtable .admin-runwhen,
-  .admin-runtable .admin-runmain,
-  .admin-runtable td[data-label='Cutoff date'] {
+  .admin-runtable .admin-runwhen {
     white-space: nowrap;
+  }
+
+  .admin-runtable th.admin-runcounts {
+    min-width: 8rem;
   }
 }
 
@@ -647,6 +669,32 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
+}
+
+/* Switching the approval step of automatic runs off, or renewing its
+   standing authorization, in the Automatic runs dialog: the plain
+   warning, the reason and the typed confirmation on a warning-toned
+   panel. */
+.admin-authpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 12px;
+  background: var(--warning-surface-weak);
+}
+
+.admin-authwarn {
+  margin: 0;
+  color: var(--warn-t);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.admin-authpanel .typedconfirm {
+  margin-top: 0;
 }
 
 /* A reason field of an editor dialog. */

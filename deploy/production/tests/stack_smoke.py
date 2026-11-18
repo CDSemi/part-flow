@@ -57,9 +57,12 @@ partflow_app_password (backend no longer mounts postgres_password); new cases:
 - SM-31: every partflow-api session in pg_stat_activity is partflow_app.
 - SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables, the
   two tables of Movement-history archival and the two of permanent deletion requests included; (archival step 2) the
-  row guard trg_part_movements_guard_delete refusing partflow_maintenance's DELETE of a Movement outside a purge; and
+  row guard trg_part_movements_guard_delete refusing partflow_maintenance's DELETE of a Movement outside a purge;
   (archival step 3) the row guards of the tables a permanent deletion deletes from refusing partflow_maintenance's
-  DELETE of a row of work_orders, work_order_demands and audit_events outside a RUNNING deletion request.
+  DELETE of a row of work_orders, work_order_demands and audit_events outside a RUNNING deletion request; and
+  (archival step 4) the run guard trg_history_archive_runs_guard_mutation refusing partflow_maintenance's INSERT of a
+  manual (requested) run with P0001: the role holds INSERT on history_archive_runs for the automatic runs of
+  `history-archive evaluate` only, so the privilege check (42501) no longer refuses it.
 - SM-33: reconcile through backend: check (h) pass, connected as partflow_app (not a superuser).
 - SM-34: restore convergence: a --no-privileges dump restored into partflow_restore_s4, apply-grants, then (h) pass.
 - SM-35: the write flows through web (SM-6, SM-7..SM-9, SM-21, SM-36) pass as partflow_app.
@@ -160,6 +163,17 @@ ROW_GUARD_STATEMENTS = (
 # Work Orders of SM-21 and their audit rows) as partflow_maintenance, without the marker, and rolls back.
 DELETION_GUARD_TABLES = ("work_orders", "work_order_demands", "audit_events")
 DELETION_GUARD_MESSAGE = "may be deleted only by the host job carrying out a permanent deletion request that lists it"
+# SM-32, archival step 4 (contract B4 §0, §1.3, §1.4): partflow_maintenance holds INSERT on history_archive_runs for the
+# automatic runs that `history-archive evaluate` creates, and the run guard admits only those from it: a manual run
+# (trigger MANUAL by default, APPROVED, a requesting User, a cutoff older than the shortest retention period, no
+# progress) passes the privilege check and is refused by the guard with SQLSTATE P0001, which psql prints before the
+# message with VERBOSITY verbose. The probe runs in a transaction that is rolled back.
+MANUAL_RUN_INSERT = (
+    "INSERT INTO history_archive_runs (state, cutoff, reason, requested_by_user_id, preview_components, preview_flows,"
+    " preview_movements, preview_archive_bytes) VALUES ('APPROVED', '2020-01-01T00:00:00Z', 'stack smoke run guard probe',"
+    " (SELECT min(id) FROM users), 1, 1, 1, 0)"
+)
+MANUAL_RUN_GUARD_MESSAGE = "P0001: the maintenance role creates automatic history archive runs only"
 RESTORE_DATABASE = "partflow_restore_s4"
 CLASSIFIED_TABLES = 39
 MULTI_WORKER_STOP = "failed to start, stopping the parent process"
@@ -995,6 +1009,18 @@ class Smoke:
                     "no_row_to_probe": "DELETE 0" in result.stdout, "psql_rc": result.returncode,
                     "stderr": result.stderr.strip()[-300:],
                 }
+            # The run guard (archival step 4): the maintenance role passes the privilege check of an INSERT on
+            # history_archive_runs (it creates the automatic runs), and the guard refuses a manual run (P0001, not 42501).
+            script = ('psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -v VERBOSITY=verbose -c BEGIN'
+                      ' -c "SET LOCAL ROLE partflow_maintenance"'
+                      f' -c "{MANUAL_RUN_INSERT}" -c ROLLBACK')
+            result = self.compose("exec", "-T", "db", "sh", "-c", script, check_rc=False, timeout=120)
+            cells["history_archive_runs INSERT of a manual run as partflow_maintenance"] = {
+                "expected": "refused by trg_history_archive_runs_guard_mutation (P0001)",
+                "verdict": "refused" if MANUAL_RUN_GUARD_MESSAGE in result.stderr else "wrong",
+                "privilege_refused": "permission denied for table history_archive_runs" in result.stderr,
+                "psql_rc": result.returncode, "stderr": result.stderr.strip()[-300:],
+            }
             observed["cells"] = cells
             wrong = [cell for cell, value in cells.items() if value["verdict"] == "wrong"]
             check(not wrong, f"cells not as expected: {wrong}")

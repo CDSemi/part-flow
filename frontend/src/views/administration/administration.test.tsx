@@ -773,6 +773,14 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       archive_max_wait_days: 7,
       archive_purge_batch_movements: 50000,
       archive_purge_batch_part_numbers: 20,
+      archive_automatic_runs: false,
+      archive_measure: 'LIVE_MOVEMENT_ROWS',
+      archive_limit_movement_rows: 5000000,
+      archive_limit_history_months: 1,
+      archive_limit_database_gib: 20,
+      archive_approval_required: true,
+      archive_interval_days: 7,
+      standing_authorization: null,
       updated_at: T0,
     });
   }
@@ -6312,6 +6320,11 @@ test('FA-3: without its permission every section is view-only — values as text
     'Report a waiting run after': '7 days',
     'Movements per purge batch': '50,000',
     'Part Numbers per purge batch': '20',
+    'Automatic runs': 'Off',
+    Measure: 'Live Movement rows',
+    Limit: '5,000,000 rows',
+    'Days between automatic runs': '7 days',
+    'Approval step': 'On',
   });
   expect(screen.queryByRole('heading', { name: 'Preview' })).toBeNull();
 

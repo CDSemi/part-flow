@@ -337,11 +337,14 @@ def request_summary(state, request_id=REQUEST, **fields):
 
 
 def archive_status(open_request=None, last_request=None, exit_code=0):
-    """`history-archive status` with the deletion requests (exit 1: a finding of the archive, still a valid report)."""
+    """`history-archive status` with the deletion requests (exit 1: a finding of the archive, still a valid report) and
+    the automatic runs of step 4 (off)."""
     return out(json.dumps({"report_version": 1, "command": "history-archive status",
                            "result": "finding" if exit_code else "ok", "exit_code": exit_code, "run_id": None,
                            "request_id": None, "state": None, "open_run": None, "last_finished_run": None,
                            "open_deletion_request": open_request, "last_finished_deletion_request": last_request,
+                           "automatic_runs": {"enabled": False, "approval_required": True,
+                                              "standing_authorization": None},
                            "findings": ["copy_dir_unusable"] if exit_code else [], "error": None},
                           indent=2) + "\n", rc=exit_code)
 

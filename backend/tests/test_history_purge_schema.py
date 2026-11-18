@@ -5,10 +5,12 @@ Runs the real Alembic chain against isolated, temporary PostgreSQL databases
 
 - the cases run against this revision inside the current chain; the head
   boundary and the models parity moved to
-  ``tests/test_deletion_requests_schema.py`` with
-  ``0042_phase16_deletion_requests``, which also replaces the Movement guard's
-  function (it restores this revision's on its downgrade); the migration's
-  literals against the models, the enums and migration 0040;
+  ``tests/test_automatic_runs_schema.py`` with ``0043_phase16_automatic_runs``,
+  which replaces the run guard's function and widens the run states (it
+  restores this revision's on its downgrade), as
+  ``0042_phase16_deletion_requests`` replaced the Movement guard's function;
+  the migration's literals against the models, the enums and migrations
+  0040 and 0043;
 - the new settings (defaults and range CHECKs);
 - the Movement deletion guard: refused for every row unless a run in
   PURGING is named, the row's flow has an unpurged, unskipped record of that
@@ -63,6 +65,7 @@ _HEAD_REVISION = "0041_phase16_history_purge"
 _CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _VERSIONS / "20261118_0041_phase16_history_purge.py"
 _PREVIOUS_FILE = _VERSIONS / "20261117_0040_phase16_history_archive.py"
+_AUTOMATIC_FILE = _VERSIONS / "20261118_0043_phase16_automatic_runs.py"
 _HEAD_TEMPLATE = "partflow_test_history_purge_schema_head"
 _CASE = "partflow_test_history_purge_schema_case"
 _CUTOFF = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
@@ -161,13 +164,17 @@ def _body(create_function: str) -> str:
 def test_the_migration_literals_match_the_models_and_0040() -> None:
     migration = _load(_MIGRATION_FILE, "history_purge_migration")
     previous = _load(_PREVIOUS_FILE, "history_archive_migration_for_purge")
+    automatic = _load(_AUTOMATIC_FILE, "automatic_runs_migration_for_purge")
     assert (migration.revision, migration.down_revision) == (_HEAD_REVISION, _PREVIOUS_REVISION)
-    assert tuple(state.value for state in HistoryArchiveRunState) == migration._STATES
+    # 0043 (step 4) adds PROPOSED and DISMISSED and repeats this revision's states as its own
+    # previous ones.
+    assert migration._STATES == automatic._PREVIOUS_STATES
+    assert set(migration._STATES) < {state.value for state in HistoryArchiveRunState}
     assert tuple(result.value for result in HistoryArchiveRunResult) == migration._RESULTS
-    assert migration._FINAL_STATES == models.HISTORY_ARCHIVE_FINAL_STATES
-    assert migration._OPEN_STATES == models.HISTORY_ARCHIVE_OPEN_STATES
-    assert (
-        migration._in("state", migration._OPEN_STATES) == models.HISTORY_ARCHIVE_RUN_OPEN_WHERE_SQL
+    assert migration._FINAL_STATES == automatic._PREVIOUS_FINAL_STATES
+    assert migration._OPEN_STATES == automatic._PREVIOUS_OPEN_STATES
+    assert migration._in("state", migration._OPEN_STATES) == automatic._in(
+        "state", automatic._PREVIOUS_OPEN_STATES
     )
     assert migration._BACKUP_NAME_PATTERN == models.HISTORY_ARCHIVE_BACKUP_NAME_PATTERN
     # The previous literals are 0040's.
@@ -180,13 +187,20 @@ def test_the_migration_literals_match_the_models_and_0040() -> None:
         assert previous_checks[suffix] == old, suffix
     assert _body(previous._CREATE_RUNS_FUNCTION) == migration._PREVIOUS_RUNS_BODY
     assert _body(previous._CREATE_FLOWS_FUNCTION) == migration._PREVIOUS_FLOWS_BODY
-    # The run CHECKs at the head: 0040's unchanged ones, the changed ones, the new ones.
+    # The run CHECKs this revision leaves: 0040's unchanged ones, the changed ones, the new
+    # ones; 0043 then replaces some of them (its previous SQL is this revision's) and adds its own.
     expected = {
         **{f"ck_history_archive_runs_{suffix}": sql for suffix, sql in previous._RUN_CHECKS},
         **{f"ck_history_archive_runs_{s}": new for s, _old, new in migration._CHANGED_RUN_CHECKS},
         **{f"ck_history_archive_runs_{suffix}": sql for suffix, sql in migration._NEW_RUN_CHECKS},
     }
-    assert expected == _model_checks(models.HistoryArchiveRun)
+    for suffix, old, _new in automatic._CHANGED_RUN_CHECKS:
+        assert expected[f"ck_history_archive_runs_{suffix}"] == old, suffix
+    assert {
+        **expected,
+        **{f"ck_history_archive_runs_{s}": new for s, _old, new in automatic._CHANGED_RUN_CHECKS},
+        **{f"ck_history_archive_runs_{suffix}": sql for suffix, sql in automatic._NEW_RUN_CHECKS},
+    } == _model_checks(models.HistoryArchiveRun)
     assert {
         column: (minimum, maximum)
         for column, _default, minimum, maximum in migration._POLICY_COLUMNS
@@ -207,12 +221,14 @@ def test_the_migration_literals_match_the_models_and_0040() -> None:
         == models.POLICY_BACKUP_KEEP_PRE_PURGE_SQL
     )
     # The guards the migration creates are pinned by check (h); 0042 (history
-    # archival step 3) replaces the Movement guard's function, so its pin is 0042's.
-    for name, body in (
-        (migration._RUNS_FUNCTION, migration._RUNS_BODY),
-        (migration._FLOWS_FUNCTION, migration._FLOWS_BODY),
-    ):
-        assert hashlib.sha256(body.encode("utf-8")).hexdigest() == GUARD_FUNCTION_SHA256[name]
+    # archival step 3) replaces the Movement guard's function, so its pin is 0042's, and 0043
+    # (step 4) the run guard's, which it restores on its downgrade.
+    assert (
+        hashlib.sha256(migration._FLOWS_BODY.encode("utf-8")).hexdigest()
+        == GUARD_FUNCTION_SHA256[migration._FLOWS_FUNCTION]
+    )
+    assert migration._RUNS_FUNCTION == automatic._RUNS_FUNCTION
+    assert migration._RUNS_BODY == automatic._PREVIOUS_RUNS_BODY
     assert GUARD_TRIGGERS[migration._DELETE_TRIGGER].function == migration._DELETE_FUNCTION
     assert GUARD_TRIGGERS[migration._MOVEMENTS_TRIGGER].definition.startswith(
         "CREATE TRIGGER trg_part_movements_forbid_mutation BEFORE UPDATE OR TRUNCATE ON"

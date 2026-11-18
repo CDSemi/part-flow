@@ -15,7 +15,7 @@ overrides them: where it and the implementation disagree, the disagreement is a 
 licence to invent behaviour. The rules it restates come mainly from PROJECT_PROFILE §7, §8, §13, §17, §18, §21 (Work
 Orders), §24 to §25 and §28, and from GUI_DESIGN §11 (Work Orders).
 
-The schema described here is the current schema at migration head `0042_phase16_deletion_requests`. The slice's own
+The schema described here is the current schema at migration head `0043_phase16_automatic_runs`. The slice's own
 tables were created by the migrations `0002_phase3_domain`, `0004_phase4_audit` and `0005_phase4_release_index`; later
 migrations added columns, widened checks and added tables, and each section states the current shape.
 
@@ -448,8 +448,9 @@ The columns follow PROJECT_PROFILE §8.11. A release writes the `RECEIVED` Movem
   (§17). This guard binds the application at all times. Only two separate, privileged maintenance paths outside this
   slice delete Movements (PROJECT_PROFILE §28), both carried out by the host job as the maintenance role. In the purge
   of Movement-history archival, a User who holds Run history archival and purge (`RUN_HISTORY_ARCHIVAL_AND_PURGE`)
-  requests a run in Administration, and the job deletes the archived Movements of whole closed flow components after the
-  archive's verification, its off-host copy and a pre-purge backup (§17 History archival tables). In a permanent
+  requests a run in Administration, approves a run that the job proposed, or lets automatic runs start without
+  approval (a standing authorization), and the job deletes the archived Movements of whole closed flow components after
+  the archive's verification, its off-host copy and a pre-purge backup (§17 History archival tables). In a permanent
   deletion request, a User who holds Delete Work Orders and Part Numbers permanently
   (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), or an operator on the host, requests the deletion of named Work
   Orders or of one Part Number, and the job deletes exactly the rows the request stored after a pre-purge backup (§17
@@ -754,7 +755,7 @@ The constraints are listed in §17.
   | `PUT /api/policies/worker-sessions` | `{worker_session_timeout_minutes, badge_confirm_done, badge_confirm_queue, badge_confirm_undo}` |
   | `PUT /api/policies/correction-permissions` | `{undo_reason_required}` |
   | `PUT /api/policies/due-soon` | `{due_soon_min_days, due_soon_lead_time_percent, due_soon_max_days}` |
-  | `PUT /api/policies/data-retention` (History archival & purge) | `{retention_period_months, shortest_retention_months, archive_max_wait_days, archive_start_minute, archive_preview_seconds, archive_purge_batch_movements, archive_purge_batch_part_numbers}`, with the metadata `{reason}` when the shortest allowed period changed (rows written before `0040_phase16_history_archive` hold only `{retention_period_months}`, and rows written before `0041_phase16_history_purge` have no `archive_purge_batch_*` keys) |
+  | `PUT /api/policies/data-retention` (History archival & purge) | `{retention_period_months, shortest_retention_months, archive_max_wait_days, archive_start_minute, archive_preview_seconds, archive_purge_batch_movements, archive_purge_batch_part_numbers, archive_automatic_runs, archive_measure, archive_limit_movement_rows, archive_limit_history_months, archive_limit_database_gib, archive_approval_required, archive_interval_days}`, with the metadata `{reason}` when the shortest allowed period changed, `{reason, standing_authorization: "granted"}` when the approval step of automatic runs was switched off or its standing authorization renewed, and `{standing_authorization: "withdrawn"}` when the step was switched on again (rows written before `0040_phase16_history_archive` hold only `{retention_period_months}`, rows written before `0041_phase16_history_purge` have no `archive_purge_batch_*` keys, and rows written before `0043_phase16_automatic_runs` have none of the keys of the automatic runs) |
   | `PUT /api/policies/sign-in` | `{user_session_expires, user_session_days, sign_in_lockout_attempts, sign_in_lockout_minutes, require_password_change}` |
   | `PUT /api/policies/backups` | `{backup_interval_hours, backup_keep_hourly, backup_keep_daily, backup_keep_weekly, backup_keep_pre_purge}` (rows written before `0041_phase16_history_purge` have no `backup_keep_pre_purge` key) |
   | `PUT /api/policies/mail-server` | `{mail_host, mail_port, mail_security, mail_username, mail_password_set, mail_sender, mail_timeout_seconds}`, with the metadata `{mail_password_changed}`; never the password (rows written before `0037_phase17_two_step` have no `mail_timeout_seconds` key) |
@@ -765,7 +766,10 @@ The constraints are listed in §17.
   The `sign-in`, `backups`, `mail-server`, `two-step` and `data-retention` rows carry `actor_user_id` set to the
   signed-in User. Where the retention period was never saved, `0040_phase16_history_archive` set it to 24 months and
   appended one `data-retention` row with no actor and the metadata `{"source": "migration", "revision":
-  "0040_phase16_history_archive"}`. A
+  "0040_phase16_history_archive"}`. The `data-retention` row that switches the approval step of automatic runs off,
+  or renews its authorization, is the standing authorization of automatic runs: `application_policy` keeps its id in
+  `archive_authorization_id` (§17), the snapshot never holds that id, and a renewal is an effective change with equal
+  snapshots. A
   changed mail server password with nothing else changed is an effective change: the snapshots are equal and the
   metadata says `mail_password_changed: true`.
 - Password writes append `UPDATED` rows for entity type `User` with the snapshot `{password_set, password_temporary,
@@ -940,12 +944,16 @@ Hot list removals it triggers are audited as described above.
   the confirmation of an off-host copy appends one row with `entity_type` `HistoryArchiveRun` and `entity_id` the run
   id as text, in the same transaction as the change. The counts that each purge batch raises while the run stays
   `PURGING` append none.
-- The request in Administration is `CREATED` (`before_data` NULL); every later change is `UPDATED`. The snapshot is
-  every column of `history_archive_runs` (times as UTC ISO-8601 text) plus `"groups": ["MOVEMENT_HISTORY"]`.
-- Rows written from Administration (the request, a cancellation, the copy confirmation) carry `actor_user_id` and the
-  metadata `{"source": "web", "command": "request" | "cancel" | "copy_confirmation"}`. Rows written by the host job carry
-  no actor and the metadata `{"source": "maintenance", "command": "export" | "verify" | "copy" | "next" | "purge" |
-  "recover"}` (`next` fails a run whose requester no longer may run it).
+- The creation of a run is `CREATED` (`before_data` NULL): a request in Administration, or an automatic run that the
+  host job's `history-archive evaluate` created; every later change is `UPDATED`. The snapshot is every column of
+  `history_archive_runs` (times as UTC ISO-8601 text) plus `"groups": ["MOVEMENT_HISTORY"]`.
+- Rows written from Administration (the request, the approval or dismissal of a proposed run, a cancellation, the copy
+  confirmation) carry `actor_user_id` and the metadata `{"source": "web", "command": "request" | "approve" | "dismiss" |
+  "cancel" | "copy_confirmation"}`. Rows written by the host job carry no actor and the metadata `{"source":
+  "maintenance", "command": "evaluate" | "export" | "verify" | "copy" | "next" | "purge" | "recover"}` (`evaluate`
+  creates an automatic run; `next` and `purge` fail a run whose requester, approver or standing authorization's User no
+  longer may run it, and a run created under a standing authorization once the approval step was switched on again
+  since, automatic runs are off, or the retention period no longer allows its cutoff).
 - The maintenance database role inserts these rows without `RETURNING`, and the trigger
   `trg_audit_events_maintenance_scope` limits what it may append (§17).
 
@@ -1292,14 +1300,27 @@ one scan of `part_movements`; the downgrade refuses while any session, Area over
 - The other settings of History archival & purge, each `integer NOT NULL` with its default and a range CHECK named
   `ck_application_policy_<column>_range`. From `0040_phase16_history_archive`: `shortest_retention_months` (12;
   1–1200), the shortest allowed retention period, below which the run guard refuses a cutoff (§17 History archival
-  tables); `archive_max_wait_days` (7; 1–365), the days a run may wait for its copy confirmation before the host job's
-  status reports it; `archive_start_minute` (20; 0–59), the minute of the hour at which the host job's hourly work
+  tables); `archive_max_wait_days` (7; 1–365), the days a run may wait for its copy confirmation, or a proposed run for
+  its approval, before the host job's status reports it; `archive_start_minute` (20; 0–59), the minute of the hour at
+  which the host job's hourly work
   starts; and `archive_preview_seconds` (90; 10–600), the time limit of a preview, whose default answers inside the
   100 seconds after which Cloudflare ends a request. From `0041_phase16_history_purge`:
   `archive_purge_batch_movements` (50,000; 100–1,000,000) and `archive_purge_batch_part_numbers` (20; 1–1000), the
   most Movements and Part Numbers that one purge batch (one transaction of whole flow components) holds; a component
-  larger than a limit is a batch of its own, and the purge reads both at each start. The downgrade of each migration
+  larger than a limit is a batch of its own, and the purge reads both at each start. From
+  `0043_phase16_automatic_runs`: the limit of each measure of automatic runs — `archive_limit_movement_rows`
+  (5,000,000; 0–1,000,000,000), `archive_limit_history_months` (1; 0–1200) and `archive_limit_database_gib` (20;
+  0–100,000) — and `archive_interval_days` (7; 1–365), the days between automatic runs. The downgrade of each migration
   refuses while one of its settings differs from its default.
+- The automatic runs of History archival & purge (`0043_phase16_automatic_runs`): `archive_automatic_runs boolean NOT
+  NULL DEFAULT false`, whether the host job's `history-archive evaluate` creates runs; `archive_measure text NOT NULL
+  DEFAULT 'LIVE_MOVEMENT_ROWS'` with `ck_application_policy_archive_measure_allowed` (`LIVE_MOVEMENT_ROWS`,
+  `RETAINED_HISTORY_AGE` or `DATABASE_SIZE`), what decides that a run is needed; `archive_approval_required boolean NOT
+  NULL DEFAULT true`, whether an automatic run waits for a person's approval; and `archive_authorization_id bigint
+  NULL`, foreign key `fk_application_policy_archive_authorization_id_audit_events` to `audit_events (id)`: the audit
+  row that switched the approval step off (the standing authorization), set exactly while the step is off
+  (`ck_application_policy_archive_authorization_shape`: `archive_approval_required = (archive_authorization_id IS
+  NULL)`). Only the archival module and the host job read them.
 - `backup_interval_hours` (default 1, `ck_application_policy_backup_interval_hours_allowed`: 1, 2, 3, 4, 6, 8, 12 or
   24), `backup_keep_hourly` (default 48, `ck_application_policy_backup_keep_hourly_range`, 0–720), `backup_keep_daily`
   (default 30, `ck_application_policy_backup_keep_daily_range`, 1–3650) and `backup_keep_weekly` (default 52,
@@ -1475,20 +1496,41 @@ downgrade refuses while any correction row exists; otherwise it drops the CHECK 
 ### History archival tables
 
 Migration `0040_phase16_history_archive` adds the two tables of Movement-history archival runs (Phase 16, archival
-design step 1: runs that export, verify and copy an archive), and `0041_phase16_history_purge` adds the purge (step 2:
+design step 1: runs that export, verify and copy an archive), `0041_phase16_history_purge` adds the purge (step 2:
 after the off-host copy and a pre-purge backup, the host job deletes the archived Movements, and the carry-forward
-records stand in for them).
+records stand in for them), and `0043_phase16_automatic_runs` adds the automatic runs (step 4: when a measure passes
+its limit, the host job proposes a run for approval, or starts it under a standing authorization).
 
 **`history_archive_runs`**: one row per run.
 
 - PK `pk_history_archive_runs` `id` (integer identity). `state text NOT NULL` with `ck_history_archive_runs_state`:
-  the open states `APPROVED`, `RUNNING`, `WAITING_FOR_COPY` and `PURGING`, and the final states `COMPLETED`,
-  `COMPLETED_WITH_SKIPS`, `NOTHING_ELIGIBLE`, `CANCELLED` and `FAILED`.
-- The request, which never changes: `cutoff timestamptz NOT NULL` (the start of a site-calendar day), `reason text NOT
-  NULL` (`ck_history_archive_runs_reason_length`, 1–500 characters), `requested_by_user_id` FK to `users (id)`,
-  `requested_at timestamptz NOT NULL DEFAULT now()`, and the counts its preview found: `preview_components`,
-  `preview_flows`, `preview_movements`, `preview_first_occurred_at`, `preview_last_occurred_at` and
-  `preview_archive_bytes` (`ck_history_archive_runs_preview_shape`).
+  the open states `PROPOSED` (an automatic run waiting for approval), `APPROVED`, `RUNNING`, `WAITING_FOR_COPY` and
+  `PURGING`, and the final states `COMPLETED`, `COMPLETED_WITH_SKIPS`, `NOTHING_ELIGIBLE`, `DISMISSED` (a proposed run a
+  person dismissed), `CANCELLED` and `FAILED`.
+- The request, which never changes: `trigger text NOT NULL DEFAULT 'MANUAL'` (`ck_history_archive_runs_trigger`:
+  `MANUAL`, requested in Administration, or `AUTOMATIC`, created by the host job's `history-archive evaluate`),
+  `cutoff timestamptz NOT NULL` (the start of a site-calendar day), `reason text NOT NULL`
+  (`ck_history_archive_runs_reason_length`, 1–500 characters; an automatic run's reason names the measure, its value,
+  its limit and the retention period), `requested_by_user_id` FK to `users (id)`, NULL exactly for an automatic run
+  (`ck_history_archive_runs_requester_shape`), `requested_at timestamptz NOT NULL DEFAULT now()`, `authorization_id
+  bigint` FK `fk_history_archive_runs_authorization_id_audit_events` to `audit_events (id)` (the standing authorization
+  an automatic run was created under), and the counts its preview found: `preview_components`, `preview_flows`,
+  `preview_movements`, `preview_first_occurred_at`, `preview_last_occurred_at` and `preview_archive_bytes`
+  (`ck_history_archive_runs_preview_shape`).
+- Who authorized it (`0043_phase16_automatic_runs`): `approved_by_user_id` FK to `users (id)`, `approved_at` and
+  `approval_reason`, the approval of a proposed run by a person with a reason of their own, set together once
+  (`ck_history_archive_runs_approval_shape`: 1–500 characters, not before `requested_at`); `dismissed_by_user_id` FK to
+  `users (id)`, set exactly when `DISMISSED`; `ck_history_archive_runs_authority_shape`: a manual run has neither an
+  approval nor an authorization (its request is the approval), a `PROPOSED` or `DISMISSED` automatic run neither, and
+  every other automatic run exactly one of the two; and `authorization_failed boolean NOT NULL DEFAULT false`, set when
+  the run failed because the User of its authority — its requester, its approver or the User of its standing
+  authorization — was no longer active or no longer held Run history archival and purge, or because the approval step
+  of automatic runs was switched on again after the run was created under a standing authorization (even if switched
+  off again since) (`ck_history_archive_runs_authorization_failed_shape`: only on a `FAILED` run). A standing
+  authorization under which a run so failed stays invalid, even once its User may run archival again, until a key
+  holder saves the approval setting again. A run created under a standing authorization that the job stops because
+  automatic runs are off, or because the retention period no longer allows its cutoff, fails without it, and its
+  standing authorization stays valid.
 - The host job's progress, all nullable: `started_at`; `archive_name`, `exported_at`, `exported_components`,
   `exported_flows`, `exported_movements`, `exported_lineage_edges`, `exported_assigned_routes`, `archive_bytes` and
   `manifest_sha256`, set together (`ck_history_archive_runs_export_shape`; `ck_history_archive_runs_archive_name_shape`:
@@ -1497,12 +1539,14 @@ records stand in for them).
   that the verification or the purge's re-check found changed); `copied_at`, set once, when the job copied the
   archive off the host and checked the copy; `copy_confirmed_at` exactly with `copy_confirmed_by_user_id` FK to
   `users (id)` (`ck_history_archive_runs_copy_confirmation_shape`); `finished_at`, set exactly in the final states,
-  and `cancelled_by_user_id` FK to `users (id)`, set exactly when `CANCELLED` (`ck_history_archive_runs_finish_shape`);
+  `cancelled_by_user_id` FK to `users (id)`, set exactly when `CANCELLED`, and `dismissed_by_user_id`, set exactly when
+  `DISMISSED` (`ck_history_archive_runs_finish_shape`);
   `result`, set exactly when `COMPLETED` or `COMPLETED_WITH_SKIPS` (`ck_history_archive_runs_result_shape`): `PURGED`
   (the purge deleted at least one component), `NOTHING_PURGED` (every component was skipped, so nothing was deleted)
   or `EXPORT_ONLY`, which only the `COMPLETED` runs that step 1 finished carry; `failure_reason`, set exactly when
   `FAILED` (`ck_history_archive_runs_failure_shape`, at most 2,000 characters). `ck_history_archive_runs_progress_shape`
-  ties `started_at` and `verified_at` to the states that need them; `ck_history_archive_runs_skips_shape` gives a
+  ties `started_at` and `verified_at` to the states that need them (a `PROPOSED`, `APPROVED` or `DISMISSED` run has no
+  `started_at`); `ck_history_archive_runs_skips_shape` gives a
   `COMPLETED` run no skipped component (an `EXPORT_ONLY` run excepted) and a `COMPLETED_WITH_SKIPS` run at least one;
   and `ck_history_archive_runs_completed_copy` requires `copied_at` or `copy_confirmed_at` of a `PURGING` run and of a
   finished run whose result is `PURGED` or `EXPORT_ONLY`.
@@ -1517,20 +1561,29 @@ records stand in for them).
   - `receipt_sha256`, the SHA-256 of the purge receipt file `<archive_name>.purged.json` that the job writes beside the
     archive folder (`ck_history_archive_runs_receipt_shape`: 64 lowercase hexadecimal characters; set on every `PURGED`
     or `NOTHING_PURGED` run, allowed on a `FAILED` run whose purge started, and set nowhere else).
-- The partial UNIQUE expression index `uq_history_archive_runs_open` on `((true)) WHERE state IN ('APPROVED',
-  'RUNNING', 'WAITING_FOR_COPY', 'PURGING')`: at most one run is open, even when two requests race.
+- The partial UNIQUE expression index `uq_history_archive_runs_open` on `((true)) WHERE state IN ('PROPOSED',
+  'APPROVED', 'RUNNING', 'WAITING_FOR_COPY', 'PURGING')`: at most one run is open, even when two requests, or a request
+  and the host job's evaluation, race.
 - The guard trigger `trg_history_archive_runs_guard_mutation` (row-level, `BEFORE INSERT OR DELETE OR UPDATE`) and
   `trg_history_archive_runs_forbid_truncate` (function `partflow_history_archive_runs_guard_mutation`):
-  - an insert must be `APPROVED` with no progress and no purge evidence, and its cutoff may not be newer than `now()`
-    minus `shortest_retention_months` (read from the policy row; compared in UTC with four days' allowance, because
-    the application, which alone knows the site's calendar and enforces the rule exactly, counts the months back from
-    the site's date, which can be a day ahead of UTC at the end of a month); that refusal reports SQLSTATE 23514 with
-    the trigger's name as its constraint, so the request answers 409;
-  - the request columns never change, a finished run never changes, and no run is deleted or truncated;
-  - the application role may only cancel an `APPROVED` or `WAITING_FOR_COPY` run and confirm the copy of a
-    `WAITING_FOR_COPY` run once;
+  - an insert has no progress, no purge evidence, no approval, no dismissal and no failed authority, and its cutoff may
+    not be newer than `now()` minus `shortest_retention_months` (read from the policy row; compared in UTC with four
+    days' allowance, because the application, which alone knows the site's calendar and enforces the rule exactly,
+    counts the months back from the site's date, which can be a day ahead of UTC at the end of a month); that refusal
+    reports SQLSTATE 23514 with the trigger's name as its constraint, so the request answers 409;
+  - a manual run is inserted `APPROVED` without an authorization, never by the maintenance role (a role that may write
+    archive records and does not own the table); an automatic run is inserted only by a role that may write archive
+    records (the maintenance role, or the owner), without a requesting User, either `PROPOSED` without an
+    authorization or `APPROVED` with exactly the standing authorization that the policy row holds while the approval
+    step is off;
+  - the request columns (the trigger and the authorization included) never change, a finished run never changes, and
+    no run is deleted or truncated;
+  - the application role may only approve a `PROPOSED` run (its state, approver, time and reason, nothing else),
+    dismiss it (its state, end time and who dismissed it), cancel an `APPROVED` or `WAITING_FOR_COPY` run and confirm
+    the copy of a `WAITING_FOR_COPY` run once;
   - every other change needs a role that may write archive records (the maintenance role, or the owner) while the
-    transaction-local setting `partflow.archive_run_id` names the run. That job keeps a run in its state while it
+    transaction-local setting `partflow.archive_run_id` names the run. That job never moves, approves or dismisses a
+    `PROPOSED` run; it keeps a run in its state while it
     records progress (a `PURGING` run then changes only its purged and skipped counts, which only rise), and its
     transitions are: `APPROVED` to `RUNNING` or `FAILED`; `RUNNING` to `WAITING_FOR_COPY`,
     `NOTHING_ELIGIBLE`, `PURGING`, `COMPLETED_WITH_SKIPS` (every component was skipped at the verification) or
@@ -1539,9 +1592,9 @@ records stand in for them).
   - the job sets `copied_at` once; it writes the backup evidence and `purge_started_at` only in the change from
     `RUNNING` to `PURGING`, which needs the verified archive, its off-host copy (made or confirmed) and the pre-purge
     backup, and never changes them afterwards; it never sets the result `EXPORT_ONLY`;
-  - the job never sets `copy_confirmed_at`, `copy_confirmed_by_user_id` or `cancelled_by_user_id`, and the maintenance
-    role (a role that may write archive records and does not own the table) changes a run in no other way, so its
-    credential alone can neither confirm a copy nor cancel a run.
+  - the job never sets `copy_confirmed_at`, `copy_confirmed_by_user_id`, `cancelled_by_user_id`, the approval or
+    `dismissed_by_user_id`, and the maintenance role changes a run in no other way, so its credential alone can neither
+    confirm a copy, approve, dismiss nor cancel a run.
 
 **`history_archived_flows`**: the carry-forward record of each flow of an archived component, written by the host job
 at export.
@@ -1591,7 +1644,11 @@ interrupted purge leaves whole components only, and the next start resumes a `PU
 does not last (a lost connection, the server shutting down, a deadlock, a serialization failure, a lock not
 available, or a statement timeout) leaves the run `PURGING` too; any other error fails it.
 
-The downgrade of `0041_phase16_history_purge` refuses while a run is `PURGING` or `COMPLETED_WITH_SKIPS`, has the
+The downgrade of `0043_phase16_automatic_runs` refuses while a run is `PROPOSED` or `DISMISSED`, is automatic, has
+an approval, a dismissal, an authorization or a failed authority, or while one of its settings differs from its
+default; otherwise it restores the run guard, the CHECKs and the open index that `0041_phase16_history_purge` left,
+drops its columns, and makes `requested_by_user_id` `NOT NULL` again. The downgrade of `0041_phase16_history_purge`
+refuses while a run is `PURGING` or `COMPLETED_WITH_SKIPS`, has the
 result `PURGED` or `NOTHING_PURGED` or any purge column set, while a record is purged, or while one of its settings
 differs from its default; otherwise it restores the guards, CHECKs, indexes and functions of
 `0040_phase16_history_archive`. The downgrade of `0040_phase16_history_archive` refuses while a run, a record or a
@@ -1723,10 +1780,10 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
 - Both application roles are `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, hold no membership
   and own nothing. Privileges are exact sets; no TRUNCATE, REFERENCES, TRIGGER or grant option is ever granted.
 
-| Class | `partflow_app` privileges | Tables (39 at head `0042_phase16_deletion_requests`) |
+| Class | `partflow_app` privileges | Tables (39 at head `0043_phase16_automatic_runs`) |
 |---|---|---|
 | `APPEND_ONLY` | SELECT, INSERT | `part_movements`, `audit_events`, `machine_lifecycle_events`, `quantity_flow_lineage`, `work_order_allocations`, `deletion_request_rows` (written only with their request) |
-| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end), `history_archive_runs` (the row trigger lets the application role only request, cancel and confirm a copy), `deletion_requests` (the row trigger lets the application role only request and cancel) |
+| `GUARDED_UPDATE` | SELECT, INSERT, UPDATE | `worker_sessions` (the row trigger still refuses every change but open-session expiry and end), `history_archive_runs` (the row trigger lets the application role only request a run, approve or dismiss a proposed run, cancel and confirm a copy), `deletion_requests` (the row trigger lets the application role only request and cancel) |
 | `NO_UPDATE` | SELECT, INSERT, DELETE | `assigned_route_steps` (past steps are immutable by trigger and privilege; an adjustment deletes unreferenced future steps) |
 | `READ_ONLY` | SELECT | `alembic_version`, `history_archived_flows` |
 | `ORDINARY` | SELECT, INSERT, UPDATE, DELETE | `application_policy`, `areas`, `assigned_routes`, `departments`, `machine_asset_tag_config`, `machines`, `mail_server_credentials`, `operations`, `part_numbers`, `quantity_flows`, `role_permissions`, `roles`, `route_steps`, `route_templates`, `scan_station_devices`, `scan_stations`, `user_credentials`, `user_passkey_setups`, `user_passkeys`, `user_recovery_codes`, `user_sessions`, `user_sign_in_challenges`, `user_totp_factors`, `users`, `work_order_demands`, `work_orders`, `workers` |
@@ -1741,9 +1798,10 @@ demand lines), and replay and reconciliation checks (§15) and concurrency tests
   (the UPDATE only for the row locks of a deletion: their statement triggers refuse every change by it); SELECT,
   INSERT and DELETE on `audit_events`, whose triggers limit what it appends (`HistoryArchiveRun` rows, and the
   `DeletionRequest` and `DELETED` rows of the request it carries out) and what it deletes (the stored audit rows of
-  that request); SELECT and UPDATE on `history_archive_runs` and `deletion_requests` (no INSERT: only a person
-  requests a run or a deletion, or the owner records an operator's deletion request) and SELECT, INSERT and UPDATE on
-  `history_archived_flows`, whose guard triggers decide which changes it may make; and SELECT on
+  that request); SELECT, INSERT and UPDATE on `history_archive_runs`, whose row trigger admits from it only the
+  automatic runs of `history-archive evaluate` and the job's own changes; SELECT and UPDATE on `deletion_requests` (no
+  INSERT: only a person requests a deletion, or the owner records an operator's deletion request) and SELECT, INSERT
+  and UPDATE on `history_archived_flows`, whose guard triggers decide which changes it may make; and SELECT on
   `deletion_request_rows`. It never reads credentials, sign-in sessions, mail or Scan Station device tables.
 - Neither role holds any sequence privilege (identity columns), or `CREATE` on schema `public` or on the database.
   PUBLIC holds nothing on any PartFlow table or sequence, and default privileges for PUBLIC and both roles are removed.
@@ -1804,7 +1862,7 @@ current columns and constraints are listed in §17, and the roadmap phase is giv
 | ERP fields and synchronization | deferred and not approved (IMPLEMENTATION_ROADMAP Deferred) | an isolated integration boundary; `device_event_id` stays compatible |
 | Offline scan synchronization | not planned (owner decision of 2026-11-13, PROJECT_PROFILE §32); production writes stay blocked while disconnected | `device_event_id` was chosen so that a future approved offline design needs no renaming (§20) |
 | Return of stocked quantity to active production | not part of PartFlow (owner decision of 2026-11-13, PROJECT_PROFILE §18) | none |
-| Further steps of Movement-history archival | IMPLEMENTATION_ROADMAP Phase 16, steps 4 to 7: automatic runs, viewing an archive, optional groups and the final expiry of archived records | the same privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
+| Further steps of Movement-history archival | IMPLEMENTATION_ROADMAP Phase 16, steps 5 to 7: viewing an archive, optional groups and the final expiry of archived records | the same privileged maintenance path under the `partflow_maintenance` role (PROJECT_PROFILE §28; §11 and §17 here) |
 | Further file-import capabilities | deferred until an owner decision asks for them (IMPLEMENTATION_ROADMAP Deferred) | no schema change is planned |
 
 ---
@@ -1883,7 +1941,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-18 | uncommitted | Migration head `0042_phase16_deletion_requests`: permanent deletion requests, with the key Delete Work Orders and Part Numbers permanently (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), the tables `deletion_requests` and `deletion_request_rows`, the row guard of every table a deletion deletes from, the `DeletionRequest` audit rows and the maintenance role's privileges to carry a request out. |
+| 2026-11-18 | uncommitted | Migration head `0043_phase16_automatic_runs`: automatic history archival runs, with the run states `PROPOSED` and `DISMISSED`, the trigger, approval, dismissal, standing authorization and failed authority of a run, the settings of automatic runs with the standing authorization's audit row id, the maintenance role's INSERT of automatic runs, and the approval, dismissal and evaluation audit rows. |
+| 2026-11-18 | `1874636` | Migration head `0042_phase16_deletion_requests`: permanent deletion requests, with the key Delete Work Orders and Part Numbers permanently (`DELETE_WORK_ORDERS_AND_PART_NUMBERS_PERMANENTLY`), the tables `deletion_requests` and `deletion_request_rows`, the row guard of every table a deletion deletes from, the `DeletionRequest` audit rows and the maintenance role's privileges to carry a request out. |
 | 2026-11-18 | `d094f5e` | Migration head `0041_phase16_history_purge`: the purge of archived Movement history, with the run states `PURGING` and `COMPLETED_WITH_SKIPS`, the results `PURGED` and `NOTHING_PURGED`, the pre-purge backup evidence and purge counts of a run, the Movement row guard `trg_part_movements_guard_delete`, the maintenance role's DELETE on `part_movements`, the purge batch settings, the pre-purge backups kept, and the released quantity read from the purged records too. |
 | 2026-11-17 | `2f12d33` | Migration head `0040_phase16_history_archive`: the history archival runs and their carry-forward records, their guards, the settings of History archival & purge with the 24-month retention default, the `HistoryArchiveRun` audit rows, the key `RUN_HISTORY_ARCHIVAL_AND_PURGE` and the maintenance role's privileges. |
 | 2026-11-17 | `1490927` | `GET /api/part-numbers/resolve` answers the server's canonical form of an entered PN for Add Part. |

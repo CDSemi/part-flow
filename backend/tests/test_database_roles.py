@@ -394,8 +394,9 @@ def test_every_model_table_is_classified() -> None:
     }
     assert MAINTENANCE_PRIVILEGES["audit_events"] == {"SELECT", "INSERT", "DELETE"}
     # It never requests a run or a deletion: only a person does (or the owner,
-    # for an operator's deletion request).
-    assert MAINTENANCE_PRIVILEGES["history_archive_runs"] == {"SELECT", "UPDATE"}
+    # for an operator's deletion request). Since step 4 it inserts the automatic
+    # runs of history-archive evaluate, and the run guard admits nothing else.
+    assert MAINTENANCE_PRIVILEGES["history_archive_runs"] == {"SELECT", "INSERT", "UPDATE"}
     assert MAINTENANCE_PRIVILEGES["deletion_requests"] == {"SELECT", "UPDATE"}
     assert MAINTENANCE_PRIVILEGES["deletion_request_rows"] == {"SELECT"}
     assert MAINTENANCE_PRIVILEGES["history_archived_flows"] == {"SELECT", "INSERT", "UPDATE"}

@@ -69,6 +69,14 @@ _OTHER_SETTINGS = {
     "archive_preview_seconds": 90,
     "archive_purge_batch_movements": 50000,
     "archive_purge_batch_part_numbers": 20,
+    # Automatic runs (history archival step 4, migration 0043).
+    "archive_automatic_runs": False,
+    "archive_measure": "LIVE_MOVEMENT_ROWS",
+    "archive_limit_movement_rows": 5000000,
+    "archive_limit_history_months": 1,
+    "archive_limit_database_gib": 20,
+    "archive_approval_required": True,
+    "archive_interval_days": 7,
 }
 
 _E_T1 = (
@@ -163,8 +171,13 @@ def _ok(response: Any, status: int = 200) -> dict[str, Any]:
 
 
 def _values(body: dict[str, Any]) -> dict[str, Any]:
-    """A policy section's value fields, without the shared row timestamp."""
-    return {key: value for key, value in body.items() if key != "updated_at"}
+    """A policy section's value fields, without the shared row timestamp (and, for History
+    archival & purge, the standing authorization it reports beside its settings)."""
+    return {
+        key: value
+        for key, value in body.items()
+        if key not in ("updated_at", "standing_authorization")
+    }
 
 
 def _stamp(body: dict[str, Any]) -> datetime.datetime:
@@ -273,7 +286,8 @@ def _release(client: TestClient) -> None:
 def test_the_retention_period_starts_at_24_months(client: TestClient, db_engine: Engine) -> None:
     """Migration 0040 set the period that was never saved, and recorded it (design §3.1)."""
     policy = _ok(admin_of(client).get(_POLICY_PATH))
-    assert set(policy) == {_KEY, *_OTHER_SETTINGS, "updated_at"}
+    assert set(policy) == {_KEY, *_OTHER_SETTINGS, "standing_authorization", "updated_at"}
+    assert policy["standing_authorization"] is None
     assert {key: policy[key] for key in _OTHER_SETTINGS} == _OTHER_SETTINGS
     assert policy["updated_at"]
     [first, *_] = _policy_audits(db_engine, _SECTION)

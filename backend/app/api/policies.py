@@ -38,17 +38,24 @@ handlers in ``app.api.errors`` translate typed failures.
   policy, also when nothing changed.
 - ``GET /policies/data-retention`` — the settings of Administration →
   History archival & purge (Phase 13 slice 11; Phase 16 history archival,
-  design B steps 1 and 2): the Movement-history retention period in whole
-  months or ``null`` (no retention period), the shortest allowed period,
-  the days a run may wait for its copy confirmation, the Start minute of
-  the host job's hourly work, the preview time limit and the purge batch
-  limits (Movements and Part Numbers per batch).
+  design B steps 1, 2 and 4): the Movement-history retention period in
+  whole months or ``null`` (no retention period), the shortest allowed
+  period, the days a run may wait for its copy confirmation or its
+  approval, the Start minute of the host job's hourly work, the preview
+  time limit, the purge batch limits (Movements and Part Numbers per batch),
+  and the automatic runs: on or off, the measure and the limit of each
+  measure, the approval step, the days between automatic runs and the
+  standing authorization (who switched the approval step off, when, why,
+  and whether it is still valid; ``null`` while the step is on).
 - ``PUT /policies/data-retention`` — a partial merge like User sign-in
-  (strict integers; ``retention_period_months: null`` clears the period; an
-  empty body or an extra field is 422) plus ``reason``, required when the
-  shortest allowed period changes; the ranges are the Application's 422;
-  requires ``RUN_HISTORY_ARCHIVAL_AND_PURGE``; answers with the stored
-  section, also when nothing changed. Saving archives nothing: the runs are
+  (strict integers and booleans; ``retention_period_months: null`` clears
+  the period; an empty body or an extra field is 422) plus ``reason``,
+  required when the shortest allowed period changes or the approval step is
+  switched off, and ``confirmation``, the typed confirmation that switching
+  the approval step off needs (with the step already off it renews the
+  standing authorization); the ranges are the Application's 422; requires
+  ``RUN_HISTORY_ARCHIVAL_AND_PURGE``; answers with the stored section, also
+  when nothing changed. Saving archives nothing: the runs are
   ``/api/history-archive`` (``app.api.history_archive``).
 - ``GET /policies/sign-in`` — Administration → Settings → User sign-in
   (Phase 14 slice 1): whether user sign-ins expire and after how many
@@ -135,7 +142,7 @@ from sqlalchemy.orm import Session
 from app.api.authorization import RequirePermission, SignedInDep
 from app.api.dependencies import SessionDep
 from app.api.session import Secret
-from app.application import outgoing_mail, policies
+from app.application import history_archive, outgoing_mail, policies
 from app.application.authentication import Principal
 from app.application.common import UNSET
 from app.domain.enums import MailSecurity, Permission
@@ -235,6 +242,25 @@ def _due_soon_response(policy: ApplicationPolicy) -> DueSoonPolicyResponse:
     )
 
 
+class StandingAuthorizationUser(BaseModel):
+    user_id: int
+    display_name: str
+
+
+class StandingAuthorizationResponse(BaseModel):
+    """The audit row that switched the approval step of automatic runs off."""
+
+    audit_event_id: int
+    authorized_by: StandingAuthorizationUser | None
+    authorized_at: datetime.datetime | None
+    reason: str | None
+    # Its User is still active and still holds Run history archival and purge,
+    # and no run failed under it because its User could no longer run it.
+    valid: bool
+    # Why it is no longer valid (automatic runs wait until it is saved again).
+    problem: str | None
+
+
 class HistoryArchivePolicyResponse(BaseModel):
     retention_period_months: int | None
     shortest_retention_months: int
@@ -243,6 +269,15 @@ class HistoryArchivePolicyResponse(BaseModel):
     archive_preview_seconds: int
     archive_purge_batch_movements: int
     archive_purge_batch_part_numbers: int
+    # Automatic runs (design B step 4).
+    archive_automatic_runs: bool
+    archive_measure: str
+    archive_limit_movement_rows: int
+    archive_limit_history_months: int
+    archive_limit_database_gib: int
+    archive_approval_required: bool
+    archive_interval_days: int
+    standing_authorization: StandingAuthorizationResponse | None
     # The singleton row's timestamp, shared by every policy section.
     updated_at: datetime.datetime
 
@@ -253,7 +288,9 @@ class HistoryArchivePolicyPutRequest(BaseModel):
     ``retention_period_months: null`` clears the retention period; an
     explicit ``null`` for another setting reaches the service (exclude_unset)
     and is refused there. ``reason`` is required when the shortest allowed
-    period changes and recorded with that change only.
+    period changes or the approval step is switched off, and recorded with
+    that change only; ``confirmation`` is the typed confirmation of switching
+    the approval step off (checked, never stored).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -265,10 +302,21 @@ class HistoryArchivePolicyPutRequest(BaseModel):
     archive_preview_seconds: StrictInt | None = None
     archive_purge_batch_movements: StrictInt | None = None
     archive_purge_batch_part_numbers: StrictInt | None = None
+    archive_automatic_runs: StrictBool | None = None
+    archive_measure: str | None = None
+    archive_limit_movement_rows: StrictInt | None = None
+    archive_limit_history_months: StrictInt | None = None
+    archive_limit_database_gib: StrictInt | None = None
+    archive_approval_required: StrictBool | None = None
+    archive_interval_days: StrictInt | None = None
     reason: str | None = None
+    confirmation: str | None = None
 
 
-def _history_archive_response(policy: ApplicationPolicy) -> HistoryArchivePolicyResponse:
+def _history_archive_response(
+    session: Session, policy: ApplicationPolicy
+) -> HistoryArchivePolicyResponse:
+    authorization = history_archive.standing_authorization(session, policy.archive_authorization_id)
     return HistoryArchivePolicyResponse(
         retention_period_months=policy.retention_period_months,
         shortest_retention_months=policy.shortest_retention_months,
@@ -277,6 +325,18 @@ def _history_archive_response(policy: ApplicationPolicy) -> HistoryArchivePolicy
         archive_preview_seconds=policy.archive_preview_seconds,
         archive_purge_batch_movements=policy.archive_purge_batch_movements,
         archive_purge_batch_part_numbers=policy.archive_purge_batch_part_numbers,
+        archive_automatic_runs=policy.archive_automatic_runs,
+        archive_measure=policy.archive_measure,
+        archive_limit_movement_rows=policy.archive_limit_movement_rows,
+        archive_limit_history_months=policy.archive_limit_history_months,
+        archive_limit_database_gib=policy.archive_limit_database_gib,
+        archive_approval_required=policy.archive_approval_required,
+        archive_interval_days=policy.archive_interval_days,
+        standing_authorization=(
+            None
+            if authorization is None
+            else StandingAuthorizationResponse.model_validate(authorization.document())
+        ),
         updated_at=policy.updated_at,
     )
 
@@ -381,7 +441,7 @@ def put_due_soon_policy(
 def get_history_archive_policy(
     principal: SignedInDep, session: SessionDep
 ) -> HistoryArchivePolicyResponse:
-    return _history_archive_response(policies.get_policy(session))
+    return _history_archive_response(session, policies.get_policy(session))
 
 
 @router.put("/policies/data-retention")
@@ -390,10 +450,15 @@ def put_history_archive_policy(
 ) -> HistoryArchivePolicyResponse:
     changes = body.model_dump(exclude_unset=True)
     reason: object = changes.pop("reason") if "reason" in changes else UNSET
+    confirmation: object = changes.pop("confirmation") if "confirmation" in changes else UNSET
     policy = policies.update_history_archive_policy(
-        session, changes=changes, reason=reason, actor_user_id=principal.user_id
+        session,
+        changes=changes,
+        reason=reason,
+        confirmation=confirmation,
+        actor_user_id=principal.user_id,
     )
-    return _history_archive_response(policy)
+    return _history_archive_response(session, policy)
 
 
 class SignInPolicyResponse(BaseModel):
