@@ -591,7 +591,15 @@ test('a load failure inside the dialog offers Retry while the barcode label stay
   expect(svg.querySelectorAll('rect').length).toBeGreaterThan(20);
   expect(label.querySelector('.lpn')?.textContent).toBe('118-052');
   expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:118-052');
+  // Print Label prints through the shared print sheet: this one label.
+  const sheet = document.body.querySelector(':scope > .pbx-sheet')!;
+  expect(
+    Array.from(sheet.querySelectorAll('.pbx-plabel > .pnb-label .lpn')).map(
+      (el) => el.textContent,
+    ),
+  ).toEqual(['118-052']);
   fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(document.body.querySelector('.pbx-sheet')).toBeNull();
 
   fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
   expect(

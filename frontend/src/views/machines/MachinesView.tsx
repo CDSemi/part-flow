@@ -45,6 +45,7 @@ import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useUiClock } from '../../components/ui-clock';
 import { AreaDot } from '../../components/indicators';
+import { LabelPrintSheet } from '../../components/LabelPrintSheet';
 import { ModalDialog } from '../../components/ModalDialog';
 import { PageNote } from '../../components/PageNote';
 import { TypedConfirmDialog } from '../../components/TypedConfirmDialog';
@@ -1239,8 +1240,8 @@ function IdentityHeader({
 /**
  * Printable Machine barcode label: the display name, the Asset Tag and
  * the Code 128 barcode of the scanned value (`PF:MACHINE:<asset-tag>`).
- * Print Label prints exactly the label area (print styles hide the
- * rest of the page).
+ * Print Label prints only the label, through the shared print sheet
+ * (`LabelPrintSheet`), exactly as Print barcodes prints it.
  */
 function BarcodeLabelDialog({
   machine,
@@ -1255,7 +1256,7 @@ function BarcodeLabelDialog({
       <div className="sub">
         Scan this label to identify <b>{machine.name}</b>.
       </div>
-      <MachineBarcodeLabel machine={machine} className="mg-labelprint" />
+      <MachineBarcodeLabel machine={machine} />
       <div className="row">
         <button className="bigbtn ghost" onClick={onClose}>
           Cancel (Esc)
@@ -1264,6 +1265,14 @@ function BarcodeLabelDialog({
           Print Label
         </button>
       </div>
+      <LabelPrintSheet
+        labels={[
+          {
+            key: machine.assetTag,
+            label: <MachineBarcodeLabel machine={machine} />,
+          },
+        ]}
+      />
     </ModalDialog>
   );
 }

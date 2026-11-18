@@ -2,8 +2,8 @@ import './print-barcodes.css';
 
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { createPortal } from 'react-dom';
 
+import { LabelPrintSheet } from './LabelPrintSheet';
 import { ModalDialog } from './ModalDialog';
 import {
   checkState,
@@ -29,11 +29,10 @@ import type { BarcodeSection, CheckState } from './print-barcodes';
  * grouping), a key shown in several groups is ONE selection, and
  * `Print Labels` prints every selected label once — shown or not.
  *
- * Printing renders the selected labels into a print sheet that is a
- * direct child of <body> (a portal, hidden on screen, present only
- * while the dialog is open); the print styles show only that sheet,
- * label after label left to right, row after row, page after page,
- * never splitting a label.
+ * Printing renders the selected labels into the shared print sheet
+ * (`LabelPrintSheet`, present only while the dialog is open): only the
+ * sheet prints, label after label left to right, row after row, page
+ * after page, never splitting a label.
  */
 export function PrintBarcodesDialog({
   title,
@@ -180,16 +179,9 @@ export function PrintBarcodesDialog({
           Print Labels
         </button>
       </div>
-      {createPortal(
-        <div className="pbx-sheet" aria-hidden="true">
-          {toPrint.map((key) => (
-            <div key={key} className="pbx-plabel">
-              {renderLabel(key)}
-            </div>
-          ))}
-        </div>,
-        document.body,
-      )}
+      <LabelPrintSheet
+        labels={toPrint.map((key) => ({ key, label: renderLabel(key) }))}
+      />
     </ModalDialog>
   );
 }

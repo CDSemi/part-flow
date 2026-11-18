@@ -1763,12 +1763,22 @@ test('the barcode label dialog renders the scannable Asset Tag barcode', async (
   expect(
     within(label).getByRole('button', { name: 'Print Label' }),
   ).toBeInTheDocument();
+  // Print Label prints through the shared print sheet: exactly this one
+  // label, outside the dialog, as Print barcodes prints it.
+  const sheet = document.body.querySelector(':scope > .pbx-sheet')!;
+  expect(sheet).toHaveAttribute('aria-hidden', 'true');
+  const printed = Array.from(sheet.querySelectorAll('.pbx-plabel > .mg-label'));
+  expect(printed).toHaveLength(1);
+  expect(printed[0].querySelector('.lvalue')?.textContent).toBe(
+    'PF:MACHINE:CD-0105',
+  );
 
-  // Cancel returns to the Edit dialog.
+  // Cancel returns to the Edit dialog; the sheet leaves with the dialog.
   fireEvent.click(within(label).getByRole('button', { name: 'Cancel (Esc)' }));
   expect(
     screen.getByRole('dialog', { name: 'Edit Machine' }),
   ).toBeInTheDocument();
+  expect(document.body.querySelector('.pbx-sheet')).toBeNull();
 });
 
 test('a rejected save keeps the Edit dialog open with the server message', async () => {
@@ -2208,7 +2218,6 @@ test('Print barcodes… lists the active Machines by Area and prints the selecte
   expect(printed[1].querySelector('.lvalue')?.textContent).toBe(
     'PF:MACHINE:CD-0105',
   );
-  expect(printed[1].classList.contains('mg-labelprint')).toBe(false);
   expect(
     printed[1].querySelector('svg.lbarcode')?.querySelectorAll('rect').length,
   ).toBeGreaterThan(20);

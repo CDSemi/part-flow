@@ -1,8 +1,8 @@
 /* Print barcodes — the ONE multi-label dialog of Management → Machines
    and Management → Part Numbers (GUI_DESIGN §12.6, §14.5). On screen
    the cards use the theme tokens; the PRINTED labels are the callers'
-   own single labels (white with black ink), laid out on the print
-   sheet below. */
+   own single labels (white with black ink), laid out on the shared
+   print sheet (LabelPrintSheet, label-print.css). */
 
 /* The dialog is a fixed-height column: the head (title, controls,
    selection bar) and the footer stay put, only the card area scrolls. */
@@ -413,63 +413,4 @@
   margin-top: 0;
   padding-top: 14px;
   border-top: 1px solid var(--hair);
-}
-
-/* ---- Print sheet -------------------------------------------------- */
-
-/* Hidden on screen; it exists only while the dialog is open. */
-.pbx-sheet {
-  display: none;
-}
-
-/* A named page, so these margins never change the single-label prints.
-   No paper size is assumed: the labels fill whatever width the page has. */
-@page pbx-labels {
-  margin: 10mm;
-}
-
-@media print {
-  html:has(> body > .pbx-sheet),
-  body:has(> .pbx-sheet) {
-    height: auto !important;
-    overflow: visible !important;
-    background: #fff !important;
-  }
-
-  /* While the sheet exists, it is the only thing printed. */
-  body:has(> .pbx-sheet) > :not(.pbx-sheet) {
-    display: none !important;
-  }
-
-  /* Labels flow as inline blocks: left to right, then the next row,
-     then the next page; a line of labels never splits across pages. */
-  .pbx-sheet {
-    display: block;
-    page: pbx-labels;
-    font-size: 0;
-    line-height: 0;
-  }
-
-  /* Overrides the single-label rules that hide everything else. */
-  .pbx-sheet,
-  .pbx-sheet * {
-    visibility: visible;
-  }
-
-  /* The single label's physical size: 90 mm wide, black on white. */
-  .pbx-plabel {
-    display: inline-block;
-    vertical-align: top;
-    width: 90mm;
-    font-size: 16px;
-    line-height: normal;
-    break-inside: avoid;
-    page-break-inside: avoid;
-  }
-
-  .pbx-sheet .pbx-plabel > * {
-    margin: 0;
-    border: none;
-    border-radius: 0;
-  }
 }

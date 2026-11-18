@@ -2,6 +2,7 @@ import './pn-barcode.css';
 
 import { pnBarcode } from '../views/scan-station/barcode';
 import { Code128Svg } from './Code128Svg';
+import { LabelPrintSheet } from './LabelPrintSheet';
 import { ModalDialog } from './ModalDialog';
 
 /**
@@ -13,16 +14,13 @@ import { ModalDialog } from './ModalDialog';
  */
 export function PnBarcodeLabel({
   pn,
-  className,
 }: {
   /** The canonical uppercase PN. */
   pn: string;
-  /** Extra class (the single-label print hook `pnb-labelprint`). */
-  className?: string;
 }) {
   const value = pnBarcode(pn);
   return (
-    <div className={`pnb-label${className ? ` ${className}` : ''}`}>
+    <div className="pnb-label">
       <Code128Svg className="lbarcode" value={value} />
       <div className="lpn">{pn}</div>
       <div className="lvalue">{value}</div>
@@ -40,8 +38,9 @@ export function PnBarcodeLabel({
  *
  * The label is fully derived from the PN identity itself, so it works
  * for an existing PN master and for a new canonical PN alike — no
- * master metadata is involved. Print Label prints exactly the label
- * area (print styles hide the rest of the page).
+ * master metadata is involved. Print Label prints only the label,
+ * through the shared print sheet (`LabelPrintSheet`), exactly as Print
+ * barcodes prints it.
  */
 export function PnBarcodeLabelDialog({
   pn,
@@ -57,7 +56,7 @@ export function PnBarcodeLabelDialog({
       <div className="sub">
         Scan this label to identify Part Number <b>{pn}</b>.
       </div>
-      <PnBarcodeLabel pn={pn} className="pnb-labelprint" />
+      <PnBarcodeLabel pn={pn} />
       <div className="row">
         <button type="button" className="bigbtn ghost" onClick={onClose}>
           Cancel (Esc)
@@ -70,6 +69,9 @@ export function PnBarcodeLabelDialog({
           Print Label
         </button>
       </div>
+      <LabelPrintSheet
+        labels={[{ key: pn, label: <PnBarcodeLabel pn={pn} /> }]}
+      />
     </ModalDialog>
   );
 }

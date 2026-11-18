@@ -14,15 +14,12 @@ import { machineBarcode } from '../asset-tags';
  */
 export function MachineBarcodeLabel({
   machine,
-  className,
 }: {
   machine: Pick<Machine, 'name' | 'assetTag'>;
-  /** Extra class (the single-label print hook `mg-labelprint`). */
-  className?: string;
 }) {
   const value = machineBarcode(machine.assetTag);
   return (
-    <div className={`mg-label${className ? ` ${className}` : ''}`}>
+    <div className="mg-label">
       <div className="lname">{machine.name}</div>
       <div className="ltag">{machine.assetTag}</div>
       <Code128Svg className="lbarcode" value={value} />

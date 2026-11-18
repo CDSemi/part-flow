@@ -132,7 +132,6 @@ test('grouped by running Work Order: a PN on two Work Orders is one selection an
       (el) => el.textContent,
     ),
   ).toEqual(['PN-A', 'PN-B']);
-  expect(sheet.querySelector('.pnb-labelprint')).toBeNull();
 });
 
 test('ungrouped: the bounded search and the sort reach the server and the selection survives them', async () => {

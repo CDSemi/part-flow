@@ -2,7 +2,7 @@
 
 > **Ngôn ngữ:** Bản dịch tiếng Việt của [GUI_DESIGN.md](./GUI_DESIGN.md). Bản tiếng Anh là nguồn chuẩn (source of
 > truth); nếu hai bản khác nhau, bản tiếng Anh đúng.
-> Đồng bộ với bản tiếng Anh tại commit `4be2389` cộng các thay đổi chưa commit ngày 2026-11-17.
+> Đồng bộ với bản tiếng Anh tại commit `4539a2b` cộng các thay đổi chưa commit ngày 2026-11-17.
 
 > **Trạng thái:** Hiện hành. Tài liệu này là giao diện người dùng (user interface, UI) mục tiêu đã được duyệt của PartFlow.
 
@@ -3602,8 +3602,8 @@ Maintenance là một override tường minh và không gì hơn.
   giá trị được quét (`PF:MACHINE:<asset-tag>`; bộ mã hóa không phụ thuộc `src/views/code128.ts`, subset B với các bảo vệ
   unit test về cấu trúc) trên một **thẻ nhãn trắng với mực đen ở cả hai theme**, cùng văn bản giá trị. Trên nhãn, **tên
   hiển thị là thông tin chính**, lớn và đậm, trong khi Asset Tag lùi lại thành metadata phụ nhỏ (chính barcode mang nó để
-  quét). `Print Label` in đúng chính xác nhãn (print style ẩn mọi thứ khác trên trang); `Cancel (Esc)` quay lại dialog
-  Edit. Nhãn là MỘT component dùng chung, nên một nhãn in qua Print barcodes (§12.6) giống hệt.
+  quét). `Print Label` chỉ in nhãn, qua cùng tờ in (print sheet) với Print barcodes (§12.6); `Cancel (Esc)` quay lại
+  dialog Edit. Nhãn là MỘT component dùng chung, nên một nhãn in qua Print barcodes giống hệt.
 - **Tên hiển thị.** Nó là bắt buộc và không được trùng với một Machine đang hoạt động của cùng Area: tên hiển thị phải duy
   nhất giữa các Machine đang hoạt động của một Area, và một tên trùng là lỗi trường, không có gì được lưu.
   - Cột tên mang **phản hồi trực tiếp theo từng trường đúng chính xác như dialog Reactivate** (§12.4): một sự trùng tên
@@ -3865,9 +3865,11 @@ action này, dù có hay không có Manage Machines, và nó vẫn dùng đượ
   **`Print Labels`** bị vô hiệu hóa khi chưa có gì được chọn.
 - **In.** `Print Labels` in mỗi nhãn được chọn một lần, theo thứ tự hiển thị. Mỗi nhãn in ra đúng là nhãn đơn của §12.3
   — rộng 90 mm, đen trên trắng, cùng bố cục và barcode, nên quét được đúng như nhãn đơn. Các nhãn lấp đầy giấy từ trái
-  sang phải, sang hàng kế tiếp khi một hàng đầy, rồi sang trang mới khi trang đầy; một nhãn không bao giờ bị chia qua hai
-  trang. Lề trang là 10 mm và không giả định khổ giấy nào: số nhãn mỗi hàng theo khổ giấy người dùng chọn. Chỉ các nhãn
-  được in, không bao giờ là trang hay dialog, và các lần in nhãn đơn không bị ảnh hưởng.
+  sang phải, sang hàng kế tiếp khi một hàng đầy, rồi sang trang mới khi trang đầy; một nhãn không bao giờ bị chia qua
+  hai trang. Không giả định khổ giấy hay lề nào: các nhãn lấp đầy bề rộng mà thiết lập in của trình duyệt để lại, nên số
+  nhãn mỗi hàng theo khổ giấy và lề người dùng chọn. Chỉ các nhãn được in — không bao giờ là trang, dialog hay bất cứ
+  thứ gì một tiện ích mở rộng (extension) của trình duyệt thêm vào trang — và một lần in không bao giờ thêm một trang
+  trắng. Các dialog nhãn đơn (§12.3, §14.3) in qua cùng tờ in đó.
 
 ---
 
@@ -4073,8 +4075,8 @@ của dialog Edit và lời xác nhận của nó (§14.2), và không bao giờ
 `Scan this label to identify Part Number {PN}.` Nó hiển thị một bản render **Code 128** thực của giá trị được quét
 `PF:PN:<part-number>` (bộ mã hóa không phụ thuộc dùng chung `src/views/code128.ts`, §12.3) trên **thẻ nhãn trắng với mực
 đen ở cả hai theme**, với **văn bản PN bên dưới barcode** là văn bản chính của nhãn và giá trị được quét đầy đủ là dòng
-kiểm chứng monospace nhẹ nhàng. `Print Label` in đúng chính xác nhãn (print style ẩn mọi thứ khác); `Cancel (Esc)` quay
-lại dialog.
+kiểm chứng monospace nhẹ nhàng. `Print Label` chỉ in nhãn, qua cùng tờ in với Print barcodes (§12.6); `Cancel (Esc)`
+quay lại dialog.
 
 Dialog được giữ đơn giản một cách có chủ ý: không có cấu hình barcode nào ở đây (sơ đồ namespace `PF:` vẫn nằm trong
 Administration → Barcode configuration, §9). Dialog này là **MỘT bề mặt nhãn PN duy nhất** trong ứng dụng:
@@ -4155,7 +4157,8 @@ Không có câu hỏi mở nào.
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | §1.2 và §9: Administration → Security gom User sign-in, Remember me, Password rules và Two-step sign-in; dialog Sign in đưa ra Remember me và các dialog mật khẩu liệt kê quy tắc mật khẩu. |
+| 2026-11-17 | uncommitted | §12.3, §12.6 và §14.3: mọi lần in nhãn dùng một tờ in không bao giờ thêm trang trắng. |
+| 2026-11-17 | 4539a2b | §1.2 và §9: Administration → Security gom User sign-in, Remember me, Password rules và Two-step sign-in; dialog Sign in đưa ra Remember me và các dialog mật khẩu liệt kê quy tắc mật khẩu. |
 | 2026-11-17 | 4be2389 | §1.2, §4.1 và §4.13: một User có quyền quản lý Scan Station xem một station mà không cần thiết bị đã enroll, với mọi action không khả dụng và một cách để enroll thiết bị. |
 | 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` trên Machines và Part Numbers in nhiều nhãn cùng lúc từ một dialog dùng chung, và cả hai toolbar chuyển ô tìm kiếm xuống hàng riêng khi các nút không còn vừa. |
 | 2026-11-17 | 1fc96e1 | §2: passkey — đăng nhập chỉ bằng passkey, passkey làm bước thứ hai, thêm và gỡ passkey; §9: thời gian thiết lập bao gồm cả passkey, và `Turn off two-step…` cũng xóa chúng. |

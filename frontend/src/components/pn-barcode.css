@@ -44,28 +44,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Print Label: print exactly the label — everything else on the page
-   is hidden while the label fills the sheet's top-left corner. */
-@media print {
-  body * {
-    visibility: hidden;
-  }
-
-  .pnb-labelprint,
-  .pnb-labelprint * {
-    visibility: visible;
-  }
-
-  .pnb-labelprint {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 90mm;
-    border: none;
-    margin: 0;
-  }
-}
-
 /* The demand-line PN control (PnEditButton): the PN itself is the
    control, with a small pencil glyph after it. It carries the
    demand-line PN typography and adds no row height — the button sits

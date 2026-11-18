@@ -3561,9 +3561,9 @@ Maintenance is an explicit override and nothing more.
   the scanned value (`PF:MACHINE:<asset-tag>`; the dependency-free encoder `src/views/code128.ts`, subset B with
   structural unit-test guards) on a **white label card with black ink in both themes**, plus the value text. On the
   label the **display name is the primary information**, big and bold, while the Asset Tag recedes to small secondary
-  metadata (the barcode itself carries it for scanning). `Print Label` prints exactly the label (print styles hide
-  everything else on the page); `Cancel (Esc)` returns to the Edit dialog. The label is ONE shared component, so a
-  label printed through Print barcodes (§12.6) is identical.
+  metadata (the barcode itself carries it for scanning). `Print Label` prints only the label, through the same print
+  sheet as Print barcodes (§12.6); `Cancel (Esc)` returns to the Edit dialog. The label is ONE shared component, so a
+  label printed through Print barcodes is identical.
 - **Display name.** It is required and must not collide with an active Machine of the same Area: display names stay
   unique among the active Machines of one Area, and a duplicate is a field error with nothing saved.
   - The name column carries **live per-field feedback exactly like the Reactivate dialog** (§12.4): a collision shows
@@ -3823,9 +3823,10 @@ It opens **`Print Machine barcodes`**, the ONE shared Print barcodes dialog that
 - **Printing.** `Print Labels` prints every selected label once, in the order shown. Each printed label is exactly the
   single label of §12.3 — 90 mm wide, black on white, the same layout and barcode, so it scans exactly like it. The
   labels fill the paper left to right, then the next row when a row is full, then a new page when the page is full;
-  a label never splits across pages. The page margin is 10 mm and no paper size is assumed: the number of labels per
-  row follows the paper the user chooses. Only the labels print, never the page or the dialog, and the single-label
-  prints are unaffected.
+  a label never splits across pages. No paper size or margin is assumed: the labels fill the width the browser's print
+  settings leave, so the number of labels per row follows the paper and margins the user chooses. Only the labels
+  print — never the page, the dialog or anything a browser extension adds to the page — and a print never adds a
+  blank page. The single-label dialogs (§12.3, §14.3) print through the same print sheet.
 
 ---
 
@@ -4026,8 +4027,8 @@ values as text (`—` when absent), the image without its controls, `Barcode lab
 `Scan this label to identify Part Number {PN}.` It shows a real **Code 128** rendering of the scanned value
 `PF:PN:<part-number>` (the shared dependency-free encoder `src/views/code128.ts`, §12.3) on the **white label card with
 black ink in both themes**, with the **PN text beneath the barcode** as the label's primary text and the full scanned
-value as the quiet monospace verification line. `Print Label` prints exactly the label (print styles hide everything
-else); `Cancel (Esc)` returns to the dialog.
+value as the quiet monospace verification line. `Print Label` prints only the label, through the same print sheet as
+Print barcodes (§12.6); `Cancel (Esc)` returns to the dialog.
 
 The dialog is deliberately simple: no barcode configuration exists here (the `PF:` namespace scheme stays in
 Administration → Barcode configuration, §9). This dialog is the **ONE PN label surface** in the application:
@@ -4110,7 +4111,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | §1.2 and §9: Administration → Security gathers User sign-in, Remember me, Password rules and Two-step sign-in; the Sign in dialog offers Remember me and the password dialogs list the password rules. |
+| 2026-11-17 | uncommitted | §12.3, §12.6 and §14.3: every label print uses one print sheet that never adds a blank page. |
+| 2026-11-17 | 4539a2b | §1.2 and §9: Administration → Security gathers User sign-in, Remember me, Password rules and Two-step sign-in; the Sign in dialog offers Remember me and the password dialogs list the password rules. |
 | 2026-11-17 | 4be2389 | §1.2, §4.1 and §4.13: a User who may manage Scan Stations views a station without an enrolled device, with every action unavailable and a way to enroll the device. |
 | 2026-11-17 | 4cfaf35 | §2.5, §12.1, §12.6, §14.1, §14.5: `Print barcodes…` on Machines and Part Numbers prints many labels at once from one shared dialog, and both toolbars move the search to its own row when the buttons no longer fit. |
 | 2026-11-17 | 1fc96e1 | §2: passkeys — signing in with a passkey alone, a passkey as the second step, adding and removing passkeys; §9: the setup time covers passkeys, and `Turn off two-step…` deletes them too. |

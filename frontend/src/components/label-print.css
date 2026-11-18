@@ -1,0 +1,56 @@
+/* The ONE print sheet of barcode labels (LabelPrintSheet): the Machine
+   and Part Number barcode label dialogs and Print barcodes all print
+   through it (GUI_DESIGN §12.3, §12.6, §14). The printed labels are the
+   callers' own labels, white with black ink. */
+
+/* Hidden on screen; it exists only while its dialog is open. */
+.pbx-sheet {
+  display: none;
+}
+
+@media print {
+  html:has(> body > .pbx-sheet),
+  body:has(> .pbx-sheet) {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  /* While a sheet exists it is the only thing printed. Everything else
+     leaves the layout — the application under <body> and whatever a
+     browser extension adds next to <body> — so nothing else can take a
+     page. The sheet uses no named page (`page:`): a change of page name
+     forces a page break, which printed a blank last page whenever any
+     element followed the sheet. */
+  html:has(> body > .pbx-sheet) > :not(body),
+  body:has(> .pbx-sheet) > :not(.pbx-sheet) {
+    display: none !important;
+  }
+
+  /* Labels flow as inline blocks: left to right, then the next row,
+     then the next page; a line of labels never splits across pages. No
+     paper size or margin is assumed: the labels fill the width the
+     browser's print settings leave. */
+  .pbx-sheet {
+    display: block;
+    font-size: 0;
+    line-height: 0;
+  }
+
+  /* The label's physical size: 90 mm wide, black on white. */
+  .pbx-plabel {
+    display: inline-block;
+    vertical-align: top;
+    width: 90mm;
+    font-size: 16px;
+    line-height: normal;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .pbx-sheet .pbx-plabel > * {
+    margin: 0;
+    border: none;
+    border-radius: 0;
+  }
+}
