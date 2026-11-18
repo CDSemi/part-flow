@@ -1,6 +1,6 @@
 # Roadmap triển khai PartFlow
 
-> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `4be2389` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
+> **Bản gốc:** [`IMPLEMENTATION_ROADMAP.md`](IMPLEMENTATION_ROADMAP.md). Đồng bộ với bản tiếng Anh tại commit `4539a2b` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai
 > bản khác nhau, bản tiếng Anh thắng.
 
 Tài liệu này cho biết PartFlow được xây theo thứ tự nào, mỗi phase gồm những gì, code hiện có những gì, và những gì
@@ -883,16 +883,16 @@ danh sản xuất giả nào, và không còn mock view chỉ-cho-phát-triển 
   đề nghị người dùng kiểm tra; một route trùng là một template chưa từng dùng và có thể xóa. Trường hợp Area được liệt
   kê trong `Deferred`.
 - Các PN chứa khoảng 27 code point nhạy với phiên bản Unicode được lưu theo dạng chuẩn của cơ sở dữ liệu Unicode của
-  Python ở backend, được ghim ở phiên bản `15.0.0` bởi `test_unicode_database_version_is_pinned`; một trình duyệt mới
-  hơn có thể chuẩn hóa trước các code point đó khác đi, nên hai dạng có thể được lưu thành hai PN khác nhau. Việc sửa
-  các đường nhập và các kiểm tra khi nâng cấp thuộc Phase 16.
+  Python ở backend, được ghim ở phiên bản `15.0.0` bởi `test_unicode_database_version_is_pinned`. Mọi đường nhập đều
+  lưu dạng của server: Add Part lấy dạng đó từ server (Phase 16) và các đường khác gửi giá trị đúng như đã nhập. Chỉ
+  dòng `Will be saved as` của dialog New Part Number được tính trong trình duyệt và có thể hiện một dạng khác ở các
+  code point đó. Các kiểm tra khi nâng cấp thuộc Phase 16.
 - Thông điệp từ chối khi downgrade migration xác nhận bằng badge nêu việc xác nhận bằng badge rộng hơn cần thiết; các
   migration đã commit không được sửa.
 
 **Việc còn mở.**
 
-- Dạng chuẩn khi nhập PN và các kiểm tra định danh khi nâng cấp nền tảng (PN, badge Worker và tiền tố Asset Tag) —
-  Phase 16.
+- Các kiểm tra định danh khi nâng cấp nền tảng (PN, badge Worker và tiền tố Asset Tag) — Phase 16.
 - Hậu tố ` · no Part Number master record — history unaffected` của Tracking có thể đổi thành
   ` · no saved Part Number details — history unaffected` trong một lượt rà soát câu chữ của chủ sở hữu (tùy chọn).
 - Không xây, không có yêu cầu chuẩn: tra cứu hay kiểm tra ERP id qua ERP; tên hay revision của PN trong phân giải của
@@ -1122,7 +1122,7 @@ Các yêu cầu vận hành và đường đi theo nền tảng được định
 - go-live trên NAS — đã xong ngày 2026-11-09 với release `v1.0.0` (quyết định của chủ sở hữu cùng ngày: dùng thật trực tiếp, không có giai đoạn pilot và không có release gate; DEPLOYMENT §1 và §5)
 - gia cố database role cho production, gồm các hạn chế UPDATE/DELETE theo dự định đối với role của ứng dụng trên lịch sử sản xuất/audit chỉ-ghi-thêm
 - kiểm tra định danh khi nâng cấp nền tảng: định danh PN chuẩn và badge Worker theo Cơ sở dữ liệu ký tự Unicode (UCD) của Python ở backend, được ghim ở `15.0.0`, và kiểm tra tiền tố Asset Tag từ chối tập khoảng trắng `\s` của Python, một tập cha thực sự của `[[:space:]]` trong libc của PostgreSQL; trước mọi lần nâng cấp Python làm đổi UCD, hoặc một thay đổi glibc, một kiểm tra chỉ đọc liệt kê mọi PN, badge và tiền tố Asset Tag đã lưu mà dạng chuẩn hay kết quả CHECK của nó sẽ thay đổi, và chủ sở hữu quyết định việc chuẩn hóa lại trước khi nâng cấp
-- dạng chuẩn khi nhập PN: các đường nhập PN bằng tay và nhãn demand của Work Orders gửi đầu vào thô đã cắt khoảng trắng và hiển thị dạng chuẩn của server, để bảng Unicode của trình duyệt không bao giờ quyết định một PN được lưu (hiện nay chúng chỉ có thể khác server ở khoảng 27 code point nhạy với phiên bản Unicode)
+- dạng chuẩn khi nhập PN — đã có: Add Part gửi giá trị nhập đã cắt khoảng trắng, đúng như đã nhập, tới `GET /api/part-numbers/resolve`, nơi trả lời bằng dạng chuẩn do server suy ra và chi tiết đã lưu nếu có; PN mà Add Part đề xuất, chọn, in nhãn và lưu là dạng đó, nên bảng Unicode của trình duyệt không bao giờ quyết định một PN được lưu (chúng có thể khác server ở khoảng 27 code point nhạy với phiên bản Unicode)
 - thứ tự khóa khi sao chép snapshot AssignedRoute — đã có: một lần chuyển số lượng một phần khóa Area đích của nó trong một lượt tăng dần cùng với các Area của snapshot mà lần tách của nó sao chép (`route_templates.lock_assignment_areas`, như với release và receipt), và mọi bản sao snapshot của một flow con hay của một kết quả gộp (`lineage.copy_assigned_route`) khóa các Area của nó, rồi các Operation của nó, `FOR KEY SHARE` theo thứ tự id tăng dần trước lệnh INSERT của nó (`route_templates.lock_snapshot_references`); vì vậy một lần release cắt chéo hoặc một lần chuyển một phần cắt chéo thứ hai sẽ chờ thay vì deadlock, điều mà các test đồng thời với route cắt chéo trong `backend/tests/test_route_template_management_api.py` chứng minh
 - backup cấu hình trong Administration (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: Administration → Backups sửa khoảng cách giữa các lần backup và số bản backup theo giờ, theo ngày và theo tuần được giữ lại, mặc định mỗi giờ một bản với 48 bản theo giờ, 30 bản theo ngày và 52 bản theo tuần được giữ (mục tiêu điểm khôi phục một giờ; migration `0035_phase16_backup_policy`); tác vụ trên máy chủ chạy `backup.sh --kind scheduled` mỗi giờ, đọc chính sách từ database (`app.cli backup-policy`), chỉ lấy backup khi đến hạn (`backup-due`) và xoay vòng các backup scheduled theo các giá trị đó (`backup-rotate --keep-hourly`); `--kind daily` và các option retention của nó bị từ chối kèm lệnh cần dùng thay thế, và ngưỡng tuổi backup của `check.sh` là khoảng cách đó cộng 2 giờ trừ khi có `--max-backup-age-hours`
 - log truy cập `web` không ghi các lần Production Board tự làm mới thành công (quyết định của chủ sở hữu ngày 2026-11-13) — đã có: log truy cập `web` bỏ qua một lượt `GET /api/production-board` hay `GET /api/policies/due-soon` thành công (DEPLOYMENT §3.1), để một board làm mới mỗi 5 giây không còn làm log ngắn lại; một lần làm mới thất bại vẫn được ghi
@@ -1335,7 +1335,6 @@ purge. Ba bổ sung cuối chờ chủ sở hữu xác nhận, và việc xây b
 
 ### Việc còn mở
 
-- Dạng chuẩn khi nhập PN (gạch đầu dòng phạm vi ở trên) — chưa triển khai.
 - Kiểm tra định danh khi nâng cấp nền tảng: phía Python đã được kiểm tra (j) triển khai; trước mọi lần nâng cấp Python
   hay glibc, chủ sở hữu xem danh sách của kiểm tra đó và quyết định việc chuẩn hóa lại.
 - Archival và purge lịch sử Movement — đã lên kế hoạch ở trên.
@@ -1462,7 +1461,8 @@ Mỗi mục dưới đây chờ một quyết định của chủ sở hữu ho�
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 18 mục 4 đã có (Administration → Security với quy tắc mật khẩu và Remember me), việc này đóng Phase 18; migration `0039_security_settings` trở thành head của lược đồ. |
+| 2026-11-17 | uncommitted | Phase 16: dạng chuẩn khi nhập PN đã có; Add Part dùng dạng chuẩn mà server suy ra từ giá trị đúng như đã nhập. |
+| 2026-11-17 | `4539a2b` | Phase 18 mục 4 đã có (Administration → Security với quy tắc mật khẩu và Remember me), việc này đóng Phase 18; migration `0039_security_settings` trở thành head của lược đồ. |
 | 2026-11-17 | `4be2389` | Phase 18 mục 3 đã có: người có quyền Manage Scan Stations xem bất kỳ Scan Station nào mà không cần thiết bị đã đăng ký. |
 | 2026-11-17 | `4cfaf35` | Phase 18 mục 2 đã có: Print barcodes trên Management → Machines và Management → Part Numbers. |
 | 2026-11-17 | `01ce427` | Mở Phase 18 với các yêu cầu của chủ sở hữu ngày 2026-11-17, mục 1 (`pf delete-permanently`) đã có; ghi lại việc chủ sở hữu xem xét thiết kế lưu trữ. |

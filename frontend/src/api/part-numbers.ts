@@ -130,6 +130,38 @@ export async function resolvePartNumber(
   return wires.length > 0 ? toMaster(wires[0]) : null;
 }
 
+/** An entered PN in the SERVER's canonical form, with its saved details
+ * when they exist. */
+export interface ResolvedPartNumberEntry {
+  /** The canonical PN the server derives from the entry. */
+  partNumber: string;
+  master: PartNumberMaster | null;
+}
+
+interface ResolvedPartNumberEntryWire {
+  part_number: string;
+  master: PartNumberWire | null;
+}
+
+/**
+ * The server's canonical form of an entered PN and its saved details,
+ * if any. The entry is sent as typed (trimmed): the browser never
+ * derives a stored PN itself, because its Unicode tables can differ
+ * from the server's on a few code points. An entry that is not a valid
+ * PN is refused by the server (422).
+ */
+export async function resolvePartNumberEntry(
+  entry: string,
+): Promise<ResolvedPartNumberEntry> {
+  const wire = await apiRequest<ResolvedPartNumberEntryWire>(
+    `/api/part-numbers/resolve${numberQuery(entry.trim())}`,
+  );
+  return {
+    partNumber: wire.part_number,
+    master: wire.master ? toMaster(wire.master) : null,
+  };
+}
+
 /**
  * Orders of the Part Numbers list page (the server sorts):
  * `part_number` Part Number A–Z (the default), `name` Name A–Z,

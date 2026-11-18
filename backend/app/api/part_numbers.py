@@ -21,8 +21,11 @@ Deliberate surface decisions:
   fully derived from the canonical PN and never stored or entered.
 - The PN never travels in a path segment: it is an opaque arbitrary
   string, so every route addresses it by a query parameter (``number``
-  exact canonical resolution, ``search`` contains-match); ``page`` and
-  ``image`` are literal path segments.
+  exact canonical resolution, ``search`` contains-match); ``page``,
+  ``resolve`` and ``image`` are literal path segments. ``resolve``
+  answers the canonical form the server derives from an entry as typed,
+  with its saved details if any, so Add Part never derives a stored PN
+  in the browser.
 - ``POST /part-numbers`` is create-only (Phase 13): first valid use
   creates the master (201) with its optional details and its
   ``CREATED`` audit row; an existing master answers 409. Create-on-
@@ -166,6 +169,36 @@ def list_part_numbers(
     else:
         matches = part_numbers.list_part_numbers(session, search=search)
     return [part_number_response(master) for master in matches]
+
+
+class ResolvedPartNumberResponse(BaseModel):
+    """An entered PN in the server's canonical form, with its saved
+    details when they exist."""
+
+    part_number: str
+    master: PartNumberResponse | None
+
+
+@router.get("/part-numbers/resolve")
+def resolve_part_number_entry(
+    principal: PartNumberLookupDep,
+    session: SessionDep,
+    number: str,
+) -> ResolvedPartNumberResponse:
+    """The canonical form of an entered PN as THE SERVER derives it, and
+    its saved details (``master``, ``null`` on a miss).
+
+    Add Part sends the trimmed entry as typed and offers, labels and
+    saves exactly this form, so the browser's Unicode tables never
+    decide a stored PN (IMPLEMENTATION_ROADMAP Phase 16, PN entry
+    canonical form). An entry that can never be a PN is refused (422).
+    """
+    canonical = part_numbers.canonical_part_number(number)
+    master = part_numbers.resolve_part_number(session, canonical)
+    return ResolvedPartNumberResponse(
+        part_number=canonical,
+        master=part_number_response(master) if master is not None else None,
+    )
 
 
 @router.get("/part-numbers/page")

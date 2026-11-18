@@ -250,8 +250,10 @@ release command never contradicts it.
   foreign key, so it can be hard-deleted (and later recreated for the same canonical PN) without touching production
   data (PROJECT_PROFILE §28).
 - `POST /api/part-numbers` only creates. It takes the PN advisory lock, so every creator of a master record serializes
-  per PN. `GET /api/part-numbers?search=` also matches the saved name. Management → Part Numbers edits the master,
-  manages its image and hard-deletes it. Creation on first use is part of the same rules.
+  per PN. `GET /api/part-numbers?search=` also matches the saved name. `GET /api/part-numbers/resolve?number=`
+  answers the canonical form the server derives from an entry as typed, with the saved details if any; Add Part uses
+  it, so the browser never derives a stored PN. Management → Part Numbers edits the master, manages its image and
+  hard-deletes it. Creation on first use is part of the same rules.
 - The PN barcode carries the canonical PN itself: `PF:PN:<part-number>` (PROJECT_PROFILE §10). Because the PN is
   canonical uppercase, the barcode value is fully derived, and no separately stored, separately unique barcode key is
   needed for PNs. The barcode identifies only the PN and encodes no Work Order, quantity, route or location context.
@@ -1528,7 +1530,8 @@ No open decision of PROJECT_PROFILE touches this slice any more; the owner settl
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0039_security_settings`: the password rules and Remember me columns of `application_policy`, their audit sections and `user_sessions.remembered`. |
+| 2026-11-17 | uncommitted | `GET /api/part-numbers/resolve` answers the server's canonical form of an entered PN for Add Part. |
+| 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: the password rules and Remember me columns of `application_policy`, their audit sections and `user_sessions.remembered`. |
 | 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, the passkey columns of `user_sign_in_challenges`, the lock order and the audit snapshot with passkeys. |
 | 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: the three tables of two-step sign-in, the two-step policy and mail server timeout columns, `user_credentials.failed_codes`, the session end reason `TWO_STEP_RESET`, the lock order and the audit rows (the `two-step` section and the own email change). |
 | 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, the outgoing mail server columns of `application_policy` and the `mail-server` audit section. |

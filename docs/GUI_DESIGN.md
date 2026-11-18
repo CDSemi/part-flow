@@ -3150,7 +3150,9 @@ the approved audit surfaces (§3 rule 10).
   in the field:** while the entry is still settling or its lookup is in flight, the step says `Searching Part Numbers…`
   and offers no creation, so an existing PN (a one-character PN especially, which resolves through the exact lookup
   rather than the contains-search) is never momentarily presented as new. Once the lookup for exactly the current entry
-  has answered that the PN does not exist, the step offers `＋ Create new PN "…"`. An entry longer than 200 characters
+  has answered that the PN does not exist, the step offers `＋ Create new PN "…"`. The PN it offers, previews and
+  creates is the canonical form the server derives from the trimmed entry, sent as typed
+  (`GET /api/part-numbers/resolve`), never a form the browser derives itself. An entry longer than 200 characters
   is never offered for creation: the step says at once that a Part Number has at most 200 characters. The PN master has
   no active or inactive state: a canonical PN is always usable, with or without a master record.
 - **Validation states.** Per-field errors (missing PN, quantity not a positive integer, duplicate PN, and an entry

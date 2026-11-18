@@ -363,6 +363,32 @@ def test_lookup_by_number_and_search(client: TestClient) -> None:
     assert canonical in [master["part_number"] for master in found.json()]
 
 
+def test_resolve_answers_the_server_canonical_form(client: TestClient) -> None:
+    """`resolve` canonicalizes the entry exactly as typed, so the browser
+    never derives a stored PN (IMPLEMENTATION_ROADMAP Phase 16, PN entry
+    canonical form): `ɤ` (U+0264) has no uppercase in the backend's UCD
+    15.0, although a browser with newer Unicode tables uppercases it."""
+    raw = f" pnɤ-{uuid.uuid4().hex[:8]} "
+    canonical = raw.strip().upper()
+    assert "ɤ" in canonical
+
+    new = admin_of(client).get("/api/part-numbers/resolve", params={"number": raw})
+    assert new.status_code == 200, new.text
+    assert new.json() == {"part_number": canonical, "master": None}
+
+    created = admin_of(client).post("/api/part-numbers", json={"part_number": raw})
+    assert created.status_code == 201, created.text
+    saved = admin_of(client).get("/api/part-numbers/resolve", params={"number": raw.strip()})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["part_number"] == canonical
+    assert saved.json()["master"]["part_number"] == canonical
+    assert saved.json()["master"]["barcode_value"] == f"PF:PN:{canonical}"
+
+    for invalid in ("ABC 123", "   ", "a\x00b"):
+        refused = admin_of(client).get("/api/part-numbers/resolve", params={"number": invalid})
+        assert refused.status_code == 422, refused.text
+
+
 def test_search_results_are_bounded_by_the_server(client: TestClient) -> None:
     """The lookup is bounded in the QUERY, not by slicing in the browser.
 

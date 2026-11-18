@@ -249,6 +249,7 @@ def test_management_read_sets_equal_the_spec_literals() -> None:
         ("GET", "/api/work-orders/completed"): _WO_VIEW,
         ("GET", "/api/work-orders/{work_order_id}"): _WO_VIEW,
         ("GET", "/api/part-numbers"): _WO_VIEW | _PN_VIEW,
+        ("GET", "/api/part-numbers/resolve"): _WO_VIEW | _PN_VIEW,
         ("GET", "/api/part-numbers/page"): _PN_VIEW,
         ("GET", "/api/part-numbers/running-work-orders"): _PN_VIEW,
         ("GET", "/api/hot-list"): _PRIORITY_VIEW,

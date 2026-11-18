@@ -284,6 +284,7 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("GET", "/api/work-orders/completed"): _any_of(_WO_VIEW),
     ("GET", "/api/work-orders/{work_order_id}"): _any_of(_WO_VIEW),
     ("GET", "/api/part-numbers"): _any_of(_WO_VIEW, _PN_VIEW),
+    ("GET", "/api/part-numbers/resolve"): _any_of(_WO_VIEW, _PN_VIEW),
     ("GET", "/api/part-numbers/page"): _any_of(_PN_VIEW),
     ("GET", "/api/part-numbers/running-work-orders"): _any_of(_PN_VIEW),
     ("GET", "/api/hot-list"): _any_of(_PRIORITY_VIEW),

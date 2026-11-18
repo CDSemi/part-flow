@@ -1,6 +1,6 @@
 # Slice 1 — Data model nhập Work Order thủ công và release sản xuất
 
-> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `1fc96e1` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
+> **Bản gốc:** [`SLICE1_DATA_MODEL.md`](SLICE1_DATA_MODEL.md). Đồng bộ với bản tiếng Anh tại commit `4539a2b` cộng các thay đổi chưa commit ngày 2026-11-17. Bản tiếng Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản
 > tiếng Anh thắng.
 
 Tài liệu này đặc tả data model và hợp đồng (contract) của các command trong business slice đầu tiên của PartFlow: nhập
@@ -252,8 +252,10 @@ không bao giờ đi ngược nó.
   foreign key, nên nó có thể bị xóa cứng (và tạo lại về sau cho cùng PN canonical) mà không đụng tới dữ liệu sản xuất
   (PROJECT_PROFILE §28).
 - `POST /api/part-numbers` chỉ tạo mới. Nó lấy PN advisory lock, nên mọi nơi tạo bản ghi master đều tuần tự theo từng PN.
-  `GET /api/part-numbers?search=` cũng khớp theo tên đã lưu. Management → Part Numbers sửa master, quản lý ảnh của nó và
-  xóa cứng nó. Việc tạo ở lần dùng đầu tiên tuân theo cùng các rule.
+  `GET /api/part-numbers?search=` cũng khớp theo tên đã lưu. `GET /api/part-numbers/resolve?number=` trả về dạng
+  canonical mà server suy ra từ giá trị đúng như đã nhập, kèm chi tiết đã lưu nếu có; Add Part dùng nó, nên trình duyệt
+  không bao giờ tự suy ra một PN được lưu. Management → Part Numbers sửa master, quản lý ảnh của nó và xóa cứng nó. Việc
+  tạo ở lần dùng đầu tiên tuân theo cùng các rule.
 - Barcode PN mang chính PN canonical: `PF:PN:<part-number>` (PROJECT_PROFILE §10). Vì PN là chữ hoa canonical, giá trị
   barcode hoàn toàn được dẫn xuất, và không cần một khóa barcode lưu riêng, duy nhất riêng cho PN. Barcode chỉ định danh
   PN và không mã hóa Work Order, số lượng, route hay vị trí nào.
@@ -1523,7 +1525,8 @@ Không còn quyết định mở nào của PROJECT_PROFILE liên quan tới sli
 
 | Ngày | Commit | Thay đổi |
 |---|---|---|
-| 2026-11-17 | uncommitted | Migration head `0039_security_settings`: các cột quy tắc mật khẩu và Remember me của `application_policy`, các mục audit của chúng và `user_sessions.remembered`. |
+| 2026-11-17 | uncommitted | `GET /api/part-numbers/resolve` trả về dạng canonical của server cho một PN đã nhập, dùng cho Add Part. |
+| 2026-11-17 | `4539a2b` | Migration head `0039_security_settings`: các cột quy tắc mật khẩu và Remember me của `application_policy`, các mục audit của chúng và `user_sessions.remembered`. |
 | 2026-11-17 | `1fc96e1` | Migration head `0038_phase17_passkeys`: `user_passkeys`, `user_passkey_setups`, các cột passkey của `user_sign_in_challenges`, thứ tự lock và snapshot audit có passkey. |
 | 2026-11-17 | `aa6287d` | Migration head `0037_phase17_two_step`: ba bảng của xác thực hai bước, các cột policy xác thực hai bước và timeout của mail server, `user_credentials.failed_codes`, lý do kết thúc session `TWO_STEP_RESET`, thứ tự lock và các dòng audit (section `two-step` và việc tự đổi email). |
 | 2026-11-16 | `252f678` | Migration head `0036_phase17_outgoing_mail`: `users.email`, các cột mail server gửi đi của `application_policy` và section audit `mail-server`. |

@@ -3188,7 +3188,9 @@ audit chỉ nằm trên các surface audit đã được phê duyệt (§3 rule 
   field:** trong khi giá trị nhập vẫn đang ổn định hoặc lần tra cứu của nó đang chạy, step nói `Searching Part Numbers…`
   và không đề xuất tạo mới, nên một PN đã tồn tại (đặc biệt là PN một ký tự, được phân giải qua tra cứu chính xác chứ
   không phải contains-search) không bao giờ thoáng bị trình bày như mới. Khi lần tra cứu cho đúng giá trị nhập hiện tại đã
-  trả lời rằng PN không tồn tại, step đề xuất `＋ Create new PN "…"`. Một giá trị nhập dài hơn 200 ký tự không bao giờ
+  trả lời rằng PN không tồn tại, step đề xuất `＋ Create new PN "…"`. PN mà step đề xuất, xem trước và tạo là dạng
+  chuẩn do server suy ra từ giá trị nhập đã cắt khoảng trắng, gửi đúng như đã nhập (`GET /api/part-numbers/resolve`),
+  không bao giờ là một dạng do trình duyệt tự suy ra. Một giá trị nhập dài hơn 200 ký tự không bao giờ
   được đề xuất tạo: step nói ngay rằng một Part Number có tối đa 200 ký tự. PN master không có trạng thái active hay
   inactive: một PN chuẩn luôn dùng được, có hay không có bản ghi master.
 - **Trạng thái validation.** Lỗi theo từng field (thiếu PN, quantity không phải số nguyên dương, PN trùng, và một giá

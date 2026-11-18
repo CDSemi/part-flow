@@ -65,6 +65,9 @@ interface FakeState {
   partNumbers: string[];
   /** Saved Name / Description per PN (absent = null). */
   partNumberNames: Record<string, string>;
+  /** The server's canonical form of an entry where it differs from the
+   * browser's uppercase (absent = the entry trimmed and uppercased). */
+  canonicalOverrides: Record<string, string>;
   /** Released quantity per demand id (server knowledge — derived from
    * Movement history on the real backend). A demand may be released in
    * several parts, so this is a running total, never a flag. */
@@ -185,6 +188,7 @@ function seedState(): FakeState {
     ],
     partNumbers: ['309-127', 'A-100', 'B-200', 'C-300', 'D-400', 'E-500'],
     partNumberNames: {},
+    canonicalOverrides: {},
     // Demands 102 (10 pcs) and 301 (8 pcs) are fully released.
     releasedQuantities: new Map([
       [102, 10],
@@ -536,6 +540,17 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       created_at: T0,
       updated_at: T0,
     });
+    if (url.startsWith('/api/part-numbers/resolve')) {
+      // The server derives the canonical form of the entry as typed.
+      const entry = String(number).trim();
+      const canonical = state.canonicalOverrides[entry] ?? entry.toUpperCase();
+      return json({
+        part_number: canonical,
+        master: state.partNumbers.includes(canonical)
+          ? pnWire(canonical)
+          : null,
+      });
+    }
     if (method === 'POST') {
       const pn = String(body.part_number).trim().toUpperCase();
       if (state.partNumbers.includes(pn)) {
@@ -1821,7 +1836,9 @@ test('a one-character PN is never called new while its lookup is unresolved', as
   // the answer is unknown, so the create offer stays absent.
   await waitFor(() =>
     expect(
-      state.calls.some((call) => call.includes('/api/part-numbers?number=X')),
+      state.calls.some((call) =>
+        call.includes('/api/part-numbers/resolve?number=X'),
+      ),
     ).toBe(true),
   );
   expect(
@@ -2049,6 +2066,39 @@ test('Add Part canonicalizes manual entry like the backend — trim + uppercase,
     screen.getByRole('dialog', { name: /step 2 of 4: Quantity/ }),
   ).toBeInTheDocument();
   expect(screen.getByText('new Part Number')).toBeInTheDocument();
+});
+
+test('Add Part offers, labels and saves a new PN in the server canonical form, sending the entry as typed', async () => {
+  // The server's Unicode tables decide the stored PN; here they differ
+  // from the browser's uppercase on purpose.
+  state.canonicalOverrides['ﬁx-9'] = 'FIX-9';
+  await renderWorkOrders();
+  openNewWorkOrderDialog();
+  fireEvent.click(screen.getByRole('button', { name: '＋ Add Part manually' }));
+
+  fireEvent.change(screen.getByLabelText('Search PartNumber'), {
+    target: { value: '  ﬁx-9 ' },
+  });
+  const create = await screen.findByRole('button', {
+    name: '＋ Create new PN “FIX-9”',
+  });
+  // The trimmed entry went to the server as typed, never pre-uppercased.
+  expect(state.calls).toContain(
+    `GET /api/part-numbers/resolve?number=${encodeURIComponent('ﬁx-9')}`,
+  );
+  fireEvent.click(create);
+  const dialog = screen.getByRole('dialog', {
+    name: /step 2 of 4: Quantity/,
+  });
+  // The chosen line and its printable label carry the server's form.
+  expect(within(dialog).getByText('FIX-9')).toBeInTheDocument();
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Barcode label…' }),
+  );
+  const label = await screen.findByRole('dialog', {
+    name: 'Part Number barcode label',
+  });
+  expect(label.querySelector('.lvalue')?.textContent).toBe('PF:PN:FIX-9');
 });
 
 test('Add Part never offers a new PN over 200 characters and says why', async () => {

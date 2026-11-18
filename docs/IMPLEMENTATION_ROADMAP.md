@@ -895,15 +895,16 @@ module graph, and no development-only mock view remains registered.
   asks the user to check; a duplicate route is a never-used template that can be deleted. The Area case is listed
   under `Deferred`.
 - PNs containing about 27 Unicode-version-sensitive code points are stored in the canonical form of the backend's
-  Python Unicode database, pinned to version `15.0.0` by `test_unicode_database_version_is_pinned`; a newer browser
-  could pre-normalize those code points differently, so two forms could be stored as distinct PNs. The fix of the
-  entry paths and the upgrade checks are owned by Phase 16.
+  Python Unicode database, pinned to version `15.0.0` by `test_unicode_database_version_is_pinned`. Every entry path
+  stores the server's form: Add Part takes it from the server (Phase 16) and the other paths send the entry as
+  typed. Only the `Will be saved as` line of the New Part Number dialog is derived in the browser and may show
+  another form on those code points. The upgrade checks are owned by Phase 16.
 - The refusal message of the badge-confirmation migration's downgrade names badge confirmation more broadly than
   needed; committed migrations are not edited.
 
 **Open follow-ups.**
 
-- PN entry canonical form and the platform-upgrade identity checks (PN, Worker badge and Asset Tag prefix) — Phase 16.
+- The platform-upgrade identity checks (PN, Worker badge and Asset Tag prefix) — Phase 16.
 - Tracking's ` · no Part Number master record — history unaffected` suffix could become
   ` · no saved Part Number details — history unaffected` in an owner copy pass (optional).
 - Not built, no canonical requirement: ERP lookup or validation of the ERP id; the PN name or revision in the Scan
@@ -1134,7 +1135,7 @@ Operational requirements and platform paths are defined in [`DEPLOYMENT.md`](./D
 - go-live on the NAS — done on 2026-11-09 with release `v1.0.0` (owner decision of the same day: direct production use, with no pilot phase and no release gates; DEPLOYMENT §1 and §5)
 - production database-role hardening, including the intended application-role UPDATE/DELETE restrictions on append-only production/audit history
 - platform-upgrade identity checks: canonical PN and Worker badge identity follow the backend Python's Unicode Character Database (UCD), pinned to `15.0.0`, and the Asset Tag prefix check refuses Python's `\s` whitespace set, a strict superset of PostgreSQL's libc `[[:space:]]`; before any Python upgrade that changes the UCD, or a glibc change, a read-only check lists every stored PN, badge and Asset Tag prefix whose canonical form or CHECK outcome would change, and the owner decides on re-canonicalization before the upgrade
-- PN entry canonical form: the Work Orders typed-PN and demand-label paths submit the trimmed raw input and display the server's canonical form, so the browser's Unicode tables never decide a stored PN (today they can diverge from the server only on about 27 Unicode-version-sensitive code points)
+- PN entry canonical form — delivered: Add Part sends the trimmed entry as typed to `GET /api/part-numbers/resolve`, which answers with the canonical form the server derives and the saved details, if any; the PN Add Part offers, chooses, labels and saves is that form, so the browser's Unicode tables never decide a stored PN (they can differ from the server on about 27 Unicode-version-sensitive code points)
 - AssignedRoute snapshot copy lock order — delivered: a partial-quantity transfer locks its target Area in one ascending pass with the Areas of the snapshot its split copies (`route_templates.lock_assignment_areas`, as for release and receipt), and every snapshot copy of a split child or a merge result (`lineage.copy_assigned_route`) locks its Areas, then its Operations, `FOR KEY SHARE` in ascending id order before its INSERT (`route_templates.lock_snapshot_references`); a crossing release or a second crossing partial transfer therefore waits instead of deadlocking, which the crossing-route concurrency tests in `backend/tests/test_route_template_management_api.py` prove
 - backups set in Administration (owner decision of 2026-11-13) — delivered: Administration → Backups edits the backup interval and the numbers of hourly, daily and weekly backups kept, by default one backup every hour with 48 hourly, 30 daily and 52 weekly backups kept (a recovery point objective of one hour; migration `0035_phase16_backup_policy`); the host task runs `backup.sh --kind scheduled` every hour, which reads the policy from the database (`app.cli backup-policy`), takes a backup only when one is due (`backup-due`) and rotates the scheduled backups by those values (`backup-rotate --keep-hourly`); `--kind daily` and its retention options are refused with the command to use instead, and the backup-age threshold of `check.sh` is the interval plus 2 hours unless `--max-backup-age-hours` is given
 - a `web` access log without the successful automatic refreshes of the Production Board feed (owner decision of 2026-11-13) — delivered: the `web` access log skips a successful `GET /api/production-board` or `GET /api/policies/due-soon` (DEPLOYMENT §3.1), so a board refreshing every 5 seconds no longer shortens the log; a failed refresh is still logged
@@ -1345,7 +1346,6 @@ The last three additions wait for the owner's confirmation, and the build starts
 
 ### Open follow-ups
 
-- PN entry canonical form (scope bullet above) — not implemented.
 - Platform-upgrade identity checks: the Python side is implemented by check (j); before any Python or glibc upgrade the
   owner reviews the check's list and decides on re-canonicalization.
 - Movement-history archival and purge — planned above.
@@ -1473,7 +1473,8 @@ Each item below waits for an owner decision or a canonical requirement; none has
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-17 | uncommitted | Phase 18 item 4 delivered (Administration → Security with the password rules and Remember me), which closes Phase 18; migration `0039_security_settings` becomes the schema head. |
+| 2026-11-17 | uncommitted | Phase 16: the PN entry canonical form is delivered; Add Part uses the canonical form the server derives from the entry as typed. |
+| 2026-11-17 | `4539a2b` | Phase 18 item 4 delivered (Administration → Security with the password rules and Remember me), which closes Phase 18; migration `0039_security_settings` becomes the schema head. |
 | 2026-11-17 | `4be2389` | Phase 18 item 3 delivered: a user who holds Manage Scan Stations views any Scan Station without an enrolled device. |
 | 2026-11-17 | `4cfaf35` | Phase 18 item 2 delivered: Print barcodes on Management → Machines and Management → Part Numbers. |
 | 2026-11-17 | `01ce427` | Phase 18 opened with the owner's requests of 2026-11-17, item 1 (`pf delete-permanently`) delivered; the owner's review of the archival design recorded. |

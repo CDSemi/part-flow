@@ -1017,6 +1017,7 @@ def read_urls(client: TestClient, shop: _Shop) -> dict[tuple[str, str], str]:
         ("GET", "/api/work-orders/completed"): "/api/work-orders/completed",
         ("GET", "/api/work-orders/{work_order_id}"): f"/api/work-orders/{wo}",
         ("GET", "/api/part-numbers"): f"/api/part-numbers?number={pn}",
+        ("GET", "/api/part-numbers/resolve"): f"/api/part-numbers/resolve?number={pn}",
         ("GET", "/api/part-numbers/page"): "/api/part-numbers/page",
         ("GET", "/api/part-numbers/running-work-orders"): "/api/part-numbers/running-work-orders",
         ("GET", "/api/hot-list"): "/api/hot-list",

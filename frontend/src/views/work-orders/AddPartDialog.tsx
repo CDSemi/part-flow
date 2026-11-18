@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
-import { resolvePartNumber, searchPartNumbers } from '../../api/part-numbers';
+import {
+  resolvePartNumberEntry,
+  searchPartNumbers,
+} from '../../api/part-numbers';
 import type { PartNumberMaster } from '../../api/part-numbers';
 import { useApiData } from '../../api/use-api-data';
 import { useCloseGuard } from '../../components/close-guard';
@@ -9,7 +12,6 @@ import { ModalDialog } from '../../components/ModalDialog';
 import { PnBarcodeLabelDialog } from '../../components/PnBarcodeLabelDialog';
 import { applyQuantityKey } from '../../components/quantity-input';
 import { QuantityKeypad } from '../../components/QuantityKeypad';
-import { normalizePartNumber } from '../scan-station/barcode';
 import { formatIsoDate } from '../dates';
 import type { RequestType } from '../view-models';
 import { MAX_ENTRY_LENGTH, isPositiveInteger, isTooLong } from './demand-lines';
@@ -44,6 +46,14 @@ const STEP_TITLES = [
 const MIN_SEARCH_LENGTH = 2;
 const SEARCH_DEBOUNCE_MS = 250;
 const SERVER_SEARCH_LIMIT = 50;
+
+/** Whether an entry can be a PN at all: something left after trimming
+ * and no whitespace inside (PROJECT_PROFILE §7) — a judgement about the
+ * entry itself, made at once. Its canonical form is the server's. */
+function isPnEntry(entry: string): boolean {
+  const trimmed = entry.trim();
+  return trimmed !== '' && !/\s/.test(trimmed);
+}
 
 /**
  * One accessible multi-step Add Part dialog (no stacked nested modals):
@@ -90,11 +100,12 @@ export function AddPartDialog({
 
   // Search runs against the real PartNumber masters (contains-match,
   // case-insensitive on the server). Creating a new PN uses the
-  // canonical form (PROJECT_PROFILE §7): surrounding whitespace is
-  // trimmed, the entry is canonicalized to uppercase, and a value with
-  // internal whitespace is not a valid PN — internal whitespace is
-  // never silently removed. The master record itself is created by the
-  // Save demand transaction (create-on-first-valid-use).
+  // canonical form (PROJECT_PROFILE §7) as the SERVER derives it from
+  // the trimmed entry — uppercase, internal whitespace never silently
+  // removed — so the PN shown, chosen, labelled and saved is exactly
+  // the stored one, whatever Unicode tables the browser has. The master
+  // record itself is created by the Save demand transaction
+  // (create-on-first-valid-use).
   const trimmed = query.trim();
   const [settledQuery, setSettledQuery] = useState(query);
   useEffect(() => {
@@ -108,29 +119,46 @@ export function AddPartDialog({
   const searchable = settledQuery.trim().length >= MIN_SEARCH_LENGTH;
   // A short entry is still a valid PN — the minimum length bounds the
   // contains-SEARCH, it is not a rule about what a PN may be. So a
-  // too-short entry that canonicalizes falls back to the exact
-  // canonical lookup: a one-character PN that already exists is found
-  // and offered, and is never mistaken for a new PN.
-  const settledCanonical = normalizePartNumber(settledQuery);
-  const exactOnly = !searchable && settledCanonical !== null;
+  // too-short valid entry falls back to the exact canonical lookup: a
+  // one-character PN that already exists is found and offered, and is
+  // never mistaken for a new PN.
+  const settledValid = isPnEntry(settledQuery);
+  const exactOnly = !searchable && settledValid;
   // The lookup result carries the entry it answers for. `useApiData`
   // keeps the PREVIOUS ready value while the next request is in
   // flight, so "there is a ready result" alone says nothing about the
-  // entry on screen — the answered query has to be compared to it.
+  // entry on screen — the answered query has to be compared to it. A
+  // valid entry is also resolved to the server's canonical form and its
+  // saved details, the only source of `canonical` and of an exact match.
   const searchLoader = useCallback(async (): Promise<{
     query: string;
     matches: PartNumberMaster[];
+    canonical: string | null;
+    exact: boolean;
   }> => {
+    const resolving = settledValid
+      ? resolvePartNumberEntry(settledQuery)
+      : Promise.resolve(null);
     if (searchable) {
+      const [matches, resolved] = await Promise.all([
+        searchPartNumbers(settledQuery),
+        resolving,
+      ]);
       return {
         query: settledQuery,
-        matches: await searchPartNumbers(settledQuery),
+        matches,
+        canonical: resolved?.partNumber ?? null,
+        exact: resolved?.master != null,
       };
     }
-    if (settledCanonical === null) return { query: settledQuery, matches: [] };
-    const master = await resolvePartNumber(settledCanonical);
-    return { query: settledQuery, matches: master ? [master] : [] };
-  }, [searchable, settledCanonical, settledQuery]);
+    const resolved = await resolving;
+    return {
+      query: settledQuery,
+      matches: resolved?.master ? [resolved.master] : [],
+      canonical: resolved?.partNumber ?? null,
+      exact: resolved?.master != null,
+    };
+  }, [searchable, settledValid, settledQuery]);
   const searchData = useApiData(searchLoader);
   const answered =
     searchData.state.status === 'ready' ? searchData.state.data : null;
@@ -150,12 +178,10 @@ export function AddPartDialog({
   // The whitespace and length rejections are pure client-side judgements
   // about the entry itself — no server answer is involved, so they stay
   // immediate and read the live entry.
-  const liveCanonical = normalizePartNumber(query);
-  const liveTooLong = liveCanonical !== null && isTooLong(liveCanonical);
-  const canonical = settledCanonical;
-  const exactMatch =
-    canonical !== null &&
-    matches.some((entry) => entry.partNumber === canonical);
+  const liveValid = isPnEntry(query);
+  const liveTooLong = liveValid && isTooLong(trimmed);
+  const canonical = lookupAnswered ? answered.canonical : null;
+  const exactMatch = lookupAnswered && answered.exact;
   const offerCreate =
     lookupAnswered &&
     canonical !== null &&
@@ -361,7 +387,7 @@ export function AddPartDialog({
                 ＋ Create new PN “{canonical}”
               </button>
             ) : null}
-            {trimmed && !liveCanonical ? (
+            {trimmed && !liveValid ? (
               <div className="ap-empty">
                 A Part Number cannot contain spaces or other whitespace inside
                 the value, so “{query.trim()}” cannot be created as a new PN.
