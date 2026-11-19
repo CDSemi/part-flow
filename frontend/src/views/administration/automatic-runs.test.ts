@@ -28,6 +28,8 @@ const POLICY: RetentionPolicy = {
   limitDatabaseGib: 20,
   approvalRequired: true,
   intervalDays: 7,
+  viewDays: 7,
+  viewMaxLoaded: 1,
   standingAuthorization: null,
   updatedAt: '2026-11-18T08:00:00Z',
 };

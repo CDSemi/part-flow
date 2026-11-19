@@ -551,6 +551,7 @@ def test_audit_entity_check_names_exactly_the_enum(migrated_engine: Engine) -> N
         AuditEntityType.ASSIGNED_ROUTE.value,
         AuditEntityType.HISTORY_ARCHIVE_RUN.value,
         AuditEntityType.DELETION_REQUEST.value,
+        AuditEntityType.HISTORY_ARCHIVE_VIEW.value,
     }
 
 
@@ -1486,6 +1487,7 @@ def test_worker_sessions_migration_repeats_the_model_literals() -> None:
         AuditEntityType.ASSIGNED_ROUTE.value,
         AuditEntityType.HISTORY_ARCHIVE_RUN.value,
         AuditEntityType.DELETION_REQUEST.value,
+        AuditEntityType.HISTORY_ARCHIVE_VIEW.value,
     }
 
 
@@ -2557,6 +2559,7 @@ def test_planned_routes_migration_restores_the_0020_literal() -> None:
         AuditEntityType.ASSIGNED_ROUTE.value,
         AuditEntityType.HISTORY_ARCHIVE_RUN.value,
         AuditEntityType.DELETION_REQUEST.value,
+        AuditEntityType.HISTORY_ARCHIVE_VIEW.value,
     }
 
 
@@ -3768,10 +3771,12 @@ def test_users_roles_migration_repeats_the_model_literals() -> None:
     ]
     # 0030 (Phase 14 slice 4) appends ScanStationDevice to this literal,
     # 0032 (Phase 14 slice 6) AssignedRoute, 0040 (Phase 16) HistoryArchiveRun,
-    # 0042 (Phase 16, history archival step 3) DeletionRequest.
+    # 0042 (Phase 16, history archival step 3) DeletionRequest, 0044 (step 5)
+    # HistoryArchiveView.
     assert entity_checks == [
         migration._USER_ROLE_ENTITY_TYPES[:-1]
-        + ", 'ScanStationDevice', 'AssignedRoute', 'HistoryArchiveRun', 'DeletionRequest')"
+        + ", 'ScanStationDevice', 'AssignedRoute', 'HistoryArchiveRun', 'DeletionRequest',"
+        " 'HistoryArchiveView')"
     ]
     planned_routes = _load_migration(_PLANNED_ROUTES_MIGRATION_FILE)
     assert migration._PREVIOUS_ENTITY_TYPES == planned_routes._ROUTE_TEMPLATE_ENTITY_TYPES

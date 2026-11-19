@@ -1,11 +1,13 @@
 import './administration.css';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 
+import { useRouter } from '../../app/router-context';
 import { SignInGate } from '../../app/SignInGate';
 import { getViewStatePreview } from '../../app/view-state';
 import { ErrorState, LoadingState } from '../../components/view-states';
+import { ArchiveViewerPage } from './ArchiveViewerPage';
 import { AreasSection } from './AreasSection';
 import { BackupsSection } from './BackupsSection';
 import { BarcodeConfigurationSection } from './BarcodeConfigurationSection';
@@ -56,10 +58,23 @@ import type { AdminSection } from './sections';
 // ended sign-in and the per-user remount. Any signed-in user may view
 // every section; a section whose permission the user lacks hides its
 // controls and says so. The server checks every permission.
+//
+// The archive viewer of History archival & purge (Phase 16, build step 5)
+// is a page of its own address inside this view
+// (`/administration/history-archival/views/:id`, router-core): the
+// sidebar stays, with History archival & purge active, and choosing a
+// section, or the page's way back, returns to `/administration` with that
+// section shown. The viewer itself needs Run history archival and purge.
 
 export function AdministrationView() {
   const preview = getViewStatePreview();
-  const [sectionId, setSectionId] = useState('areas');
+  const { route } = useRouter();
+  const archiveViewId =
+    route.view === 'administration' ? (route.archiveViewId ?? null) : null;
+  // Entering on the viewer's address, the way back leads to its section.
+  const [sectionId, setSectionId] = useState(
+    archiveViewId === null ? 'areas' : 'data-retention',
+  );
   const navRef = useRef<HTMLElement>(null);
 
   if (preview === 'loading') {
@@ -80,8 +95,11 @@ export function AdministrationView() {
     );
   }
 
+  // The viewer belongs to History archival & purge, whatever was shown
+  // before it.
+  const shownId = archiveViewId === null ? sectionId : 'data-retention';
   const section =
-    ADMIN_SECTIONS.find((s) => s.id === sectionId) ?? ADMIN_SECTIONS[1];
+    ADMIN_SECTIONS.find((s) => s.id === shownId) ?? ADMIN_SECTIONS[1];
 
   // A sign-in from the panel moves focus to the active section's
   // navigation button.
@@ -98,6 +116,7 @@ export function AdministrationView() {
         <SectionsWrap
           navRef={navRef}
           section={section}
+          archiveViewId={archiveViewId}
           onSelect={setSectionId}
         />
       </SignInGate>
@@ -105,16 +124,38 @@ export function AdministrationView() {
   );
 }
 
-/** The sidebar and the active section, mounted per sections owner. */
+/** The sidebar and the active section — or the archive viewer — mounted
+ * per sections owner. */
 function SectionsWrap({
   navRef,
   section,
+  archiveViewId,
   onSelect,
 }: {
   navRef: RefObject<HTMLElement>;
   section: AdminSection;
+  /** The view the archive viewer reads; null for the sections. */
+  archiveViewId: number | null;
   onSelect: (id: string) => void;
 }) {
+  const { navigate } = useRouter();
+  // From the viewer, a section is shown at `/administration`.
+  const select = (id: string) => {
+    onSelect(id);
+    if (archiveViewId !== null) navigate('/administration');
+  };
+  // Leaving the viewer (its way back, a section, or browser back) moves
+  // focus to the active section's navigation button.
+  const viewerShown = archiveViewId !== null;
+  const wasViewerShown = useRef(viewerShown);
+  useEffect(() => {
+    if (wasViewerShown.current && !viewerShown) {
+      navRef.current
+        ?.querySelector<HTMLElement>('button[aria-current="true"]')
+        ?.focus();
+    }
+    wasViewerShown.current = viewerShown;
+  }, [viewerShown, navRef]);
   return (
     <div className="admin-wrap">
       <nav
@@ -130,7 +171,7 @@ function SectionsWrap({
                 key={s.id}
                 className={s.id === section.id ? 'active' : ''}
                 aria-current={s.id === section.id ? 'true' : undefined}
-                onClick={() => onSelect(s.id)}
+                onClick={() => select(s.id)}
               >
                 {s.label}
               </button>
@@ -139,7 +180,14 @@ function SectionsWrap({
         ))}
       </nav>
       <div className="admin-main">
-        <SectionBody section={section} />
+        {archiveViewId !== null ? (
+          <ArchiveViewerPage
+            viewId={archiveViewId}
+            onShowSection={() => onSelect('data-retention')}
+          />
+        ) : (
+          <SectionBody section={section} />
+        )}
       </div>
     </div>
   );

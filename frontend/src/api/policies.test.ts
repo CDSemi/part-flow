@@ -213,11 +213,14 @@ const RETENTION_WIRE = {
   archive_limit_database_gib: 20,
   archive_approval_required: true,
   archive_interval_days: 7,
+  archive_view_days: 7,
+  archive_view_max_loaded: 1,
   standing_authorization: null,
   updated_at: '2026-11-18T08:00:00Z',
 };
 
-/** The settings of automatic runs as the model holds their defaults. */
+/** The settings of automatic runs and of viewing as the model holds their
+ * defaults. */
 const AUTOMATIC_DEFAULTS = {
   automaticRuns: false,
   measure: 'LIVE_MOVEMENT_ROWS',
@@ -226,6 +229,8 @@ const AUTOMATIC_DEFAULTS = {
   limitDatabaseGib: 20,
   approvalRequired: true,
   intervalDays: 7,
+  viewDays: 7,
+  viewMaxLoaded: 1,
   standingAuthorization: null,
 };
 
@@ -331,6 +336,41 @@ test('the automatic-run settings map with the standing authorization and its val
   answer({ ...RETENTION_WIRE, standing_authorization: undefined });
   await expect(getRetentionPolicy()).rejects.toThrow(
     'The server answered without the History archival & purge setting standing_authorization.',
+  );
+});
+
+test('the viewing settings map, travel only when given, and must be whole numbers', async () => {
+  answer({
+    ...RETENTION_WIRE,
+    archive_view_days: 30,
+    archive_view_max_loaded: 3,
+  });
+  expect(await getRetentionPolicy()).toMatchObject({
+    viewDays: 30,
+    viewMaxLoaded: 3,
+  });
+  await updateRetentionPolicy({ viewDays: 14 });
+  expect(lastRequest()).toEqual({
+    path: '/api/policies/data-retention',
+    method: 'PUT',
+    body: { archive_view_days: 14 },
+  });
+  await updateRetentionPolicy({ viewMaxLoaded: 2, viewDays: 365 });
+  expect(lastRequest().body).toEqual({
+    archive_view_days: 365,
+    archive_view_max_loaded: 2,
+  });
+  // Strict: a missing, a fractional or a non-numeric setting is refused
+  // with its wire name.
+  for (const value of [undefined, 1.5, '7', null]) {
+    answer({ ...RETENTION_WIRE, archive_view_days: value });
+    await expect(getRetentionPolicy()).rejects.toThrow(
+      'The server answered without the History archival & purge setting archive_view_days.',
+    );
+  }
+  answer({ ...RETENTION_WIRE, archive_view_max_loaded: undefined });
+  await expect(getRetentionPolicy()).rejects.toThrow(
+    'The server answered without the History archival & purge setting archive_view_max_loaded.',
   );
 });
 

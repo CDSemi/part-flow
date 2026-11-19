@@ -83,6 +83,10 @@ opened according to permissions by authorized production roles (Production Manag
 Manager, or another authorized specialist; PROJECT_PROFILE §20). They are deliberately grouped under Management rather
 than Administration.
 
+The Administration sections share the one address `/administration`. The archive viewer of History archival & purge
+(§9) is the one Administration page with an address of its own, `/administration/history-archival/views/<view
+number>`, so that it survives a refresh and browser back and forward.
+
 ### Access to Management
 
 Management requires a signed-in user (§1.2).
@@ -2386,6 +2390,9 @@ trap**, layered below navigation and application dialogs.
      Movement by its time and id, an archived entry by the time and id of its newest archived Movement. The dates and
      the number of Movements are the server's record; the browser never computes an archived quantity.
    - On phone widths, a Movement history row wraps its description onto its own line.
+   - A code in a row's description — a flow (`QF-44`), a Scan Station (`ST-PACK`), or a Work Order Number, Part Number
+     or archive name with a hyphen — stays whole when the row wraps, so the narrow detail panel never breaks it after
+     its hyphen (`ST-` / `PACK`); only a code longer than 24 characters may break there.
    - The current-state sections distinguish active Machine assignment, direct Area processing, Area completion (ready
      to transfer, with operator wording such as `Completed processing at Lathe — ready to transfer` and the completing
      Machine as context only), transfer, and Stockroom completion. Quantity that is ready to transfer is never implied
@@ -2836,11 +2843,12 @@ Routes and Part Numbers stay managed in Management by authorized production role
   opens no dialog (§2.1): the dialog then opens at the section's next refused request.
 - **Password replacement.** While a password that an administrator set must still be replaced, the sections wait behind
   the `Choose a new password` dialog (the same user's open work stays).
-- **Viewing and changing.** Any signed-in user may view the sections. Each section's changes need its own permission
-  (Departments, Areas, Operations, Workers, Scan Stations, Barcode configuration, Worker sessions, Correction
-  permissions, Settings, Security, Backups, History archival & purge, and Roles & permissions / Users each name theirs).
-  Without it the section is view-only: its controls are hidden and a `View only` line names the permission. The server
-  checks these permissions.
+- **Viewing and changing.** Any signed-in user may view the sections, except the viewing of archived history in History
+  archival & purge — each run's views and the archive viewer — which needs Run history archival and purge. Each
+  section's changes need its own permission (Departments, Areas, Operations, Workers, Scan Stations, Barcode
+  configuration, Worker sessions, Correction permissions, Settings, Security, Backups, History archival & purge, and
+  Roles & permissions / Users each name theirs). Without it the section is view-only: its controls are hidden and a
+  `View only` line names the permission. The server checks these permissions.
 - Worker badges are shown only to users who may manage Workers.
 - **Correction permissions guard.** Changing correction permissions, the permission to manage them, or users whose role
   holds them needs the permission to manage correction permissions. The correction permissions in Production rules →
@@ -2853,8 +2861,9 @@ Routes and Part Numbers stay managed in Management by authorized production role
   enrolled Scan Station may do.
 - **History archival & purge** has a permission of its own, **Run history archival and purge**, initially granted to
   the Administrator role and to Super User (which holds every permission); Configure system settings does not guard it
-  (PROJECT_PROFILE §20). Its holders preview, request, approve, dismiss and cancel runs, confirm an off-host copy and
-  change the section's settings, switching off the approval step of automatic runs included.
+  (PROJECT_PROFILE §20). Its holders preview, request, approve, dismiss and cancel runs, confirm an off-host copy, open
+  a finished run's archive for viewing, cancel a view that waits to be loaded, close viewing, read the archive viewer,
+  and change the section's settings, switching off the approval step of automatic runs included.
 - **Delete Work Orders and Part Numbers permanently** is a permission of its own as well, initially held by Super User
   only (which holds every permission); the Administrator role does not hold it (PROJECT_PROFILE §20). Only its holders
   see **Delete permanently…** in Work Order Details (§11.2) and in the Part Number dialog of Management → Part Numbers
@@ -2928,30 +2937,39 @@ with **Automatic runs** on, the server's archival job also creates one by itself
 either proposes it for a holder of the permission to approve or dismiss, or, with the approval step switched off,
 starts it at once under the standing authorization of the person who switched the step off. Tracking then shows one
 archived entry, `History archived in run N`, per archived flow (§7.2), and archived commands can no longer be undone
-(§4.5). Runs that finished before runs purged keep their result `Exported to files; nothing deleted.` Every signed-in
-user reads the settings and the runs. The preview, a request and every change need the **Run history archival and
-purge** permission; without it one `View only` line names that permission, the Preview card is not shown and no action
-on the settings or the runs is offered. The section follows the card rule, with at most two columns, each a stack of its
-own cards, so that a card that grows (the Preview's result) never moves a card of the other column: **Retention and
-schedule** with **Automatic runs** under it, and **Preview** beside them (without the permission, Automatic runs takes
-the Preview's place), in two equal columns when two fit (each at least 25rem, the width at which its widest label and
-value stay on one line), otherwise one full-width column; then the **Runs** card at the full width of the page and,
-only for holders of **Delete Work Orders and Part Numbers permanently**, the **Permanent deletion requests** card below
-it, at the full width too.
+(§4.5). Runs that finished before runs purged keep their result `Exported to files; nothing deleted.` A holder of the
+permission may also open a finished run's verified archive for viewing (PROJECT_PROFILE §28, viewing an archive): the
+server's archival job loads a read-only copy of it, apart from the live history, which the **archive viewer** reads
+until the copy is closed. Every signed-in user reads the settings and the runs. The preview, a request and every
+change need the **Run history archival and purge** permission; without it one `View only` line names that permission,
+the Preview card is not shown, no action on the settings or the runs is offered, and nothing of the viewing is shown —
+neither a run's views nor their actions — while the archive viewer says which permission opens it. The section follows
+the card rule, with at most two columns, each a stack of its own cards, so that a card that grows (the Preview's
+result) never moves a card of the other column: **Retention and schedule** with **Automatic runs** under it, and
+**Preview** beside them (without the permission, Automatic runs takes the Preview's place), in two equal columns when
+two fit (each at least 25rem, the width at which its widest label and value stay on one line), otherwise one full-width
+column; then the **Runs** card at the full width of the page, which also holds each run's viewing, and, only for
+holders of **Delete Work Orders and Part Numbers permanently**, the **Permanent deletion requests** card below it, at
+the full width too. The archive viewer is a page of its own (below).
 
 - **Retention and schedule** — `How long Movement history stays in the database, when the server's archival job does
-  its work, and how much it purges at a time.` The card shows the **Retention period** (initially `24 months (2
-  years)`; `No retention period` makes nothing eligible), the **Shortest allowed period** (initially 12 months), the
-  **Start minute** of the job's hourly work (`20 minutes past each hour`), the **Preview time limit** (90 seconds),
-  **Report a waiting run after** (7 days), **Movements per purge batch** (initially 50,000) and **Part Numbers per
-  purge batch** (initially 20).
+  its work, how much it purges at a time, and how archives are loaded for viewing.` The card shows the **Retention
+  period** (initially `24 months (2 years)`; `No retention period` makes nothing eligible), the **Shortest allowed
+  period** (initially 12 months), the **Start minute** of the job's hourly work (`20 minutes past each hour`), the
+  **Preview time limit** (90 seconds), **Report a waiting run after** (7 days), **Movements per purge batch** (initially
+  50,000), **Part Numbers per purge batch** (initially 20), **A loaded archive stays open** (initially `7 days`, 1–365)
+  and **Runs loaded for viewing at once** (initially 1, 1–10).
   The dialog's field `Preview time limit (seconds)` explains: `Keep it below the wait of every proxy in front of
   PartFlow: through Cloudflare a request ends after 100 seconds.` The field `Report a waiting run after (days)`
   explains: `When a run waits longer than this for its approval or for its off-host copy to be confirmed, the server's
   monitoring check reports it.` (A failed last run is reported whatever this setting says.) The field `Movements per
   purge batch` explains: `The purge deletes whole components, in batches of at most this many Movements; a larger
   component is a batch of its own.` The field `Part Numbers per purge batch` explains: `A batch locks at most this many
-  Part Numbers; work on them waits until the batch ends.`
+  Part Numbers; work on them waits until the batch ends.` The field `A loaded archive stays open (days, 1–365)`
+  explains: `A run opened for viewing closes this many days after it was loaded, and the archival job removes its copy
+  from the database. A change applies to the runs open now as well.` The field `Runs loaded for viewing at once
+  (1–10)` explains: `Each loaded run takes database space until it is closed, and a run waiting to be loaded counts
+  too. A lower number leaves the runs loaded now open.`
   `Edit retention and schedule…` opens the dialog: `No retention period` or `Keep a set period of history` with the
   months, then a field for each other value of the card. A change of the shortest allowed period adds a required
   reason field. While the approval step of automatic runs is off, a longer retention period or `No retention period`
@@ -2960,7 +2978,8 @@ it, at the full width too.
   shown in the dialog, which itself refuses only a value that is not a whole number.
 - **Automatic runs** — `When the server's archival job starts a run by itself, and whether a person approves each run
   first.` The card shows **Automatic runs** (`On` or `Off`, initially Off); the **Measure** that decides that a run is
-  needed — `Live Movement rows` (initially), `Age of retained history` or `Database size` — and that measure's own
+  needed — `Live Movement rows` (initially), `Age of retained history` or `Database size` (without the space of
+  archives loaded for viewing) — and that measure's own
   **Limit** (initially `5,000,000 rows`, `1 month older than the cutoff` and `20 GiB`); the **Days between automatic
   runs** (initially `7 days`); and the **Approval step** (`On` initially). While the approval step is off, a **Standing
   authorization** row shows `Valid` or `Not valid`, and a line under the values says who gave it, when and why (`Given
@@ -3016,7 +3035,8 @@ it, at the full width too.
   - **State**: the state in plain words as a status pill (`Proposed — waiting for approval`, `Approved — waiting for
     the job` — a requested run too, since its request is its approval —, `Running`, `Waiting for the off-host copy`,
     `Copy confirmed — waiting for the job`, `Purging`, `Completed`, `Completed with skips`, `Nothing eligible`,
-    `Dismissed`, `Cancelled`, `Failed`), with the run's actions under it;
+    `Dismissed`, `Cancelled`, `Failed`), with the run's actions under it and, for holders of the permission, the
+    viewing of its archive under them (below);
   - **Cutoff and counts**: the cutoff date, then the counts;
   - **Requested by**: who requested the run, with the reason. An automatic run has no requester: it reads `Automatic`
     with the reason the job gave (for example `Live Movement rows 5,120,334 above the limit 5,000,000; retention 24
@@ -3070,9 +3090,36 @@ it, at the full width too.
     server, for example by adding the archive folder to the Hyper Backup task. `Confirm copy` is enabled once `The
     archive folder is copied off the server` is ticked and sends the SHA-256 shown; at its next start the job then
     takes the pre-purge backup and purges the archived history.
-  - A refusal of an approval, a dismissal, a cancellation or a confirmation is shown in the dialog as the server words
-    it. When one of them gets no clear answer, the runs reload and the card says to check the run's state; each is safe
-    to repeat.
+  - **Viewing a run's archive** (holders of the permission only). Under the run's state and actions, set apart by a
+    separator line, the run's newest view is a status pill — `Waiting to be loaded for viewing`, `Being loaded for
+    viewing`, `Open for viewing`, `Viewing closed — removing the copy`, `Viewing closed`, `Loading for viewing failed`
+    or `Viewing cancelled` — with one line under it where there is more to say: `Until <date and time>` for an open view
+    (its days count from its opening with the setting as it stands), the failure reason exactly as the server gives it,
+    `Closed by <name>.` or `Its days ran out.`, or `Cancelled by <name>.` These details come from the views, which the
+    card reads beside the runs; a run shows its newest view's state even when they cannot be read, and the card then
+    says so. The actions follow the view's state:
+    - `View` (accessible name `View the archive of run N`) on an open view opens the archive viewer. Being a navigation
+      and a read, it stays available while disconnected.
+    - `Close viewing…` (accessible name `Close viewing of run N…`) on an open view asks first (`Close viewing of run
+      N?`, saying that the viewer page closes now, that the archival job removes the loaded copy from the database at
+      its next start, and that the archive files stay as they are, with `Close viewing` and `Keep open (Esc)`).
+    - `Cancel…` (accessible name `Cancel viewing of run N…`) on a view that waits to be loaded asks first (`Cancel
+      viewing of run N?`, saying that nothing is loaded and nothing changes in the database, with `Cancel viewing` and
+      `Keep waiting (Esc)`). A view being loaded offers neither action, and the server refuses both.
+    - `Open for viewing…` (accessible name `Open run N for viewing…`) on a run the server marks as viewable — a finished
+      run whose archive was verified — while it has no view that waits, loads or is open (also while its last view is
+      being closed, and after one failed, was cancelled or closed) asks first. `Open run N for viewing?` says what
+      loading does: the archival job loads a read-only copy of the run's archive within minutes, separate from the live
+      history, so that nothing is added to the live history and Tracking and every figure stay as they are; until it is
+      closed the copy takes database space, roughly 7 times the archive's size, with the estimate for the run (`about
+      1.2 GB for this run (2,006,882 Movements in 153,345 flows, an archive of 175.3 MB)`); and it closes by itself the
+      set number of days after it opens, or earlier with Close viewing. `Open for viewing` sends the request, and
+      `Cancel (Esc)` sends nothing. The card then says that the run waits to be loaded and that `Reload` shows when it
+      is open.
+  - A refusal of an approval, a dismissal, a cancellation, a confirmation or a viewing action is shown in the dialog as
+    the server words it — for Open for viewing also the limit of runs loaded at once and a run already open or
+    waiting, and for Cancel and Close viewing a view whose state changed meanwhile. When one of them gets no clear
+    answer, the runs reload and the card says to check the run's state; each is safe to repeat.
 - **Permanent deletion requests** — `Each request deletes Work Orders or a Part Number with all their data from the
   database, as if they had never been entered; the server carries it out after a pre-purge backup.` Only holders of
   **Delete Work Orders and Part Numbers permanently** see the card, and only they make the requests, with **Delete
@@ -3101,6 +3148,53 @@ it, at the full width too.
   no `Cancel…`, and the server refuses to cancel it. A refusal is shown in the dialog as the server words it. When a
   cancellation gets no clear answer, the requests reload and the card says to check the request's state; cancelling
   again is safe.
+- **Archive viewer** — the page that `View` opens, at `/administration/history-archival/views/<view number>`: one
+  run's archive loaded for viewing, read-only and apart from the live history (PROJECT_PROFILE §28). It stays inside
+  Administration, with History archival & purge active in the sidebar; `← History archival & purge` at its top, or
+  choosing a section, leads back to `/administration` with that section shown. Without Run history archival and purge
+  the page says `Your account cannot open archived history. Opening it needs the Run history archival and purge
+  permission.` and reads nothing.
+  - **The mark.** Under the heading `Archived history of run N`, a mark on the archived tone (a dashed frame, as an
+    archived route step) reads `ARCHIVED` and `Archived history from run N — a read-only copy, not live history`; it
+    stays in sight while the page scrolls. A line under it names the archive folder, when the copy was loaded and until
+    when it stays open, and what it holds (`2,006,882 Movements in 153,345 flows`), and says that nothing there can be
+    changed, that none of it is part of the live history or of PartFlow's figures, and that names read as they were when
+    the archive was written.
+  - **The search.** Part Number (made canonical by the server like every PN entry), Work Order Number (exactly as
+    stored: it finds the Movements of the flows released for that Work Order and of every flow split or merged from
+    them), Quantity Flow (`5512` or `QF-5512`; anything else is refused in the form with `Enter a flow number, such as
+    5512 or QF-5512.`), Area (either end of a Movement), Operation, Machine (either Machine) and Worker, each a select
+    of the records the archive names, by their names at export (a record the archive does not name reads as `Area 5`),
+    and `First day` and `Last day` (site-calendar days, both included). Every filled term must match; a blank field asks
+    for nothing. `Search` reads the first page, and `Clear` empties every field and lists the whole archive again. A
+    search the server refuses (for example a first day after the last day, or a Part Number that cannot be canonical)
+    shows its text as given.
+  - **The results.** The matching Movements, newest first, as rows of Tracking's Movement history (§7.2 item 5): the
+    date and time always with the year, the Movement type with the `REPAIR` and `REVERSED` badges, and the description,
+    led by the Part Number and ending in `by <name>` for the User who recorded a Management command. A count line says
+    how many Movements match (`4,210 archived Movements match the search.`, or `… archived Movements in this archive.`
+    without a term), and the list pages as Tracking's history does: `Showing n of m Movements` with `Show older
+    Movements`, which reads the next page below the cursor the server answered, without a gap or a duplicate.
+  - **A flow's archived history.** The whole row is the target and its Part Number the one control: it opens the row's
+    flow in Tracking's modeless floating detail panel (§7, the same rules for the close button, Escape, a click outside
+    and the returned focus; the rows of the open flow are marked, and clicking one of them again closes the panel). The
+    panel repeats the mark (`Archived history from run N · read-only`), names the flow, its Part Number and that PN's
+    name at export, and shows, as Tracking's Quantity Flows section does (§7.2 item 4), the flow block: its quantity,
+    the route-mode chip, its status with its effective lineage (`stocked — complete · SPLIT from QF-5512`), the Planned
+    Route snapshot's steps without a state (`Planned Route (snapshot) — guidance only; the archived Movement history
+    below stays authoritative.`) or `Floating Route — its actual trace is the archived Movement history below.`, and
+    what the archive adds: the Work Orders it was released for, directly or through the flows it came from (the
+    numbered ones by their numbers, the others counted: `Work Orders 007201 and 2 internal Work Orders`, or `2 internal
+    Work Orders`), what its record says was stocked or scrapped and where, and when it was created and closed. A
+    `Lineage` section lists its splits and merges as links to those flows (an undone one marked `(undone)`), and its
+    whole archived Movement history follows, newest first. Every code in the panel stays whole, as in Tracking's
+    history (§7.2 item 5).
+  - **States.** Loading; an error with Retry; an empty result (`No archived Movement matches the search.`, with a hint
+    about the exact Work Order Number and `Clear`); and a view the server cannot read, shown in its own words: one still
+    waiting or being loaded (with `Check again`), one closed, failed or cancelled, or an unknown view. A view that
+    closes while it is read — its days ran out, or someone used Close viewing — turns the page into that closed state
+    at its next read. Whenever the page changes to such a state, it returns to its top and the focus moves to the
+    server's words, so that a reader who had scrolled down never faces an empty page.
 
 ### Backups
 
@@ -4411,7 +4505,8 @@ There are no open questions.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-18 | uncommitted | §9: History archival & purge gains the Automatic runs card — the measure with its own limit, the days between automatic runs and the approval step, switched off with a reason and the typed confirmation as the standing authorization, shown with its validity, and a note wherever a change of the settings stops a run started without approval (the approval step switched on, automatic runs switched off, or a retention period lengthened or cleared so that it no longer allows the run's cutoff) — and the runs table shows proposed and dismissed runs, `Approved — waiting for the job`, `Automatic` with the approval or the standing authorization, and `Approve…` and `Dismiss…`, in six columns that fit a 1024 px window. |
+| 2026-11-19 | uncommitted | §1.1, §7.2 and §9: History archival & purge opens a finished run's archive for viewing — the days a loaded archive stays open and the runs loaded at once in Retention and schedule, Open for viewing… with what loading does, each run's newest view with View, Cancel… and Close viewing…, and the archive viewer at `/administration/history-archival/views/<view number>`, which marks archived history from run N as a read-only copy, searches its Movements, shows a flow's whole history and lineage as Tracking does and returns to its top when the view closes; only holders of Run history archival and purge see the viewing; and a code in a Tracking history row is never broken at its hyphen. |
+| 2026-11-18 | bac89d7 | §9: History archival & purge gains the Automatic runs card — the measure with its own limit, the days between automatic runs and the approval step, switched off with a reason and the typed confirmation as the standing authorization, shown with its validity, and a note wherever a change of the settings stops a run started without approval (the approval step switched on, automatic runs switched off, or a retention period lengthened or cleared so that it no longer allows the run's cutoff) — and the runs table shows proposed and dismissed runs, `Approved — waiting for the job`, `Automatic` with the approval or the standing authorization, and `Approve…` and `Dismiss…`, in six columns that fit a 1024 px window. |
 | 2026-11-18 | 1874636 | §9, §11.2 and §14.2: the new permission Delete Work Orders and Part Numbers permanently offers Delete permanently… in Work Order Details and in the Part Number dialog, which requests the deletion and follows its state, and the Permanent deletion requests card of History archival & purge. |
 | 2026-11-18 | d094f5e | §4.5, §7.2, §7.3 and §9: an archival run purges the archived history after the off-host copy and a pre-purge backup, Tracking shows archived entries and archived route steps, archived commands can no longer be undone, and the purge batch limits and Pre-purge backups kept are settings. |
 | 2026-11-17 | 2f12d33 | §9: History archival & purge shows its settings, the preview, the request of a run and the runs with Cancel and Confirm off-host copy; a run exports history and deletes nothing, and the new Run history archival and purge permission guards the section. |

@@ -1285,6 +1285,13 @@ test('Movement history lists every type with its badge and keeps a reversed orig
   expect(items[0].textContent).toContain(
     'Completed processing at Lathe M1 in Lathe — ready to transfer · qty 1 · QF-140 · LATHE-ST-1',
   );
+  // Its codes stay whole in the narrow panel: never `LATHE-` / `ST-1`.
+  expect(
+    Array.from(
+      items[0].querySelectorAll('.desc .wholecode'),
+      (code) => code.textContent,
+    ),
+  ).toEqual(['QF-140', 'LATHE-ST-1']);
   expect(items[1].textContent).toContain(
     'Scrapped 1 at Lathe · QF-140 · reason: tool crash — gouged face',
   );

@@ -301,6 +301,11 @@ class AuditEntityType(StrEnum):
     # for the request it works on, and the one DELETED row per Work Order and
     # Part Number that request deletes.
     DELETION_REQUEST = "DeletionRequest"
+    # Phase 16 (history archival, design B step 5, D16): every change of state
+    # of a view of an archive (opened for viewing, loaded, closed) —
+    # administrative maintenance, never production activity. The maintenance
+    # database role appends these for the view it loads or closes.
+    HISTORY_ARCHIVE_VIEW = "HistoryArchiveView"
 
 
 class WorkerIdentificationMode(StrEnum):
@@ -690,5 +695,31 @@ class DeletionRequestState(StrEnum):
     APPROVED = "APPROVED"
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class HistoryArchiveViewState(StrEnum):
+    """Where a view of an archive stands (Phase 16, history archival design
+    D16 and §9.3; build step 5).
+
+    REQUESTED — a holder of Run history archival and purge opened a
+    finished run's verified archive for viewing; the host job loads it at
+    its next start; LOADING — the job checks every file's SHA-256 and loads
+    the archive into the viewer tables; OPEN — loaded and readable in the
+    viewer, until a person closes it or its days run out; CLOSING — the job
+    removes its loaded rows (asked by a person, or the days ran out);
+    CLOSED — its rows are gone; FAILED — the load stopped and recorded why
+    (its rows are gone); CANCELLED — cancelled before the job loaded it. The
+    last three are final. REQUESTED, LOADING and OPEN count against the
+    setting of runs loaded at once, and at most one view of a run is in one
+    of them.
+    """
+
+    REQUESTED = "REQUESTED"
+    LOADING = "LOADING"
+    OPEN = "OPEN"
+    CLOSING = "CLOSING"
+    CLOSED = "CLOSED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"

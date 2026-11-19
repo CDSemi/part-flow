@@ -195,10 +195,11 @@ def _admitted(
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_has_a_single_head() -> None:
+def test_the_revision_is_in_the_chain() -> None:
+    # The single head moved to tests/test_archive_viewing_schema.py (step 5, 0044).
     config = _alembic_config(make_url(os.environ["DATABASE_URL"]))
-    assert ScriptDirectory.from_config(config).get_heads() == [_HEAD_REVISION]
-    assert schema_revision.code_head() == _HEAD_REVISION
+    revision = ScriptDirectory.from_config(config).get_revision(_HEAD_REVISION)
+    assert revision is not None and revision.down_revision == _PREVIOUS_REVISION
     assert schema_revision.non_transactional_revisions([_HEAD_REVISION]) == []
 
 
@@ -288,7 +289,7 @@ def test_the_migration_literals_match_the_models_and_0041() -> None:
     )
     # The audited section adds the settings, not the authorization's id.
     assert (
-        policies.HISTORY_ARCHIVE_COLUMNS[7:]
+        policies.HISTORY_ARCHIVE_COLUMNS[7:14]
         == tuple(column for column, _type, _default in migration._POLICY_COLUMNS)[:-1]
     )
     # The replaced guard function is pinned by check (h); its triggers are unchanged.
@@ -905,7 +906,10 @@ def test_the_downgrade_restores_0042(head_database: URL, head: Engine) -> None:
     )
     command.upgrade(config, "head")
     with head.connect() as connection:
-        assert _scalar(connection, "SELECT version_num FROM alembic_version") == _HEAD_REVISION
+        assert (
+            _scalar(connection, "SELECT version_num FROM alembic_version")
+            == schema_revision.code_head()
+        )
 
 
 _STEP_FOUR_DATA = {
@@ -944,4 +948,7 @@ def test_the_downgrade_refuses_while_step_4_data_exists(
     with pytest.raises(DBAPIError, match="Automatic archival run data exists"):
         command.downgrade(_alembic_config(head_database), _PREVIOUS_REVISION)
     with head.connect() as connection:
-        assert _scalar(connection, "SELECT version_num FROM alembic_version") == _HEAD_REVISION
+        assert (
+            _scalar(connection, "SELECT version_num FROM alembic_version")
+            == schema_revision.code_head()
+        )

@@ -46,7 +46,9 @@ handlers in ``app.api.errors`` translate typed failures.
   and the automatic runs: on or off, the measure and the limit of each
   measure, the approval step, the days between automatic runs and the
   standing authorization (who switched the approval step off, when, why,
-  and whether it is still valid; ``null`` while the step is on).
+  and whether it is still valid; ``null`` while the step is on), and
+  viewing an archive (step 5): the days a loaded archive stays open and how
+  many runs may be loaded at once.
 - ``PUT /policies/data-retention`` — a partial merge like User sign-in
   (strict integers and booleans; ``retention_period_months: null`` clears
   the period; an empty body or an extra field is 422) plus ``reason``,
@@ -278,6 +280,10 @@ class HistoryArchivePolicyResponse(BaseModel):
     archive_approval_required: bool
     archive_interval_days: int
     standing_authorization: StandingAuthorizationResponse | None
+    # Viewing an archive (design B step 5): the days a loaded archive stays
+    # open, and how many runs may be loaded at once.
+    archive_view_days: int
+    archive_view_max_loaded: int
     # The singleton row's timestamp, shared by every policy section.
     updated_at: datetime.datetime
 
@@ -309,6 +315,8 @@ class HistoryArchivePolicyPutRequest(BaseModel):
     archive_limit_database_gib: StrictInt | None = None
     archive_approval_required: StrictBool | None = None
     archive_interval_days: StrictInt | None = None
+    archive_view_days: StrictInt | None = None
+    archive_view_max_loaded: StrictInt | None = None
     reason: str | None = None
     confirmation: str | None = None
 
@@ -337,6 +345,8 @@ def _history_archive_response(
             if authorization is None
             else StandingAuthorizationResponse.model_validate(authorization.document())
         ),
+        archive_view_days=policy.archive_view_days,
+        archive_view_max_loaded=policy.archive_view_max_loaded,
         updated_at=policy.updated_at,
     )
 

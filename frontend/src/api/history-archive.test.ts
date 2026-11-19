@@ -6,13 +6,15 @@ import {
   listArchiveRuns,
 } from './history-archive';
 
-// The run wire contract of history archival steps 2 and 4: the purge
+// The run wire contract of history archival steps 2, 4 and 5: the purge
 // states and results pass through as the server answers them, and the
 // purge's evidence (the pre-purge backup, the purge start, the purged
 // counts, the receipt and its SHA-256) maps to the model — null until it
 // exists; an automatic run has no requester (`requested_by: null`), its
 // states PROPOSED and DISMISSED pass through, and its approval, dismissal,
-// standing authorization and failed authority map to the model.
+// standing authorization and failed authority map to the model; whether
+// a run can be opened for viewing and its newest view are checked
+// strictly.
 
 let answer: () => Response;
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -69,6 +71,8 @@ function runWire(extra: Record<string, unknown> = {}) {
     finished_at: null,
     result: null,
     failure_reason: null,
+    viewable: false,
+    view: null,
     ...extra,
   };
 }
@@ -217,6 +221,40 @@ test('an automatic run has no requester; its states, approval, dismissal, standi
     trigger: 'MANUAL',
     requestedBy: { userId: 1, displayName: 'Ann' },
   });
+});
+
+test('a run says whether its archive can be opened for viewing and names its newest view; a malformed one throws', async () => {
+  answer = () =>
+    json([
+      runWire({
+        id: 4,
+        state: 'COMPLETED',
+        viewable: true,
+        view: { id: 7, state: 'OPEN' },
+      }),
+      runWire({ id: 3, state: 'COMPLETED', viewable: true }),
+      runWire({ id: 2, state: 'NOTHING_ELIGIBLE' }),
+    ]);
+  const runs = await listArchiveRuns();
+  expect(runs.map((run) => [run.viewable, run.view])).toEqual([
+    [true, { id: 7, state: 'OPEN' }],
+    [true, null],
+    [false, null],
+  ]);
+
+  for (const extra of [
+    { viewable: 'yes' },
+    { viewable: undefined },
+    { view: undefined },
+    { view: { id: 7 } },
+    { view: { id: '7', state: 'OPEN' } },
+    { view: { id: 7, state: 'LOADED' } },
+  ]) {
+    answer = () => json([runWire(extra)]);
+    await expect(listArchiveRuns()).rejects.toThrow(
+      'The server answered malformed archive viewing data.',
+    );
+  }
 });
 
 test("approve sends the approver's reason and dismiss sends no body", async () => {

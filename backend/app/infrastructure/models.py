@@ -67,6 +67,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -96,6 +97,7 @@ from app.domain.enums import (
     HistoryArchiveRunResult,
     HistoryArchiveRunState,
     HistoryArchiveRunTrigger,
+    HistoryArchiveViewState,
     LineageRelation,
     MachineLifecycleEventType,
     MachineLifecycleState,
@@ -397,7 +399,10 @@ POLICY_DUE_SOON_ORDER_SQL = "due_soon_min_days <= due_soon_max_days"
 # each measure — live Movement rows (0-1,000,000,000, initially 5,000,000),
 # the months the oldest retained Movement is older than the cutoff (0-1200,
 # initially 1) and the database size in GiB (0-100,000, initially 20) — and
-# the days between automatic runs (1-365, initially 7).
+# the days between automatic runs (1-365, initially 7); and (design B step 5,
+# migration `0044_phase16_archive_viewing`) viewing an archive: the days a
+# loaded archive stays open (1-365, initially 7) and how many runs may be
+# loaded at once (1-10, initially 1).
 RETENTION_PERIOD_MONTHS_MAX = 1200
 SHORTEST_RETENTION_MONTHS_DEFAULT = 12
 HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
@@ -411,7 +416,11 @@ HISTORY_ARCHIVE_POLICY_RANGES: dict[str, tuple[int, int]] = {
     "archive_limit_history_months": (0, 1200),
     "archive_limit_database_gib": (0, 100_000),
     "archive_interval_days": (1, 365),
+    "archive_view_days": (1, 365),
+    "archive_view_max_loaded": (1, 10),
 }
+ARCHIVE_VIEW_DAYS_DEFAULT = 7
+ARCHIVE_VIEW_MAX_LOADED_DEFAULT = 1
 POLICY_RETENTION_PERIOD_SQL = (
     "retention_period_months IS NULL"
     " OR retention_period_months BETWEEN shortest_retention_months AND 1200"
@@ -704,6 +713,86 @@ DELETION_REQUEST_ROW_KEY_SQL = (
     "(table_name = 'part_numbers' AND row_key = upper(row_key COLLATE \"C\")"
     " AND row_key COLLATE \"C\" !~ '[[:space:]]' AND row_key <> '')"
     " OR (table_name <> 'part_numbers' AND row_key ~ '^[1-9][0-9]{0,18}$')"
+)
+
+# Viewing an archive (Phase 16, history archival design D16 and §9.3; build
+# step 5, migration `0044_phase16_archive_viewing`). Repeated verbatim by that
+# migration; the guard triggers live in the migration only.
+HISTORY_ARCHIVE_VIEW_FINAL_STATES = ("CLOSED", "FAILED", "CANCELLED")
+#: The views that count against the setting of runs loaded at once; at most
+#: one view of a run is in one of them (a partial UNIQUE index).
+HISTORY_ARCHIVE_VIEW_ACTIVE_STATES = ("REQUESTED", "LOADING", "OPEN")
+#: The views that may hold loaded rows.
+HISTORY_ARCHIVE_VIEW_LOADED_STATES = ("LOADING", "OPEN", "CLOSING")
+#: The viewer tables, in the order the host job removes a view's rows.
+ARCHIVE_VIEWER_TABLES = (
+    "archive_view_movements",
+    "archive_view_flows",
+    "archive_view_lineage",
+    "archive_view_routes",
+    "archive_view_names",
+)
+#: The kinds of names a view keeps: the sections of the archive's context.json.
+ARCHIVE_VIEW_NAME_KINDS = (
+    "areas",
+    "machines",
+    "operations",
+    "part_numbers",
+    "scan_stations",
+    "users",
+    "work_order_demands",
+    "work_orders",
+    "workers",
+)
+HISTORY_ARCHIVE_VIEW_STATE_SQL = (
+    "state IN (" + ", ".join(f"'{state}'" for state in HistoryArchiveViewState) + ")"
+)
+#: The load starts after the request; LOADING, OPEN, CLOSING and CLOSED views
+#: started it (a view that FAILED may have failed before it started).
+HISTORY_ARCHIVE_VIEW_PROGRESS_SQL = (
+    "(state NOT IN ('REQUESTED', 'CANCELLED') OR started_at IS NULL)"
+    " AND (state NOT IN ('LOADING', 'OPEN', 'CLOSING', 'CLOSED') OR started_at IS NOT NULL)"
+    " AND (started_at IS NULL OR started_at >= requested_at)"
+)
+#: Opened exactly in OPEN, CLOSING and CLOSED, with what the load counted.
+HISTORY_ARCHIVE_VIEW_LOADED_SQL = (
+    "(opened_at IS NULL) = (state NOT IN ('OPEN', 'CLOSING', 'CLOSED'))"
+    " AND (opened_at IS NULL) = (loaded_movements IS NULL)"
+    " AND (opened_at IS NULL) = (loaded_flows IS NULL)"
+    " AND (opened_at IS NULL) = (loaded_lineage_edges IS NULL)"
+    " AND (opened_at IS NULL) = (loaded_assigned_routes IS NULL)"
+    " AND (opened_at IS NULL) = (loaded_names IS NULL)"
+    " AND (opened_at IS NULL OR (opened_at >= started_at AND loaded_movements >= 0"
+    " AND loaded_flows >= 0 AND loaded_lineage_edges >= 0 AND loaded_assigned_routes >= 0"
+    " AND loaded_names >= 0))"
+)
+#: Closing started exactly in CLOSING and CLOSED; a person who closed it only then.
+HISTORY_ARCHIVE_VIEW_CLOSING_SQL = (
+    "(closing_started_at IS NULL) = (state NOT IN ('CLOSING', 'CLOSED'))"
+    " AND (closed_by_user_id IS NULL OR closing_started_at IS NOT NULL)"
+    " AND (closing_started_at IS NULL OR closing_started_at >= opened_at)"
+)
+HISTORY_ARCHIVE_VIEW_FAILURE_SQL = (
+    "(state = 'FAILED') = (failure_reason IS NOT NULL)"
+    " AND (failure_reason IS NULL OR char_length(failure_reason) BETWEEN 1 AND 2000)"
+)
+HISTORY_ARCHIVE_VIEW_FINISH_SQL = (
+    "(state IN ("
+    + ", ".join(f"'{state}'" for state in HISTORY_ARCHIVE_VIEW_FINAL_STATES)
+    + ")) = (finished_at IS NOT NULL)"
+    " AND (state = 'CANCELLED') = (cancelled_by_user_id IS NOT NULL)"
+    " AND (finished_at IS NULL OR finished_at >= requested_at)"
+)
+HISTORY_ARCHIVE_VIEW_ACTIVE_WHERE_SQL = (
+    "state IN (" + ", ".join(f"'{state}'" for state in HISTORY_ARCHIVE_VIEW_ACTIVE_STATES) + ")"
+)
+ARCHIVE_VIEW_NAME_KIND_SQL = (
+    "kind IN (" + ", ".join(f"'{kind}'" for kind in ARCHIVE_VIEW_NAME_KINDS) + ")"
+)
+#: The canonical form of the Part Number names of a view (their key).
+ARCHIVE_VIEW_NAME_KEY_SQL = (
+    """kind <> 'part_numbers' OR (key = upper(key COLLATE "C")"""
+    """ AND key COLLATE "C" !~ '[[:space:]]' AND key <> '')"""
 )
 
 # Backups (Phase 16, owner decision of 2026-11-13; Administration →
@@ -1772,6 +1861,15 @@ class ApplicationPolicy(Base):
         ForeignKey(
             "audit_events.id", name="fk_application_policy_archive_authorization_id_audit_events"
         ),
+    )
+    # Viewing an archive (design B step 5): the days a loaded archive stays
+    # open from its opening (the host job then removes its rows), and how many
+    # runs may be loaded (or wait to be loaded) at once.
+    archive_view_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("7")
+    )
+    archive_view_max_loaded: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
     )
     # User sign-in (Phase 14 slice 1): an expiry absolute from sign-in,
     # whole days, unless sign-ins never expire (the day count is kept
@@ -3376,7 +3474,7 @@ class AuditEvent(Base):
             f" '{AuditEntityType.ROUTE_TEMPLATE}', '{AuditEntityType.USER}',"
             f" '{AuditEntityType.ROLE}', '{AuditEntityType.SCAN_STATION_DEVICE}',"
             f" '{AuditEntityType.ASSIGNED_ROUTE}', '{AuditEntityType.HISTORY_ARCHIVE_RUN}',"
-            f" '{AuditEntityType.DELETION_REQUEST}')",
+            f" '{AuditEntityType.DELETION_REQUEST}', '{AuditEntityType.HISTORY_ARCHIVE_VIEW}')",
             name=conv("ck_audit_events_entity_type"),
         ),
         # Per-entity history in write order.
@@ -3917,5 +4015,270 @@ class DeletionRequestRow(Base):
         ),
         CheckConstraint(
             DELETION_REQUEST_ROW_KEY_SQL, name=conv("ck_deletion_request_rows_row_key_shape")
+        ),
+    )
+
+
+class HistoryArchiveView(Base):
+    """One view of an archive: a run's verified archive opened for viewing
+    (Phase 16, history archival design D16 and §9.3; build step 5, migration
+    `0044_phase16_archive_viewing`).
+
+    A holder of Run history archival and purge opens a finished run whose
+    archive was verified for viewing (REQUESTED); the host job (``python -m
+    app.cli history-archive load-view``, as the maintenance database role)
+    checks every file of the archive folder against ``SHA256SUMS`` and the
+    run's manifest SHA-256 and loads the files into the viewer tables
+    (``archive_view_*``, keyed by the view), never into live history: LOADING,
+    then OPEN with what it loaded. A person closes it (Close viewing:
+    CLOSING), or the job does once the days of the setting have run out; the
+    job then removes its loaded rows (``close-view``) and the view is CLOSED.
+    A load that fails, or that the next start finds LOADING, has its rows
+    removed and ends FAILED with its reason; a REQUESTED view may be
+    CANCELLED. Every change of state appends one ``HistoryArchiveView`` audit
+    row.
+
+    The request (run, requester, request time) never changes. The guard
+    trigger ``trg_history_archive_views_guard_mutation`` admits an insert only
+    of a REQUESTED view, by a person (never the maintenance role), of a
+    finished run whose archive was verified, while fewer views are active
+    (REQUESTED, LOADING, OPEN) than the setting allows; the application role
+    may only cancel a REQUESTED view and close an OPEN one; every other
+    transition is the job's, made while ``partflow.archive_view_id`` names
+    the view, and a view ends FAILED or CLOSED only once its rows are gone; a
+    finished view never changes; no view is ever deleted. At most one view of
+    a run is active (``uq_history_archive_views_run_active``).
+    """
+
+    __tablename__ = "history_archive_views"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "history_archive_runs.id", name="fk_history_archive_views_run_id_history_archive_runs"
+        ),
+        nullable=False,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", name="fk_history_archive_views_requested_by_user_id_users"),
+        nullable=False,
+    )
+    requested_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # The job's progress (the database's clock): the load's start; the
+    # opening with what the load counted; the start of the closing.
+    started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    opened_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    loaded_movements: Mapped[int | None] = mapped_column(BigInteger)
+    loaded_flows: Mapped[int | None] = mapped_column(Integer)
+    loaded_lineage_edges: Mapped[int | None] = mapped_column(Integer)
+    loaded_assigned_routes: Mapped[int | None] = mapped_column(Integer)
+    loaded_names: Mapped[int | None] = mapped_column(Integer)
+    closing_started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # The person who closed it (Close viewing); NULL when its days ran out.
+    closed_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_history_archive_views_closed_by_user_id_users")
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    cancelled_by_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", name="fk_history_archive_views_cancelled_by_user_id_users")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            HISTORY_ARCHIVE_VIEW_STATE_SQL, name=conv("ck_history_archive_views_state")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_VIEW_PROGRESS_SQL, name=conv("ck_history_archive_views_progress_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_VIEW_LOADED_SQL, name=conv("ck_history_archive_views_loaded_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_VIEW_CLOSING_SQL, name=conv("ck_history_archive_views_closing_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_VIEW_FAILURE_SQL, name=conv("ck_history_archive_views_failure_shape")
+        ),
+        CheckConstraint(
+            HISTORY_ARCHIVE_VIEW_FINISH_SQL, name=conv("ck_history_archive_views_finish_shape")
+        ),
+        # At most one active view of a run (REQUESTED, LOADING, OPEN).
+        Index(
+            "uq_history_archive_views_run_active",
+            "run_id",
+            unique=True,
+            postgresql_where=text(HISTORY_ARCHIVE_VIEW_ACTIVE_WHERE_SQL),
+        ),
+    )
+
+
+# The viewer tables (build step 5): a loaded archive, every row keyed by its
+# view (``view_id``, no foreign key: the statement guards admit an insert only
+# while the view the marker names is LOADING, and a view is never deleted).
+# They hold the archive's record kinds as far as the viewer page needs them,
+# never a live row; no reader of live history, no projection and no reconcile
+# check but (h) and (j) reads them. Their guards
+# (``partflow_archive_view_rows_guard``: ``trg_<table>_guard_insert``,
+# ``trg_<table>_guard_delete`` and ``trg_<table>_forbid_mutation``) live in the
+# migration.
+
+
+class ArchiveViewMovement(Base):
+    """One archived Movement of a loaded archive: every column of the archive's
+    ``movements.jsonl.gz`` line (the Movement as it was in ``part_movements``)."""
+
+    __tablename__ = "archive_view_movements"
+
+    view_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    quantity_flow_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    part_number: Mapped[str] = mapped_column(Text, nullable=False)
+    movement_type: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    from_area_id: Mapped[int | None] = mapped_column(Integer)
+    to_area_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    assigned_route_step_id: Mapped[int | None] = mapped_column(Integer)
+    occurred_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    server_received_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    device_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+    station_id: Mapped[str | None] = mapped_column(Text)
+    source_machine_id: Mapped[int | None] = mapped_column(Integer)
+    destination_machine_id: Mapped[int | None] = mapped_column(Integer)
+    command_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    movement_reason: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    reverses_movement_id: Mapped[int | None] = mapped_column(BigInteger)
+    worker_id: Mapped[int | None] = mapped_column(Integer)
+    scan_session_id: Mapped[int | None] = mapped_column(BigInteger)
+
+    __table_args__ = (
+        CheckConstraint(
+            CANONICAL_PART_NUMBER_SQL, name=conv("ck_archive_view_movements_part_number_canonical")
+        ),
+        # The viewer's history in time order, by Part Number and by flow, and
+        # the REVERSED row of an original (the viewer's search and flow pages).
+        Index("ix_archive_view_movements_view_id_occurred_at_id", "view_id", "occurred_at", "id"),
+        Index(
+            "ix_archive_view_movements_view_id_part_number_occurred_at_id",
+            "view_id",
+            "part_number",
+            "occurred_at",
+            "id",
+        ),
+        Index(
+            "ix_archive_view_movements_view_id_quantity_flow_id_id",
+            "view_id",
+            "quantity_flow_id",
+            "id",
+        ),
+        Index(
+            "ix_archive_view_movements_view_id_reverses_movement_id",
+            "view_id",
+            "reverses_movement_id",
+            postgresql_where=text("reverses_movement_id IS NOT NULL"),
+        ),
+    )
+
+
+class ArchiveViewFlow(Base):
+    """One archived flow of a loaded archive: the flow as the archive's
+    ``flows.jsonl.gz`` holds it (``flow``) with its carry-forward record
+    (``record``), the columns the viewer searches by, and the Work Orders it
+    was released for — directly, or through the flows it was split or merged
+    from (``work_order_ids``, computed by the load from the records, the
+    lineage and the archive's demand lines)."""
+
+    __tablename__ = "archive_view_flows"
+
+    view_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    flow_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    component_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    part_number: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    route_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    assigned_route_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    received_demand_id: Mapped[int | None] = mapped_column(Integer)
+    work_order_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer), nullable=False, server_default=text("'{}'::integer[]")
+    )
+    flow: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    record: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            CANONICAL_PART_NUMBER_SQL, name=conv("ck_archive_view_flows_part_number_canonical")
+        ),
+        Index("ix_archive_view_flows_view_id_part_number", "view_id", "part_number"),
+        # The search by Work Order Number (the flows released for it).
+        Index("ix_archive_view_flows_work_order_ids", "work_order_ids", postgresql_using="gin"),
+    )
+
+
+class ArchiveViewLineage(Base):
+    """One lineage edge of a loaded archive (``lineage.jsonl.gz``), ``void`` for
+    an undone split or merge."""
+
+    __tablename__ = "archive_view_lineage"
+
+    view_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    relation: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_flow_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    child_flow_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    device_event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    void: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    __table_args__ = (
+        Index("ix_archive_view_lineage_view_id_parent_flow_id", "view_id", "parent_flow_id"),
+        Index("ix_archive_view_lineage_view_id_child_flow_id", "view_id", "child_flow_id"),
+        Index("ix_archive_view_lineage_view_id_device_event_id", "view_id", "device_event_id"),
+    )
+
+
+class ArchiveViewRoute(Base):
+    """One Assigned Route snapshot of a loaded archive with its steps, in order
+    (``assigned_routes.jsonl.gz``)."""
+
+    __tablename__ = "archive_view_routes"
+
+    view_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    assigned_route_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    source_route_template_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    steps: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+
+
+class ArchiveViewName(Base):
+    """One name of a loaded archive's ``context.json``: an Area, Operation,
+    Machine, Worker, Scan Station, Work Order, demand line, User or Part
+    Number (``kind``, the section), by its id or key, as it was at export
+    (``value``, the section's row). The viewer reads every name from here, so
+    master data renamed or deleted since reads as it was."""
+
+    __tablename__ = "archive_view_names"
+
+    view_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(ARCHIVE_VIEW_NAME_KIND_SQL, name=conv("ck_archive_view_names_kind")),
+        CheckConstraint(
+            ARCHIVE_VIEW_NAME_KEY_SQL, name=conv("ck_archive_view_names_part_number_canonical")
         ),
     )

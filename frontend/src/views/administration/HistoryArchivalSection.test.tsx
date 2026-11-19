@@ -12,6 +12,8 @@ import type { Permission } from '../../api/roles';
 import type { SessionUser } from '../../api/session';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import type { ConnectivityStatus } from '../../app/connectivity-context';
+import { RouterContext } from '../../app/router-context';
+import type { RouterValue } from '../../app/router-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { formatInstant } from './archive-runs';
@@ -28,9 +30,12 @@ import { HistoryArchivalSection } from './HistoryArchivalSection';
 // the measure with its own limit, the approval step switched off, renewed
 // and on again with the standing authorization and its validity — and the
 // automatic runs in the table: Proposed and Dismissed, Automatic with the
-// approval or the standing authorization, Approve… and Dismiss…. The /api
-// surface is faked in memory with the contracts' routes and shapes; the
-// server's messages are shown as given.
+// approval or the standing authorization, Approve… and Dismiss…; and
+// (step 5, D16) the viewing settings, Open for viewing… with what loading
+// does, each run's newest view with its state, View, Cancel… and Close
+// viewing…, the refusals as given, all hidden from a User without the
+// key. The /api surface is faked in memory with the contracts' routes and
+// shapes; the server's messages are shown as given.
 
 const T0 = '2026-11-17T08:00:00Z';
 /** When the fake server approves or dismisses a proposed run. */
@@ -104,6 +109,8 @@ interface RunWire {
   finished_at: string | null;
   result: string | null;
   failure_reason: string | null;
+  viewable: boolean;
+  view: { id: number; state: string } | null;
 }
 
 function run(id: number, overrides: Partial<RunWire> = {}): RunWire {
@@ -149,6 +156,8 @@ function run(id: number, overrides: Partial<RunWire> = {}): RunWire {
     finished_at: null,
     result: null,
     failure_reason: null,
+    viewable: false,
+    view: null,
     ...overrides,
   };
 }
@@ -237,6 +246,8 @@ interface Policy {
   archive_limit_database_gib: number;
   archive_approval_required: boolean;
   archive_interval_days: number;
+  archive_view_days: number;
+  archive_view_max_loaded: number;
   standing_authorization: StandingAuthorizationWire | null;
 }
 
@@ -324,13 +335,104 @@ function deletion(
   };
 }
 
+/** A view of a run's archive (archival step 5, D16) as the API answers
+ * it. */
+interface ViewWire {
+  id: number;
+  run_id: number;
+  state: string;
+  requested_by: UserWire;
+  requested_at: string;
+  to_load: {
+    archive_name: string | null;
+    movements: number;
+    flows: number;
+    lineage_edges: number;
+    assigned_routes: number;
+    archive_bytes: number;
+  };
+  started_at: string | null;
+  opened_at: string | null;
+  open_until: string | null;
+  loaded: {
+    movements: number;
+    flows: number;
+    lineage_edges: number;
+    assigned_routes: number;
+    names: number;
+  } | null;
+  closing_started_at: string | null;
+  closed_by: UserWire | null;
+  cancelled_by: UserWire | null;
+  finished_at: string | null;
+  failure_reason: string | null;
+}
+
+/** When the views opened, and until when they stay open (7 days). */
+const OPENED = '2026-11-18T10:05:33.000000Z';
+const OPEN_UNTIL = '2026-11-25T10:05:33.000000Z';
+
+function view(
+  id: number,
+  runId: number,
+  overrides: Partial<ViewWire> = {},
+): ViewWire {
+  return {
+    id,
+    run_id: runId,
+    state: 'REQUESTED',
+    requested_by: { user_id: 90, display_name: 'Ada Admin' },
+    requested_at: '2026-11-18T10:00:00.000000Z',
+    to_load: {
+      archive_name: `run-${runId}-20261117T092000Z`,
+      movements: 4210,
+      flows: 310,
+      lineage_edges: 40,
+      assigned_routes: 12,
+      archive_bytes: 790001,
+    },
+    started_at: null,
+    opened_at: null,
+    open_until: null,
+    loaded: null,
+    closing_started_at: null,
+    closed_by: null,
+    cancelled_by: null,
+    finished_at: null,
+    failure_reason: null,
+    ...overrides,
+  };
+}
+
+/** An open view of run `runId`. */
+const OPEN_VIEW = (id: number, runId: number) =>
+  view(id, runId, {
+    state: 'OPEN',
+    started_at: '2026-11-18T10:05:00.000000Z',
+    opened_at: OPENED,
+    open_until: OPEN_UNTIL,
+    loaded: {
+      movements: 4210,
+      flows: 310,
+      lineage_edges: 40,
+      assigned_routes: 12,
+      names: 95,
+    },
+  });
+
+/** A finished run whose verified archive can be opened for viewing. */
+const VIEWABLE = (id: number, overrides: Partial<RunWire> = {}) =>
+  run(id, { ...PURGED(id), viewable: true, ...overrides });
+
 let policy: Policy;
 let runs: RunWire[];
+let views: ViewWire[];
 let deletions: DeletionWire[];
 let writes: { method: string; url: string; body: unknown }[];
 /** A refusal or lost answer per route key, if set (`PUT policy`,
  * `GET preview`, `POST runs`, `POST cancel`, `POST copy`, `GET
- * deletions`, `POST deletion cancel`). */
+ * deletions`, `POST deletion cancel`, `GET views`, `POST views`, `POST
+ * view cancel`, `POST view close`). */
 let failures: Record<string, { status: number; detail: string } | 'network'>;
 /** While set, a preview answers only once it resolves. */
 let previewHold: Promise<void> | null;
@@ -542,6 +644,105 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
     }
     return json(target);
   }
+  if (url.startsWith('/api/history-archive/views') && method === 'GET') {
+    const refused = fail('GET views');
+    if (refused) return refused;
+    return json(views);
+  }
+  if (url === '/api/history-archive/views' && method === 'POST') {
+    // The server's order (B5 contract §5.3): the run, its state, its
+    // verification, an active view of it, the runs loaded at once.
+    const runId = (body as { run_id: number }).run_id;
+    const target = runs.find((r) => r.id === runId);
+    if (!target)
+      return json({ detail: `There is no archival run ${runId}.` }, 404);
+    if (!target.viewable) {
+      return json(
+        {
+          detail: `Run ${runId} ended ${target.state} before its archive was verified, so it has no archive to view.`,
+        },
+        409,
+      );
+    }
+    const active = views.filter((v) =>
+      ['REQUESTED', 'LOADING', 'OPEN'].includes(v.state),
+    );
+    const same = active.find((v) => v.run_id === runId);
+    if (same) {
+      return json(
+        {
+          detail: `Run ${runId} is already open for viewing, or waiting to be loaded (view ${same.id}, ${same.state}).`,
+        },
+        409,
+      );
+    }
+    const failure = failures['POST views'];
+    if (
+      failure !== undefined &&
+      failure !== 'network' &&
+      failure.status < 500
+    ) {
+      return json({ detail: failure.detail }, failure.status);
+    }
+    const created = view(Math.max(0, ...views.map((v) => v.id)) + 1, runId);
+    views = [created, ...views];
+    target.view = { id: created.id, state: created.state };
+    // The view is requested even when its answer is lost.
+    const refused = fail('POST views');
+    if (refused) return refused;
+    return json(created, 201);
+  }
+  const viewAction =
+    /^\/api\/history-archive\/views\/(\d+)\/(cancel|close)$/.exec(url);
+  if (viewAction && method === 'POST') {
+    const target = views.find((v) => v.id === Number(viewAction[1]));
+    if (!target) {
+      return json(
+        { detail: `There is no archive view ${viewAction[1]}.` },
+        404,
+      );
+    }
+    const refused = fail(
+      viewAction[2] === 'cancel' ? 'POST view cancel' : 'POST view close',
+    );
+    if (refused) return refused;
+    const me = { user_id: 90, display_name: 'Ada Admin' };
+    const name = `View ${target.id} of run ${target.run_id}`;
+    if (viewAction[2] === 'cancel') {
+      if (target.state === 'OPEN') {
+        return json(
+          {
+            detail: `${name} is open (OPEN): close it instead of cancelling it.`,
+          },
+          409,
+        );
+      }
+      if (target.state === 'REQUESTED') {
+        target.state = 'CANCELLED';
+        target.cancelled_by = me;
+        target.finished_at = T1;
+      }
+    } else {
+      if (target.state === 'REQUESTED') {
+        return json(
+          {
+            detail: `${name} waits to be loaded (REQUESTED): cancel it instead of closing it.`,
+          },
+          409,
+        );
+      }
+      if (target.state === 'OPEN') {
+        target.state = 'CLOSING';
+        target.closing_started_at = T1;
+        target.closed_by = me;
+      }
+    }
+    const owner = runs.find((r) => r.id === target.run_id);
+    if (owner?.view?.id === target.id) {
+      owner.view = { id: target.id, state: target.state };
+    }
+    return json(target);
+  }
   if (url === '/api/permanent-deletion/requests' && method === 'GET') {
     const refused = fail('GET deletions');
     if (refused) return refused;
@@ -597,13 +798,25 @@ function sessionWith(permissions: Permission[]): SessionValue {
   };
 }
 
+/** Where View… navigates (the archive viewer has its own suite). */
+let navigated: string[];
+
 function renderSection(status: ConnectivityStatus = 'connected') {
+  const router: RouterValue = {
+    route: { view: 'administration' },
+    path: '/administration',
+    navigate: (to) => navigated.push(to),
+    setNavigationGuard: () => undefined,
+    setManagementReadable: () => undefined,
+  };
   return render(
-    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
-      <SessionContext.Provider value={session}>
-        <HistoryArchivalSection />
-      </SessionContext.Provider>
-    </ConnectivityContext.Provider>,
+    <RouterContext.Provider value={router}>
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <SessionContext.Provider value={session}>
+          <HistoryArchivalSection />
+        </SessionContext.Provider>
+      </ConnectivityContext.Provider>
+    </RouterContext.Provider>,
   );
 }
 
@@ -623,9 +836,13 @@ beforeEach(() => {
     archive_limit_database_gib: 20,
     archive_approval_required: true,
     archive_interval_days: 7,
+    archive_view_days: 7,
+    archive_view_max_loaded: 1,
     standing_authorization: null,
   };
   runs = [];
+  views = [];
+  navigated = [];
   deletions = [];
   writes = [];
   failures = {};
@@ -733,6 +950,8 @@ test('HA-1: the section shows the settings, the preview and the runs, and says w
     'Report a waiting run after': '7 days',
     'Movements per purge batch': '50,000',
     'Part Numbers per purge batch': '20',
+    'A loaded archive stays open': '7 days',
+    'Runs loaded for viewing at once': '1',
   });
   expect(
     screen.getByRole('button', { name: 'Edit retention and schedule…' }),
@@ -2594,4 +2813,473 @@ test('HA-27: while the approval step is off, switching automatic runs off and le
     within(onRetention).getByRole('radio', { name: 'No retention period' }),
   );
   expect(within(onRetention).queryByText(PERIOD_STOPS)).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// Viewing an archive (archival step 5, D16)
+// ---------------------------------------------------------------------------
+
+/** The viewing of run `id` under its state: its lines (the newest view's
+ * pill and its line) and its actions (buttons and links, by accessible
+ * name); empty when the run shows no viewing. */
+function runViewing(id: number): { lines: string[]; actions: string[] } {
+  const block = runRowElement(id).querySelector('.admin-runviewing');
+  if (!block) return { lines: [], actions: [] };
+  return {
+    lines: Array.from(
+      block.querySelectorAll(':scope > span'),
+      (line) => line.textContent ?? '',
+    ),
+    actions: Array.from(
+      block.querySelectorAll(':scope > a, :scope > button'),
+      (control) =>
+        control.getAttribute('aria-label') ?? control.textContent ?? '',
+    ),
+  };
+}
+
+const LIMIT_REFUSAL =
+  'At most 1 run may be loaded for viewing at once (History archival & purge), and 1 is loaded or waiting: view 3 of run 1 (OPEN). Close a view, or wait until it is closed, before opening run 4.';
+const LOAD_FAILED =
+  'The archive folder run-4-20261117T092000Z of run 4 is missing. Nothing was loaded; restore the archive folder from its off-host copy, then open the run for viewing again.';
+
+test('HA-28: the viewing settings are edited in the Retention and schedule dialog, sent only when changed, and the server texts are shown as given', async () => {
+  renderSection();
+  await loaded();
+  expect(card('Retention and schedule').textContent).toContain(
+    "How long Movement history stays in the database, when the server's archival job does its work, how much it purges at a time, and how archives are loaded for viewing.",
+  );
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Edit retention and schedule…' }),
+  );
+  const dialog = screen.getByRole('dialog', { name: 'Retention and schedule' });
+  const days = within(dialog).getByLabelText(
+    'A loaded archive stays open (days, 1–365)',
+  );
+  expect(days).toHaveValue(7);
+  expect(
+    within(dialog).getByLabelText('Runs loaded for viewing at once (1–10)'),
+  ).toHaveValue(1);
+  expect(dialog.textContent).toContain(
+    'A run opened for viewing closes this many days after it was loaded, and the archival job removes its copy from the database. A change applies to the runs open now as well.',
+  );
+  expect(dialog.textContent).toContain(
+    'Each loaded run takes database space until it is closed, and a run waiting to be loaded counts too. A lower number leaves the runs loaded now open.',
+  );
+  // Only a whole number is refused in the dialog.
+  fireEvent.change(days, { target: { value: '2.5' } });
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Enter a whole number.',
+  );
+  expect(
+    within(dialog).getByRole('button', { name: 'Save changes' }),
+  ).toBeDisabled();
+  fireEvent.change(days, { target: { value: '30' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Retention and schedule' }),
+    ).toBeNull(),
+  );
+  expect(writes).toEqual([
+    {
+      method: 'PUT',
+      url: '/api/policies/data-retention',
+      body: { archive_view_days: 30 },
+    },
+  ]);
+  expect(await screen.findByText('30 days')).toBeInTheDocument();
+
+  // The server checks each range, and its text is shown as given.
+  for (const [label, value, detail, sent] of [
+    [
+      'A loaded archive stays open (days, 1–365)',
+      '400',
+      'The days a loaded archive stays open must be a whole number from 1 to 365.',
+      { archive_view_days: 400 },
+    ],
+    [
+      'Runs loaded for viewing at once (1–10)',
+      '11',
+      'The runs that may be loaded for viewing at once must be a whole number from 1 to 10.',
+      { archive_view_max_loaded: 11 },
+    ],
+  ] as const) {
+    writes = [];
+    failures['PUT policy'] = { status: 422, detail };
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Edit retention and schedule…' }),
+    );
+    const again = screen.getByRole('dialog', {
+      name: 'Retention and schedule',
+    });
+    fireEvent.change(within(again).getByLabelText(label), {
+      target: { value },
+    });
+    fireEvent.click(
+      within(again).getByRole('button', { name: 'Save changes' }),
+    );
+    expect(await within(again).findByRole('alert')).toHaveTextContent(detail);
+    expect(writes).toEqual([
+      { method: 'PUT', url: '/api/policies/data-retention', body: sent },
+    ]);
+    fireEvent.click(
+      within(again).getByRole('button', { name: 'Cancel (Esc)' }),
+    );
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Unsaved changes' })).getByRole(
+        'button',
+        { name: 'Discard changes' },
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'Retention and schedule' }),
+      ).toBeNull(),
+    );
+  }
+});
+
+test('HA-29: Open for viewing… is offered on a viewable run, says what loading does, posts the run, and the run then waits to be loaded with Cancel…', async () => {
+  runs = [
+    VIEWABLE(4),
+    run(3, { state: 'NOTHING_ELIGIBLE', finished_at: T0 }),
+    WAITING(2),
+  ];
+  renderSection();
+  await loaded();
+  // Only the run the server marks viewable offers it.
+  expect(runViewing(4)).toEqual({
+    lines: [],
+    actions: ['Open run 4 for viewing…'],
+  });
+  expect(runViewing(3)).toEqual({ lines: [], actions: [] });
+  expect(runViewing(2)).toEqual({ lines: [], actions: [] });
+  // The run's own pill stays first.
+  expect(runRow(4).State).toBe('Completed');
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open run 4 for viewing…' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Open run 4 for viewing?',
+  });
+  expect(
+    Array.from(dialog.querySelectorAll('p'), (p) => p.textContent),
+  ).toEqual([
+    "The archival job on the server loads a copy of this run's archive within minutes, for reading on a page of its own. The copy is read-only and separate from the live history: nothing is added to the live history, and Tracking and every figure stay as they are.",
+    "Until it is closed, the copy takes space in the database: roughly 7 times the archive's size, about 5.3 MB for this run (4,210 Movements in 310 flows, an archive of 771.5 KB).",
+    'It closes by itself 7 days after it opens, or earlier with Close viewing.',
+  ]);
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel (Esc)' }));
+  expect(writes).toEqual([]);
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open run 4 for viewing…' }),
+  );
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Open run 4 for viewing?' }),
+    ).getByRole('button', { name: 'Open for viewing' }),
+  );
+  expect(
+    await within(card('Runs')).findByText(
+      '✓ Run 4 is waiting to be loaded for viewing. The archival job on the server loads it within minutes: Reload shows when it is open, and View then opens it.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    { method: 'POST', url: '/api/history-archive/views', body: { run_id: 4 } },
+  ]);
+  await waitFor(() =>
+    expect(runViewing(4)).toEqual({
+      lines: ['Waiting to be loaded for viewing'],
+      actions: ['Cancel viewing of run 4…'],
+    }),
+  );
+});
+
+test('HA-30: a refusal of Open for viewing — the runs loaded at once, a run already open — is shown as given; a lost answer reloads the runs', async () => {
+  runs = [VIEWABLE(4)];
+  renderSection();
+  await loaded();
+  failures['POST views'] = { status: 409, detail: LIMIT_REFUSAL };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open run 4 for viewing…' }),
+  );
+  const dialog = screen.getByRole('dialog', {
+    name: 'Open run 4 for viewing?',
+  });
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Open for viewing' }),
+  );
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    LIMIT_REFUSAL,
+  );
+  expect(views).toEqual([]);
+
+  // The answer is lost: the view was requested meanwhile.
+  failures['POST views'] = 'network';
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'Open for viewing' }),
+  );
+  expect(await within(card('Runs')).findByRole('alert')).toHaveTextContent(
+    'The server did not answer, so run 4 may or may not have been opened for viewing. Check its state in the table; opening it again is safe.',
+  );
+  expect(
+    screen.queryByRole('dialog', { name: 'Open run 4 for viewing?' }),
+  ).toBeNull();
+  await waitFor(() =>
+    expect(runViewing(4).lines).toEqual(['Waiting to be loaded for viewing']),
+  );
+  cleanup();
+
+  // A table read before someone else opened the run: the server's text.
+  delete failures['POST views'];
+  runs = [VIEWABLE(4)];
+  views = [OPEN_VIEW(7, 4)];
+  renderSection();
+  await loaded();
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Open run 4 for viewing…' }),
+  );
+  const stale = screen.getByRole('dialog', { name: 'Open run 4 for viewing?' });
+  fireEvent.click(
+    within(stale).getByRole('button', { name: 'Open for viewing' }),
+  );
+  expect(await within(stale).findByRole('alert')).toHaveTextContent(
+    'Run 4 is already open for viewing, or waiting to be loaded (view 7, OPEN).',
+  );
+});
+
+test("HA-31: each run shows its newest view's state and details, View on an open view, and Open for viewing… again once the view is no longer active", async () => {
+  runs = [
+    VIEWABLE(6, { view: { id: 9, state: 'OPEN' } }),
+    VIEWABLE(5, { view: { id: 8, state: 'LOADING' } }),
+    VIEWABLE(4, { view: { id: 7, state: 'FAILED' } }),
+    VIEWABLE(3, { view: { id: 6, state: 'CLOSED' } }),
+    VIEWABLE(2, { view: { id: 5, state: 'CANCELLED' } }),
+    VIEWABLE(1, { view: { id: 4, state: 'CLOSING' } }),
+  ];
+  views = [
+    OPEN_VIEW(9, 6),
+    view(8, 5, { state: 'LOADING', started_at: '2026-11-18T10:05:00Z' }),
+    view(7, 4, {
+      state: 'FAILED',
+      failure_reason: LOAD_FAILED,
+      finished_at: '2026-11-18T10:05:01Z',
+    }),
+    {
+      ...OPEN_VIEW(6, 3),
+      state: 'CLOSED',
+      closing_started_at: OPEN_UNTIL,
+      finished_at: OPEN_UNTIL,
+    },
+    view(5, 2, {
+      state: 'CANCELLED',
+      cancelled_by: { user_id: 5, display_name: 'Bo' },
+      finished_at: '2026-11-18T10:01:00Z',
+    }),
+    {
+      ...OPEN_VIEW(4, 1),
+      state: 'CLOSING',
+      closing_started_at: T1,
+      closed_by: { user_id: 90, display_name: 'Ada Admin' },
+    },
+  ];
+  renderSection();
+  await loaded();
+  await waitFor(() =>
+    expect(runViewing(6)).toEqual({
+      lines: ['Open for viewing', `Until ${formatInstant(OPEN_UNTIL)}`],
+      actions: ['View the archive of run 6', 'Close viewing of run 6…'],
+    }),
+  );
+  expect(runViewing(5)).toEqual({
+    lines: ['Being loaded for viewing'],
+    actions: [],
+  });
+  expect(runViewing(4)).toEqual({
+    lines: ['Loading for viewing failed', LOAD_FAILED],
+    actions: ['Open run 4 for viewing…'],
+  });
+  expect(runViewing(3)).toEqual({
+    lines: ['Viewing closed', 'Its days ran out.'],
+    actions: ['Open run 3 for viewing…'],
+  });
+  expect(runViewing(2)).toEqual({
+    lines: ['Viewing cancelled', 'Cancelled by Bo.'],
+    actions: ['Open run 2 for viewing…'],
+  });
+  expect(runViewing(1)).toEqual({
+    lines: ['Viewing closed — removing the copy', 'Closed by Ada Admin.'],
+    actions: ['Open run 1 for viewing…'],
+  });
+  // The run's own pill stays first; the table keeps its six columns.
+  expect(runRow(6).State).toBe('Completed');
+  expect(within(card('Runs')).getAllByRole('columnheader')).toHaveLength(6);
+
+  // View opens the archive viewer of the open view.
+  const viewLink = screen.getByRole('link', {
+    name: 'View the archive of run 6',
+  });
+  expect(viewLink).toHaveAttribute(
+    'href',
+    '/administration/history-archival/views/9',
+  );
+  fireEvent.click(viewLink);
+  expect(navigated).toEqual(['/administration/history-archival/views/9']);
+  expect(writes).toEqual([]);
+});
+
+test('HA-32: Cancel… and Close viewing… ask first and post to the view; a refusal stays in the dialog as given; a lost answer reloads the runs', async () => {
+  runs = [
+    VIEWABLE(4, { view: { id: 7, state: 'REQUESTED' } }),
+    VIEWABLE(3, { view: { id: 6, state: 'OPEN' } }),
+  ];
+  views = [view(7, 4), OPEN_VIEW(6, 3)];
+  renderSection();
+  await loaded();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Cancel viewing of run 4…' }),
+  );
+  const cancel = screen.getByRole('dialog', {
+    name: 'Cancel viewing of run 4?',
+  });
+  expect(cancel.textContent).toContain(
+    'The archive of run 4 is not loaded, and nothing changes in the database. To view it later, open the run for viewing again.',
+  );
+  fireEvent.click(
+    within(cancel).getByRole('button', { name: 'Keep waiting (Esc)' }),
+  );
+  expect(writes).toEqual([]);
+
+  // A table read before the job took the view: the server's text.
+  const LOADING =
+    'View 7 of run 4 is being loaded on the server now and cannot be cancelled. Close it once it is open.';
+  failures['POST view cancel'] = { status: 409, detail: LOADING };
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Cancel viewing of run 4…' }),
+  );
+  const refused = screen.getByRole('dialog', {
+    name: 'Cancel viewing of run 4?',
+  });
+  fireEvent.click(
+    within(refused).getByRole('button', { name: 'Cancel viewing' }),
+  );
+  expect(await within(refused).findByRole('alert')).toHaveTextContent(LOADING);
+  delete failures['POST view cancel'];
+  fireEvent.click(
+    within(refused).getByRole('button', { name: 'Cancel viewing' }),
+  );
+  expect(
+    await within(card('Runs')).findByText(
+      '✓ The viewing of run 4 is cancelled.',
+    ),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(runViewing(4)).toEqual({
+      lines: ['Viewing cancelled', 'Cancelled by Ada Admin.'],
+      actions: ['Open run 4 for viewing…'],
+    }),
+  );
+
+  writes = [];
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Close viewing of run 3…' }),
+  );
+  const close = screen.getByRole('dialog', { name: 'Close viewing of run 3?' });
+  expect(close.textContent).toContain(
+    'The viewer page of run 3 closes now, and the archival job on the server removes the loaded copy from the database at its next start. The archive files stay as they are: to read them again, open the run for viewing again.',
+  );
+  fireEvent.click(within(close).getByRole('button', { name: 'Close viewing' }));
+  expect(
+    await within(card('Runs')).findByText(
+      '✓ The viewing of run 3 is closed. The archival job on the server removes its loaded copy at its next start.',
+    ),
+  ).toBeInTheDocument();
+  expect(writes).toEqual([
+    {
+      method: 'POST',
+      url: '/api/history-archive/views/6/close',
+      body: undefined,
+    },
+  ]);
+  await waitFor(() =>
+    expect(runViewing(3)).toEqual({
+      lines: ['Viewing closed — removing the copy', 'Closed by Ada Admin.'],
+      actions: ['Open run 3 for viewing…'],
+    }),
+  );
+  cleanup();
+
+  // A close whose answer is lost: the runs reload and the card says so.
+  runs = [VIEWABLE(3, { view: { id: 6, state: 'OPEN' } })];
+  views = [OPEN_VIEW(6, 3)];
+  failures['POST view close'] = { status: 502, detail: 'Bad gateway.' };
+  renderSection();
+  await loaded();
+  fireEvent.click(
+    await screen.findByRole('button', { name: 'Close viewing of run 3…' }),
+  );
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Close viewing of run 3?' }),
+    ).getByRole('button', { name: 'Close viewing' }),
+  );
+  expect(await within(card('Runs')).findByRole('alert')).toHaveTextContent(
+    'The server did not answer, so the viewing of run 3 may or may not have been closed. Check its state in the table; closing it again is safe.',
+  );
+});
+
+test('HA-33: a User without the key sees none of the viewing and reads no view; offline every viewing write is blocked while View stays', async () => {
+  session = sessionWith(['CONFIGURE_SYSTEM_SETTINGS']);
+  runs = [
+    VIEWABLE(6, { view: { id: 9, state: 'OPEN' } }),
+    VIEWABLE(5, { view: { id: 8, state: 'REQUESTED' } }),
+    VIEWABLE(4),
+  ];
+  views = [OPEN_VIEW(9, 6), view(8, 5)];
+  renderSection();
+  await loaded();
+  // The settings stay readable, as every setting of the section.
+  expect(rows(card('Retention and schedule'))).toMatchObject({
+    'A loaded archive stays open': '7 days',
+    'Runs loaded for viewing at once': '1',
+  });
+  expect(document.querySelector('.admin-runviewing')).toBeNull();
+  expect(screen.queryByRole('link')).toBeNull();
+  expect(card('Runs').textContent).not.toContain('for viewing');
+  expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
+    'Reload',
+  ]);
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.some(([input]) => String(input).includes('/views')),
+  ).toBe(false);
+  cleanup();
+
+  session = sessionWith(['RUN_HISTORY_ARCHIVAL_AND_PURGE']);
+  renderSection('unavailable');
+  await loaded();
+  await waitFor(() =>
+    expect(runViewing(6).lines).toEqual([
+      'Open for viewing',
+      `Until ${formatInstant(OPEN_UNTIL)}`,
+    ]),
+  );
+  expect(
+    screen.getByRole('button', { name: 'Close viewing of run 6…' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Cancel viewing of run 5…' }),
+  ).toBeDisabled();
+  expect(
+    screen.getByRole('button', { name: 'Open run 4 for viewing…' }),
+  ).toBeDisabled();
+  // A navigation and a read: View stays available while disconnected.
+  expect(
+    screen.getByRole('link', { name: 'View the archive of run 6' }),
+  ).toHaveAttribute('href', '/administration/history-archival/views/9');
 });

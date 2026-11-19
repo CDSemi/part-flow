@@ -401,6 +401,8 @@ HISTORY_ARCHIVE_COLUMNS: Final = (
     "archive_limit_database_gib",
     "archive_approval_required",
     "archive_interval_days",
+    "archive_view_days",
+    "archive_view_max_loaded",
 )
 #: What a holder of the archival key types to switch the approval step of
 #: automatic runs off (compared without regard to letter case or spacing).
@@ -459,6 +461,16 @@ _LIMIT_GIB_MESSAGE: Final = (
 _INTERVAL_DAYS_MESSAGE: Final = (
     "The days between automatic runs must be a whole number from"
     f" {_INTERVAL_DAYS_RANGE[0]} to {_INTERVAL_DAYS_RANGE[1]}."
+)
+_VIEW_DAYS_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_view_days"]
+_VIEW_MAX_LOADED_RANGE: Final = HISTORY_ARCHIVE_POLICY_RANGES["archive_view_max_loaded"]
+_VIEW_DAYS_MESSAGE: Final = (
+    "The days a loaded archive stays open must be a whole number from"
+    f" {_VIEW_DAYS_RANGE[0]} to {_VIEW_DAYS_RANGE[1]}."
+)
+_VIEW_MAX_LOADED_MESSAGE: Final = (
+    "The runs that may be loaded for viewing at once must be a whole number from"
+    f" {_VIEW_MAX_LOADED_RANGE[0]} to {_VIEW_MAX_LOADED_RANGE[1]}."
 )
 _AUTOMATIC_RUNS_MESSAGE: Final = "Automatic runs must be On or Off."
 _APPROVAL_REQUIRED_MESSAGE: Final = "The approval step of automatic runs must be On or Off."
@@ -567,6 +579,13 @@ def update_history_archive_policy(
     the preview read the settings (a purge reads its batch limits at each
     start, ``history-archive evaluate`` the automatic runs at each hourly
     work).
+
+    Viewing an archive (design B step 5): the days a loaded archive stays
+    open, 1-365, and how many runs may be loaded at once, 1-10. Both apply
+    from the next request or start of the host job: a shorter time closes the
+    open views that have been open longer, and a lower number lets views
+    already loaded stay open (a request waiting to be loaded beyond it fails
+    when the job takes it).
     """
     policy = _policy_for_edit(session)
     if not changes and isinstance(confirmation, UnsetType):
@@ -582,6 +601,8 @@ def update_history_archive_policy(
         ("archive_limit_history_months", _LIMIT_MONTHS_MESSAGE),
         ("archive_limit_database_gib", _LIMIT_GIB_MESSAGE),
         ("archive_interval_days", _INTERVAL_DAYS_MESSAGE),
+        ("archive_view_days", _VIEW_DAYS_MESSAGE),
+        ("archive_view_max_loaded", _VIEW_MAX_LOADED_MESSAGE),
     ):
         if column in changes and not _is_whole_in(
             changes[column], *HISTORY_ARCHIVE_POLICY_RANGES[column]

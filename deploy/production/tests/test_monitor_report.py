@@ -3,8 +3,9 @@
 MR-10 (step 1), MR-11..MR-14 (step 2: the purge states and results, receipt_not_copied, the incident record of a
 reconcile after a purge, a pre-purge backup as the newest backup) and MR-15..MR-17 (step 3: the open and the last
 finished permanent deletion request, deletion_request_waiting and --deletion-wait-minutes, the incident record of a
-reconcile after a deletion, the waiting request while archival is not set up) and MR-18 (step 4: a PROPOSED run waiting
-for its approval, approval_overdue, authorization_failed instead of last_run_failed, standing_authorization_invalid)).
+reconcile after a deletion, the waiting request while archival is not set up), MR-18 (step 4: a PROPOSED run waiting
+for its approval, approval_overdue, authorization_failed instead of last_run_failed, standing_authorization_invalid) and
+MR-19 (step 5: the views of an archive and the space of the viewer tables on the PASS line, view_not_closed)).
 The helper runs as a subprocess of this interpreter on temporary report files; nothing touches Docker or a database.
 
 Run with the other production tests:
@@ -237,10 +238,11 @@ AUTOMATIC_OFF = {"enabled": False, "approval_required": True, "standing_authoriz
 
 
 def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error=None, receipts=(), deletion=None,
-                       automatic=AUTOMATIC_OFF):
+                       automatic=AUTOMATIC_OFF, views=None):
     """A `python -m app.cli history-archive status` report (Movement-history archival steps 1 and 2; DELETION, a pair of
     the open and the last finished deletion request, adds the keys of step 3; AUTOMATIC, the automatic runs with their
-    standing authorization, the key of step 4, or None to leave it out)."""
+    standing authorization, the key of step 4, or None to leave it out; VIEWS, a triple of the views not finished, the
+    ids of the views not closed and the space of the viewer tables, adds the keys of step 5)."""
     document = {
         "report_version": 1, "command": "history-archive status", "result": "finding" if findings else "ok",
         "exit_code": exit_code, "started_at": "2026-10-08T10:00:00Z", "finished_at": "2026-10-08T10:00:01Z",
@@ -255,7 +257,23 @@ def archive_status_doc(exit_code=0, findings=(), open_run=None, last=None, error
         document["open_deletion_request"], document["last_finished_deletion_request"] = deletion
     if automatic is not None:
         document["automatic_runs"] = automatic
+    if views is not None:
+        document["view_id"] = None
+        document["open_views"], document["views_not_closed"], document["viewer_bytes"] = views
+        document["view_settings"] = {"days": 7, "max_loaded": 1}
     return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
+
+
+def view_summary(view_id, run_id, state, open_until=None, closing_since=None, age_seconds=3600):
+    """A view summary of `history-archive status` (`open_views`, contract B5 §3), with its age."""
+    opened = state in ("OPEN", "CLOSING")
+    return {"id": view_id, "run_id": run_id, "state": state, "requested_at": "2026-10-08T09:00:00.000000Z",
+            "requested_by_user_id": 1, "started_at": None if state == "REQUESTED" else "2026-10-08T09:01:00.000000Z",
+            "opened_at": "2026-10-08T09:01:30.123456Z" if opened else None, "open_until": open_until,
+            "loaded": {"movements": 4190, "flows": 305, "lineage_edges": 12, "assigned_routes": 40, "names": 97}
+            if opened else None,
+            "closing_started_at": closing_since, "closed_by_user_id": 1 if closing_since else None,
+            "finished_at": None, "failure_reason": None, "age_seconds": age_seconds}
 
 
 def deletion_summary(request_id, state, age_seconds=None, failure=None):
@@ -584,6 +602,61 @@ class Archive(Helper):
             1, ["standing_authorization_invalid"], automatic={**automatic, "standing_authorization": None})), 1)
         self.assertEqual((rc, lines), (1, ["FAIL archival_proposal standing_authorization_invalid: the standing"
                                            " authorization of the automatic runs is not valid"]))
+
+    # MR-19 (archival step 5, contract B5 §6, lead decision 5): the views of an archive. PASS names every view that is
+    # not finished, an OPEN one with the time its days run out (without the fraction of a second), then the space of
+    # the viewer tables, in MiB below 1 GiB and in GiB from it; without a view the line is as before, whatever the space
+    # of the empty viewer tables. A view waiting to be loaded (REQUESTED) or loading is no finding. view_not_closed fails
+    # the line with each view, its state and since when (a CLOSING view since its closing began, an OPEN view since its
+    # days ran out), in the place of the findings' order.
+    def test_mr19_views(self):
+        opened = view_summary(4, 2, "OPEN", open_until="2026-10-15T09:01:30.123456Z")
+        cases = (
+            (([opened], [], 5 * 1048576), "view 4 of run 2 OPEN until 2026-10-15T09:01:30Z; viewer tables 5.0 MiB"),
+            (([view_summary(5, 3, "REQUESTED", age_seconds=60), view_summary(6, 3, "LOADING")], [], 1395864371),
+             "view 5 of run 3 REQUESTED; view 6 of run 3 LOADING; viewer tables 1.3 GiB"),
+            (([view_summary(3, 1, "CLOSING", closing_since="2026-10-08T09:55:00.000000Z")], [], None),
+             "view 3 of run 1 CLOSING; viewer tables ? MiB"),
+        )
+        for views, text in cases:
+            with self.subTest(text=text):
+                rc, lines = self.run_helper("archive", self.write("v.json", archive_status_doc(views=views)), 0)
+                self.assertEqual((rc, lines), (0, [f"PASS archival_proposal no open run; no finished run; archive folder"
+                                                   f" 3.0 GiB free; {text}"]))
+        rc, lines = self.run_helper("archive", self.write("e.json", archive_status_doc(views=([], [], 106496))), 0)
+        self.assertEqual((rc, lines), (0, ["PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB"
+                                           " free"]))
+        # The views come before the deletion requests.
+        rc, lines = self.run_helper("archive", self.write("d.json", archive_status_doc(
+            views=([opened], [], 5 * 1048576), deletion=(None, deletion_summary(6, "COMPLETED")))), 0)
+        self.assertEqual(lines, ["PASS archival_proposal no open run; no finished run; archive folder 3.0 GiB free; view 4"
+                                 " of run 2 OPEN until 2026-10-15T09:01:30Z; viewer tables 5.0 MiB; last deletion"
+                                 " request 6 COMPLETED"])
+        expired = view_summary(4, 2, "OPEN", open_until="2026-10-08T08:30:00.000000Z", age_seconds=8 * 86400)
+        closing = view_summary(3, 1, "CLOSING", closing_since="2026-10-08T08:45:10.500000Z")
+        rc, lines = self.run_helper("archive", self.write("n.json", archive_status_doc(
+            1, ["view_not_closed"], views=([closing, expired], [4], 2 * 1073741824))), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal view_not_closed: view 4 of run 2 (OPEN, open until"
+                                           " 2026-10-08T08:30:00Z) was not closed by the history archive job; its loaded"
+                                           " rows still take database space (OPERATIONS_RUNBOOK §11)"]))
+        rc, lines = self.run_helper("archive", self.write("m.json", archive_status_doc(
+            1, ["last_run_failed", "view_not_closed"], last={"id": 2, "state": "FAILED", "failure_reason": "x."},
+            views=([closing, expired], [3, 4], 2 * 1073741824))), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal last_run_failed: run 2 FAILED: x.; view_not_closed:"
+                                           " view 3 of run 1 (CLOSING, closing since 2026-10-08T08:45:10Z), view 4 of"
+                                           " run 2 (OPEN, open until 2026-10-08T08:30:00Z) were not closed by the history"
+                                           " archive job; their loaded rows still take database space (OPERATIONS_RUNBOOK"
+                                           " §11)"]))
+        # A report without the details still names the finding.
+        rc, lines = self.run_helper("archive", self.write("o.json", archive_status_doc(
+            1, ["view_not_closed"], views=([], [7], 0))), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal view_not_closed: view 7 was not closed by the history"
+                                           " archive job; its loaded rows still take database space (OPERATIONS_RUNBOOK"
+                                           " §11)"]))
+        rc, lines = self.run_helper("archive", self.write("p.json", archive_status_doc(1, ["view_not_closed"])), 1)
+        self.assertEqual((rc, lines), (1, ["FAIL archival_proposal view_not_closed: a view of an archive was not closed by"
+                                           " the history archive job; its loaded rows still take database space"
+                                           " (OPERATIONS_RUNBOOK §11)"]))
 
     # MR-14 (archival step 2): backup_age accepts a pre-purge backup as the newest backup.
     def test_mr14_pre_purge_backup_is_the_newest(self):

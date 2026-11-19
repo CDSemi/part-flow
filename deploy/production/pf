@@ -10,9 +10,10 @@
 #   status   the containers, /api/health and the `status` report, or deploy/production/check.sh with --url (§2)
 #   archive  the history archive job now: deploy/production/archive.sh (§11): first the evaluation of the automatic
 #            runs (`evaluate`, which may create a run); then an open permanent deletion request (its pre-purge backup and
-#            the deletion), or the hourly work of Movement-history archival: the export, check and off-host copy of an
-#            approved run, its pre-purge backup and the purge of the archived Movement history from the database; then
-#            the reconcile after the purge or the deletion
+#            the deletion), or the viewing work (the removal of the loaded rows of a closed view of an archive, and the
+#            load of an archive opened for viewing) and the hourly work of Movement-history archival: the export, check
+#            and off-host copy of an approved run, its pre-purge backup and the purge of the archived Movement history
+#            from the database; then the reconcile after the purge or the deletion
 #   delete-permanently
 #            the preview of deleting Work Orders and Part Numbers entered only for testing, or with --confirm a
 #            permanent deletion request (`app.cli delete-permanently` in the owner's one-shot db-roles service) that
@@ -57,8 +58,10 @@ Commands:
                             continue a run that waits for its copy confirmation or was left purging. First it
                             evaluates the automatic runs: when Administration has them on and their measure calls for
                             one, it creates a run, PROPOSED for a person's approval, or APPROVED under the standing
-                            authorization, which it then works on. A start that carried out a deletion does no run
-                            work: run it again for that
+                            authorization, which it then works on. Before the work on a run, it removes the loaded
+                            rows of a view of an archive that was closed or whose days ran out, and loads an archive
+                            that a person opened for viewing (never into live history). A start that carried out a
+                            deletion does no run work and no viewing work: run it again for that
   delete-permanently (--work-order NUMBER | --part-number PN)... --reason TEXT [--confirm]
                             show what would be deleted of Work Orders and Part Numbers entered only for testing; with
                             --confirm record a permanent deletion request and run the history archive job at once

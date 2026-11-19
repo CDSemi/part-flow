@@ -137,11 +137,80 @@ def write_readable_sections(path: Path, sections: Iterable[tuple[str, Iterable[o
         os.fsync(stream.fileno())
 
 
+class ReadableLayoutError(ValueError):
+    """A readable document is not in the layout ``write_readable_sections`` writes."""
+
+
+#: The lines that close one row of a section (four spaces: depth two).
+_ROW_ENDS: Final = (b"    }\n", b"    },\n")
+_EMPTY_ROWS: Final = (b"    {}\n", b"    {},\n")
+
+
+def read_readable_rows(path: Path) -> Iterator[tuple[str, Any]]:
+    """Every row of a document ``write_readable_sections`` (or ``readable_json``)
+    wrote, as ``(section key, row)``, section by section, row by row.
+
+    The inverse of the writer: no section is ever held whole, so a large
+    ``context.json`` reads in little memory. It relies on that exact layout
+    (two-space indentation, one object per row); a line outside it raises
+    ``ReadableLayoutError``.
+    """
+    decoder = json.JSONDecoder()
+    with open(path, "rb") as stream:
+        first = stream.readline()
+        if first == b"{}\n":
+            return
+        if first != b"{\n":
+            raise ReadableLayoutError(f"{path.name} does not start with an object")
+        section: str | None = None
+        row: list[bytes] | None = None
+        number = 1
+        for line in stream:
+            number += 1
+            if row is not None:
+                row.append(line)
+                if line in _ROW_ENDS:
+                    text = b"".join(row).decode("utf-8").rstrip().removesuffix(",")
+                    yield _section(section, path, number), json.loads(text)
+                    row = None
+                continue
+            if line == b"    {\n":
+                row = [line]
+            elif line in _EMPTY_ROWS:
+                yield _section(section, path, number), {}
+            elif line in (b"  ],\n", b"  ]\n"):
+                section = None
+            elif line == b"}\n" and section is None:
+                return
+            elif line.startswith(b'  "') and section is None:
+                decoded = line.decode("utf-8")
+                key, end = decoder.raw_decode(decoded, 2)
+                rest = decoded[end:]
+                if not isinstance(key, str) or rest not in (": [\n", ": [],\n", ": []\n"):
+                    raise ReadableLayoutError(f"{path.name} line {number} is not a section")
+                section = key if rest == ": [\n" else None
+            else:
+                raise ReadableLayoutError(f"{path.name} line {number} is not in its layout")
+        raise ReadableLayoutError(f"{path.name} ends before its last section")
+
+
+def _section(section: str | None, path: Path, number: int) -> str:
+    if section is None:  # pragma: no cover - a row line outside a section
+        raise ReadableLayoutError(f"{path.name} line {number} is a row outside a section")
+    return section
+
+
 def read_json_lines(path: Path) -> Iterator[tuple[bytes, Any]]:
     """Every line of a ``*.jsonl.gz`` file: the raw line (with its newline) and its value."""
     with gzip.open(path, "rb") as stream:
         for line in stream:
             yield line, json.loads(line)
+
+
+def raw_lines(path: Path) -> Iterator[bytes]:
+    """Every line of a ``*.jsonl.gz`` file as it is stored (with its newline), unparsed."""
+    with gzip.open(path, "rb") as stream:
+        yield from stream
 
 
 def write_document(path: Path, content: bytes) -> None:

@@ -37,6 +37,8 @@ APP_PRIVILEGES: Final[Mapping[TableClass, frozenset[str]]] = {
     # cancellation, the confirmation of its off-host copy, and the approval
     # or dismissal of a proposed run.
     # deletion_requests: a permanent deletion request and its cancellation.
+    # history_archive_views: opening an archive for viewing, cancelling the
+    # request and closing the view.
     # The row trigger of each refuses every other change.
     TableClass.GUARDED_UPDATE: frozenset({"SELECT", "INSERT", "UPDATE"}),
     # assigned_route_steps: past steps are immutable; an AssignedRoute
@@ -48,6 +50,13 @@ APP_PRIVILEGES: Final[Mapping[TableClass, frozenset[str]]] = {
 TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
     "alembic_version": TableClass.READ_ONLY,
     "application_policy": TableClass.ORDINARY,
+    # The viewer tables of a loaded archive (history archival step 5): the
+    # application reads them; only the host job loads and removes their rows.
+    "archive_view_flows": TableClass.READ_ONLY,
+    "archive_view_lineage": TableClass.READ_ONLY,
+    "archive_view_movements": TableClass.READ_ONLY,
+    "archive_view_names": TableClass.READ_ONLY,
+    "archive_view_routes": TableClass.READ_ONLY,
     "areas": TableClass.ORDINARY,
     "assigned_route_steps": TableClass.NO_UPDATE,
     "assigned_routes": TableClass.ORDINARY,
@@ -58,6 +67,9 @@ TABLE_CLASSES: Final[Mapping[str, TableClass]] = {
     "deletion_requests": TableClass.GUARDED_UPDATE,
     "departments": TableClass.ORDINARY,
     "history_archive_runs": TableClass.GUARDED_UPDATE,
+    # Views of an archive (history archival step 5): the application opens,
+    # cancels and closes them; the job does the rest.
+    "history_archive_views": TableClass.GUARDED_UPDATE,
     "history_archived_flows": TableClass.READ_ONLY,
     "machine_asset_tag_config": TableClass.ORDINARY,
     "machine_lifecycle_events": TableClass.APPEND_ONLY,
@@ -118,11 +130,21 @@ _READ_LOCK_DELETE: Final = frozenset({"SELECT", "UPDATE", "DELETE"})
 #: allocations the plan reads; and UPDATE on ``work_orders`` and
 #: ``work_order_demands`` only for the row locks of a deletion (``SELECT …
 #: FOR UPDATE`` needs it), which ``trg_<table>_maintenance_forbid_update``
-#: keeps from ever changing a row. Never credentials, sign-in sessions, mail
+#: keeps from ever changing a row. For viewing an archive (build step 5):
+#: SELECT and the guarded UPDATE on the views (no INSERT: only a person opens
+#: an archive for viewing), and SELECT, INSERT and DELETE on the viewer
+#: tables, whose statement guards admit only the rows of the view it loads
+#: (LOADING) or closes (CLOSING). Never credentials, sign-in sessions, mail
 #: or Scan Station devices.
+_VIEWER: Final = frozenset({"SELECT", "INSERT", "DELETE"})
 MAINTENANCE_PRIVILEGES: Final[Mapping[str, frozenset[str]]] = {
     "alembic_version": _READ,
     "application_policy": _READ,
+    "archive_view_flows": _VIEWER,
+    "archive_view_lineage": _VIEWER,
+    "archive_view_movements": _VIEWER,
+    "archive_view_names": _VIEWER,
+    "archive_view_routes": _VIEWER,
     "areas": _READ,
     "assigned_route_steps": _READ_DELETE,
     "assigned_routes": _READ_DELETE,
@@ -130,6 +152,7 @@ MAINTENANCE_PRIVILEGES: Final[Mapping[str, frozenset[str]]] = {
     "deletion_request_rows": _READ,
     "deletion_requests": frozenset({"SELECT", "UPDATE"}),
     "history_archive_runs": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "history_archive_views": frozenset({"SELECT", "UPDATE"}),
     "history_archived_flows": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "machines": _READ,
     "operations": _READ,
@@ -194,6 +217,45 @@ def _lock_guard(table: str) -> GuardTrigger:
     )
 
 
+#: The viewer tables of a loaded archive (0044): statement guards that judge
+#: every row of an INSERT or DELETE through its transition table, and refuse
+#: every UPDATE and TRUNCATE.
+_VIEWER_TABLES: Final = (
+    "archive_view_flows",
+    "archive_view_lineage",
+    "archive_view_movements",
+    "archive_view_names",
+    "archive_view_routes",
+)
+_VIEWER_FUNCTION: Final = "partflow_archive_view_rows_guard"
+
+
+def _viewer_guards(table: str) -> dict[str, GuardTrigger]:
+    """The three guards of one viewer table (0044)."""
+    return {
+        f"trg_{table}_forbid_mutation": GuardTrigger(
+            table,
+            _VIEWER_FUNCTION,
+            f"CREATE TRIGGER trg_{table}_forbid_mutation BEFORE UPDATE OR TRUNCATE"
+            f" ON public.{table} FOR EACH STATEMENT EXECUTE FUNCTION {_VIEWER_FUNCTION}()",
+        ),
+        f"trg_{table}_guard_delete": GuardTrigger(
+            table,
+            _VIEWER_FUNCTION,
+            f"CREATE TRIGGER trg_{table}_guard_delete AFTER DELETE ON public.{table}"
+            f" REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT"
+            f" EXECUTE FUNCTION {_VIEWER_FUNCTION}()",
+        ),
+        f"trg_{table}_guard_insert": GuardTrigger(
+            table,
+            _VIEWER_FUNCTION,
+            f"CREATE TRIGGER trg_{table}_guard_insert AFTER INSERT ON public.{table}"
+            f" REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT"
+            f" EXECUTE FUNCTION {_VIEWER_FUNCTION}()",
+        ),
+    }
+
+
 #: The tables a permanent deletion deletes from with the row guard
 #: ``partflow_guard_delete`` (``part_movements`` has its own, 0041/0042).
 _DELETION_GUARDED: Final = (
@@ -224,9 +286,13 @@ GUARD_TRIGGERS: Final[Mapping[str, GuardTrigger]] = {
         " public.assigned_route_steps FOR EACH STATEMENT EXECUTE FUNCTION"
         " partflow_assigned_route_steps_forbid_update()",
     ),
+    # The viewer tables of a loaded archive (0044): only the host job inserts
+    # the rows of the view it loads and deletes those of the view it closes.
+    **{name: guard for table in _VIEWER_TABLES for name, guard in _viewer_guards(table).items()},
     "trg_audit_events_forbid_mutation": _statement_guard("audit_events", _NO_UPDATE_EVENTS),
-    # The maintenance role appends HistoryArchiveRun rows (0040), and the
-    # DeletionRequest rows and DELETED rows of the request it works on (0042).
+    # The maintenance role appends HistoryArchiveRun rows (0040), the
+    # DeletionRequest rows and DELETED rows of the request it works on (0042),
+    # and the HistoryArchiveView rows of the view it loads or closes (0044).
     "trg_audit_events_maintenance_scope": GuardTrigger(
         "audit_events",
         "partflow_audit_events_maintenance_scope",
@@ -280,6 +346,22 @@ GUARD_TRIGGERS: Final[Mapping[str, GuardTrigger]] = {
         "CREATE TRIGGER trg_history_archive_runs_guard_mutation BEFORE INSERT OR DELETE OR UPDATE"
         " ON public.history_archive_runs FOR EACH ROW EXECUTE FUNCTION"
         " partflow_history_archive_runs_guard_mutation()",
+    ),
+    # The views of an archive (0044): the row trigger judges every insert and
+    # change; no view is ever deleted or truncated.
+    "trg_history_archive_views_forbid_truncate": GuardTrigger(
+        "history_archive_views",
+        "partflow_history_archive_views_guard_mutation",
+        "CREATE TRIGGER trg_history_archive_views_forbid_truncate BEFORE TRUNCATE ON"
+        " public.history_archive_views FOR EACH STATEMENT EXECUTE FUNCTION"
+        " partflow_history_archive_views_guard_mutation()",
+    ),
+    "trg_history_archive_views_guard_mutation": GuardTrigger(
+        "history_archive_views",
+        "partflow_history_archive_views_guard_mutation",
+        "CREATE TRIGGER trg_history_archive_views_guard_mutation BEFORE INSERT OR DELETE OR"
+        " UPDATE ON public.history_archive_views FOR EACH ROW EXECUTE FUNCTION"
+        " partflow_history_archive_views_guard_mutation()",
     ),
     "trg_history_archived_flows_forbid_truncate": GuardTrigger(
         "history_archived_flows",
@@ -353,6 +435,9 @@ GUARD_TRIGGERS: Final[Mapping[str, GuardTrigger]] = {
 
 #: SHA-256 (hex) of each guard function's ``pg_proc.prosrc`` (UTF-8).
 GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
+    "partflow_archive_view_rows_guard": (
+        "fa112ad43c32519c3386552e7429825f83e52ad4821543a942ae1189cbe8354d"
+    ),
     "partflow_areas_forbid_barcode_change": (
         "1d1c8591bc8d4526f58d13d2e5bd4982ff430fb5128f868026e845e26aebf3bb"
     ),
@@ -363,7 +448,7 @@ GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
         "b366828e03acbf84260a4fb8efef0a9e0175fd6a24c18bcfb360143ee903f85c"
     ),
     "partflow_audit_events_maintenance_scope": (
-        "271f29aac4a994e6a3026f817b3fd6d9df3a4f744368179de95aa38079f5f1a0"
+        "6a25105fcad8c34ed29ea9929eff5392253220216d8783278c6eb1bd63fedf23"
     ),
     "partflow_deletion_request_rows_guard_mutation": (
         "ac2b65388b5d9ecb41812a3fee77e8b0959001340cf3ed5e43b15e2bd87952f3"
@@ -374,6 +459,9 @@ GUARD_FUNCTION_SHA256: Final[Mapping[str, str]] = {
     "partflow_guard_delete": ("ac78c72998a7e5262309da70c18a8138583b22b33fe7da629b7596a24e51ae63"),
     "partflow_history_archive_runs_guard_mutation": (
         "a79e49e6bcf7b6378b22c9546cc8b4a8bfda1ea6fe3f5791ed20947017b28c82"
+    ),
+    "partflow_history_archive_views_guard_mutation": (
+        "78a33063460f54bdda98b95ad97c01ce5707fc877f4e3861470e6e2c76f6cbdf"
     ),
     "partflow_history_archived_flows_guard_mutation": (
         "bd48a533b98c9b6d7571c9888fe50b64e7d1c81aa16ec46e115018b93e3504fd"

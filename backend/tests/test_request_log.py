@@ -1151,6 +1151,28 @@ _FROZEN_INTERPOLATIONS: dict[str, list[str]] = {
         "len(passing_flows)",
         "marked",
     ],
+    # Viewing an archive (history archival step 5): ids and states from the
+    # database, the typed ids of the path, the body and the query, and the label
+    # and bound of a refused filter (never request text).
+    "history_archive_views": [
+        "MAX_MOVEMENT_LIMIT",
+        "MAX_ROW_ID",
+        "before_movement_id",
+        "flow_id",
+        "label",
+        "row.id",
+        "row.run_id",
+        "run.id",
+        "run.state",
+        "run_id",
+        "same.id",
+        "same.state",
+        "state",
+        "view.id",
+        "view.run_id",
+        "view.state",
+        "view_id",
+    ],
     "hot_list": [
         "demand.allocated_quantity",
         "demand.part_number",

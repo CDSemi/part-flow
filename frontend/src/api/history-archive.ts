@@ -1,5 +1,5 @@
 // History archival runs API (Administration → History archival & purge;
-// Phase 16, archival design B steps 1, 2 and 4).
+// Phase 16, archival design B steps 1, 2, 4 and 5).
 //
 // What a run would archive at a cutoff (the preview), the runs newest
 // first, requesting a run (the request is the approval: the server
@@ -13,13 +13,18 @@
 // Step 4 adds automatic runs, which the server's archival job creates
 // (`AUTOMATIC`, no requester): `PROPOSED` until a person approves it with
 // a reason of their own or dismisses it (`DISMISSED`), or `APPROVED`
-// at once under the standing authorization of the approval setting. The
-// server owns every rule (the cutoff, the one open run, the states, who
-// may approve); this module only maps the wire shape.
+// at once under the standing authorization of the approval setting.
+// Step 5 adds whether a run's archive can be opened for viewing and the
+// run's newest view (`viewable`, `view`; the views themselves are
+// `api/history-archive-views.ts`). The server owns every rule (the
+// cutoff, the one open run, the states, who may approve, which runs can
+// be viewed); this module only maps the wire shape.
 //
 // Production-safe: no mock data, no framework imports.
 
 import { apiRequest } from './client';
+import { toRunViewing } from './history-archive-views';
+import type { ArchiveRunView } from './history-archive-views';
 
 /** The counts and date range of the history eligible at a cutoff. */
 export interface ArchiveCounts {
@@ -214,6 +219,11 @@ export interface ArchiveRun {
    * `COMPLETED_WITH_SKIPS`. */
   result: string | null;
   failureReason: string | null;
+  /** Open for viewing applies: a finished run whose archive was verified
+   * (whatever its views and the runs loaded at once). */
+  viewable: boolean;
+  /** The run's newest view (any state), or null. */
+  view: ArchiveRunView | null;
 }
 
 interface UserWire {
@@ -269,6 +279,9 @@ interface ArchiveRunWire {
   finished_at: string | null;
   result: string | null;
   failure_reason: string | null;
+  /** Checked on arrival (`toRunViewing`). */
+  viewable: unknown;
+  view: unknown;
 }
 
 function toUser(wire: UserWire | null): ArchiveRunUser | null {
@@ -350,6 +363,7 @@ function toRun(wire: ArchiveRunWire): ArchiveRun {
     finishedAt: wire.finished_at,
     result: wire.result,
     failureReason: wire.failure_reason,
+    ...toRunViewing(wire.viewable, wire.view),
   };
 }
 

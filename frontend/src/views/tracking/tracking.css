@@ -651,6 +651,15 @@
   line-height: 1.5;
 }
 
+/* A code in a history row or a flow note — a flow (`QF-44`), a Scan
+   Station (`ST-PACK`), a Work Order Number or Part Number with a hyphen —
+   stays whole when the line wraps: a narrow panel breaks between words,
+   never after the code's hyphen (`ST-` / `PACK`). Only a code longer than
+   tracking-logic's WHOLE_CODE_MAX_LENGTH is left to break. */
+.wholecode {
+  white-space: nowrap;
+}
+
 .tk-actions {
   display: flex;
   gap: 8px;

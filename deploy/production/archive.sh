@@ -1,29 +1,41 @@
 #!/bin/sh
-# PartFlow history archival host job (Movement-history archival, build steps 1 to 4; OPERATIONS_RUNBOOK §10, §11,
+# PartFlow history archival host job (Movement-history archival, build steps 1 to 5; OPERATIONS_RUNBOOK §10, §11,
 # DEPLOYMENT §3.1). Run from the repository root of the RUNNING release's checkout, as the account that owns
 # PARTFLOW_ARCHIVE_DIR and PARTFLOW_BACKUP_DIR (root on the NAS). `deploy/production/archive.sh --help` prints the usage.
 # This job DELETES, always after a pre-purge backup and with the full reconcile right after: it purges the archived
 # Movement history of a run whose archive is exported, verified and copied off the host (whole flow components, in
 # batches), and it carries out the permanent deletion requests recorded in Administration or by `pf delete-permanently`
 # (the rows the request stored, deleted in one transaction). It also creates the automatic runs that Administration →
-# History archival & purge switches on (`evaluate`), which delete nothing by themselves.
+# History archival & purge switches on (`evaluate`), which delete nothing by themselves, and it loads the archive of a
+# run that a person opened for viewing into the viewer tables of the database, and removes those rows once the view is
+# closed (`load-view`, `close-view`); viewing never writes live history.
 #
 # A start runs the steps of `python -m app.cli history-archive` in the one-shot `maintenance` service (as the
 # maintenance database role, the archive folder mounted, `--user` this account): `recover`; at the hourly work
 # `evaluate`; then `next` and the step it names, again and again until `next` answers wait, running or none, a run or a
 # deletion finishes, or a step fails.
 # - The automatic runs (contract B4 §3.1, §3.2): `evaluate` runs at the hourly work only, after `recover` and before the
-#   `next` loop; never in a start taken only for a deletion request and never while the incident record exists. It
-#   creates the automatic run that the settings of Administration call for now, or says why it creates none: PROPOSED,
-#   which waits for a person to approve or dismiss it in Administration (`next` answers wait), or APPROVED under the
-#   standing authorization of the approval setting, which this start works on like a requested run. Its decision
-#   (`result` and `message`) is logged. When it is refused or cannot run (exit 1 or 2, or no valid report), the error is
-#   logged and the start's exit status reports it, and the `next` loop still works on the open run.
+#   `next` loop; never in a start taken only for a deletion request or for viewing work, and never while the incident
+#   record exists. It creates the automatic run that the settings of Administration call for now, or says why it
+#   creates none: PROPOSED, which waits for a person to approve or dismiss it in Administration (`next` answers wait), or
+#   APPROVED under the standing authorization of the approval setting, which this start works on like a requested run.
+#   Its decision (`result` and `message`) is logged. When it is refused or cannot run (exit 1 or 2, or no valid report),
+#   the error is logged and the start's exit status reports it, and the `next` loop still works on the open run.
 # - A permanent deletion request comes first. `start_deletion`: start-deletion --request N (the request becomes RUNNING,
 #   or FAILED when the User who requested it may no longer have it carried out). `deletion_backup`: the pre-purge backup
 #   (deploy/production/backup.sh --kind pre-purge --label deletion-<id>-<UTC stamp>), then delete --request N --backup
 #   NAME --backup-started-at UTC, which deletes the request's stored rows in one transaction, then the full reconcile. A
 #   start that worked on a deletion does no run work and leaves the hourly slot to the next start.
+# - The viewing work comes next (contract B5 §3.6), closing before loading. `close_view`: close-view --view N removes
+#   the loaded rows of a view that a person closed (CLOSING), or of an OPEN view whose days have run out, and the view
+#   becomes CLOSED. `load_view`: load-view --view N checks every file of the run's archive folder, then loads it into
+#   the viewer tables (REQUESTED → LOADING → OPEN). Exit 0: `next` is asked again. A load that fails ends the start with
+#   exit 3 (the view is FAILED, its loaded rows removed; its archive folder may be damaged); a load or a closing that a
+#   database error interrupted ends it with exit 2 (the view stays LOADING, which the next start's `recover` fails, or
+#   CLOSING, which the next start closes); a refusal with exit 1, except `wrong_state`: the view changed after `next`
+#   handed it out (a person cancelled it before its load, or its days were raised before its closing), which changed
+#   nothing and is logged before `next` is asked again. Viewing work never marks the hourly slot, and a start taken
+#   only for it does no run work.
 # - The run work: export --run N, verify --run N and copy --run N; for `backup`, the pre-purge backup (backup.sh --kind
 #   pre-purge --label <archive name>), then purge --run N --backup NAME --backup-started-at UTC; for `purge` (a run an
 #   earlier start left PURGING), purge --run N alone. After a purge that ended with exit 0, or with exit 3 once the run
@@ -43,18 +55,21 @@
 # `status` cannot tell, the reconcile runs anyway. A database restored from a backup taken while a run was PURGING
 # (an hourly backup during a purge) holds that run PURGING, and the next start resumes its purge; one restored from a
 # backup taken between a deletion request and its deletion holds the request APPROVED, and the next start carries it
-# out: disable the task before any restore (OPERATIONS_RUNBOOK §6).
+# out: disable the task before any restore (OPERATIONS_RUNBOOK §6). A restored database holds the views of an archive
+# too: one LOADING is failed by the next start's `recover` (its loaded rows removed), one REQUESTED is loaded, and one
+# OPEN keeps its rows until a person closes it or its days run out.
 #
 # Each step's JSON report and stderr go to <records-dir>/archive/<UTC stamp>/ (`next`, then `next-2`, `next-3`, ...;
-# backup.out and backup.log of backup.sh; reconcile.json and reconcile.log); that folder is kept only when a step did
-# something or failed. A reconcile after a purge or a deletion that does not end clean (a finding, an error, no complete
-# report) is an incident (design §10): archive.sh exits 4 and writes the incident record
-# <records-dir>/archive/reconcile-after-purge (key=value lines: result, exit code, run, archive name, request, pre-purge
-# backup, failing checks, time, report path), which check.sh reports as FAIL archival_proposal reconcile_after_purge.
+# `load-view-<view id>` and `close-view-<view id>`; backup.out and backup.log of backup.sh; reconcile.json and
+# reconcile.log); that folder is kept only when a step did something or failed. A reconcile after a purge or a deletion
+# that does not end clean (a finding, an error, no complete report) is an incident (design §10): archive.sh exits 4 and
+# writes the incident record <records-dir>/archive/reconcile-after-purge (key=value lines: result, exit code, run,
+# archive name, request, pre-purge backup, failing checks, time, report path), which check.sh reports as FAIL
+# archival_proposal reconcile_after_purge.
 # While the record exists, the job fails closed: a start runs `recover` and `status` only and refuses every step that
 # changes data (the evaluation that creates automatic runs, export, verify, copy, the pre-purge backups, the purge, the
-# resumed purge of a run left PURGING, and every deletion) with exit 1. Only the operator removes the record, once the
-# investigation is done (OPERATIONS_RUNBOOK §8).
+# resumed purge of a run left PURGING, every deletion, and the load and the closing of a view) with exit 1. Only the
+# operator removes the record, once the investigation is done (OPERATIONS_RUNBOOK §8).
 #
 # The optional off-host copy folder (PARTFLOW_ARCHIVE_COPY_DIR) is mounted at /archive-copy only while it exists, is
 # writable, and lies on a file system that is neither the archive folder's nor the root file system `/` (a disk or
@@ -65,49 +80,59 @@
 # a copy confirmation in Administration.
 #
 # `--scheduled` (the host task that starts every 5 minutes, design D12): every start runs the cheap check first,
-# `python -m app.cli history-archive settings` with `docker compose exec` in the running `backend` container (two
-# indexed reads as the application database role: whether a permanent deletion request is open, and the Start minute of
-# Administration → History archival & purge). A start that finds a request open carries it out at once, whatever the
-# time. Otherwise the hourly work runs once per hour, at the first start at or after the Start minute. The hourly stamp
-# <records-dir>/archive/hourly-slot holds the epoch minute of the slot last attempted. A start within an hour of it looks
-# only for an open deletion request and otherwise ends at once (NOT_DUE); until the check finds a request, it ends
-# quietly as NOT_DUE also when a release runs, the incident record exists, the configuration is incomplete or the check
-# gives no answer (the backend is down): the next hourly start reports such a problem. When the check gives no answer
-# at an hourly start, the Start minute is read in the `maintenance` service, and a waiting request is carried out by a
-# later start. The first scheduled start (no stamp yet) only records the current slot, so the hourly work starts at the
-# next Start minute. A slot is attempted, and its stamp written, once `next` answers anything but deletion work, or once
+# `python -m app.cli history-archive settings` with `docker compose exec` in the running `backend` container (indexed
+# reads of small tables as the application database role: whether a permanent deletion request is open, whether a view
+# of an archive waits for the job, and the Start minute of Administration → History archival & purge). A start that
+# finds a request open, or viewing work (a view to close, a view to load, or a load that a stopped start left), does
+# that work at once, whatever the time. Otherwise the hourly work runs once per hour, at the first start at or after the
+# Start minute. The hourly stamp <records-dir>/archive/hourly-slot holds the epoch minute of the slot last attempted. A
+# start within an hour of it looks only for an open deletion request and for viewing work and otherwise ends at once
+# (NOT_DUE); until the check finds such work, it ends quietly as NOT_DUE also when a release runs, the incident record
+# exists, the configuration is incomplete or the check gives no answer (the backend is down): the next hourly start
+# reports such a problem. When the check gives no answer at an hourly start, the Start minute is read in the
+# `maintenance` service, and the hourly work's `next` still hands out a waiting deletion request and viewing work first.
+# The first scheduled start (no stamp yet) only records the current slot, so the hourly work starts at the next Start
+# minute. A slot is attempted, and its stamp written, once `next` answers anything but deletion or viewing work, or once
 # the start is refused or fails before it could ask: a refusal or a failure is then reported once for that hour, never at
-# every 5-minute start. A start that worked on a deletion request leaves the slot to the next start, which does the
-# hourly work, `evaluate` included (a start due for the hourly work evaluates before its deletion too; a second
-# evaluation in that hour creates nothing new while the run it created is open or the days between automatic runs have
-# not passed). While a request is open, every start tries to carry it out, so a failure that keeps it from starting (a
-# `maintenance` step that cannot run) is reported by each 5-minute start until it is fixed or the request is cancelled.
+# every 5-minute start. A start that worked on a deletion request leaves the slot to the next start, and so does one
+# whose viewing work ended it before `next` answered anything else (a viewing step that failed): the next start does the
+# hourly work, `evaluate` included (a start due for the hourly work evaluates before its deletion or viewing work too; a
+# second evaluation in that hour creates nothing new while the run it created is open or the days between automatic
+# runs have not passed). While a request is open or viewing work waits, every start tries to do it, so a failure that
+# keeps it from being done (a `maintenance` step that cannot run, a closing that a database error keeps stopping) is
+# reported by each 5-minute start until it is fixed.
 #
 # Locks: <records-dir>/.archive.lock (owner file: host, pid, started_at, by, and the kernel boot id and the process
-# start time from /proc) is taken only for the hourly work and for a deletion, never by a start that only checks the
-# time and never while a run merely waits for its copy confirmation. It is held for the whole work, the wait for the
-# backup lock, the purge or the deletion and the reconcile included. archive.sh refuses while
+# start time from /proc) is taken only for the hourly work, a deletion and viewing work, never by a start that only
+# checks the time and never while a run merely waits for its copy confirmation. It is held for the whole work, the wait
+# for the backup lock, the purge or the deletion and the reconcile, and the load or the closing of a view included, so
+# release.sh refuses during all of them. archive.sh refuses while
 # <records-dir>/.release.lock exists, and release.sh refuses while the archive lock is held, so no live release holds the
 # backup lock while a pre-purge backup waits for it (a backup lock left by a killed release.sh is stale, and backup.sh
 # refuses it at once). A lock whose owner provably no longer exists (same host, no `maintenance` container running, and
 # its pid gone, or the boot id or the pid's start time differs from the recorded one) is removed automatically: the
-# job's `recover` then fails a run or a deletion request left RUNNING. The database itself is guarded by the job's
-# advisory lock.
+# job's `recover` then fails a run or a deletion request left RUNNING, and a view left LOADING. The database itself is
+# guarded by the job's advisory lock.
 #
 # stdout on exit 0: exactly one line, `NOT_DUE`, `DEFERRED <reason>` (scheduled: the previous start still works),
-# `EVALUATE <result> <run id|-> <state|->` for an hourly work that worked on no run: the decision of `evaluate`, then the
-# open run that `next` named and its state (for example `EVALUATE off - -`, `EVALUATE created 7 PROPOSED` or
-# `EVALUATE run_open 3 WAITING_FOR_COPY`); `ARCHIVE <outcome> <run id|-> <state|->` for one that worked on a run; or,
-# for a start that worked on a deletion request, `DELETION <outcome> <request id> <state>` (for example
+# `EVALUATE <result> <run id|-> <state|->` for an hourly work that worked on no run and no view: the decision of
+# `evaluate`, then the open run that `next` named and its state (for example `EVALUATE off - -`,
+# `EVALUATE created 7 PROPOSED` or `EVALUATE run_open 3 WAITING_FOR_COPY`); `ARCHIVE <outcome> <run id|-> <state|->` for
+# one that worked on a run; `VIEW <outcome> <view id> <state>` for a start that worked on views of an archive and on no
+# run, naming the last view it worked on (for example `VIEW loaded 4 OPEN` or `VIEW closed 3 CLOSED`); or, for a start
+# that worked on a deletion request, `DELETION <outcome> <request id> <state>` (for example
 # `DELETION deleted 7 COMPLETED`). stderr: progress, each step's one-line summary, errors.
 # Exit status: 0 done (or nothing due); 1 refused, nothing changed (a release runs, the archive lock is held, a step
 # refused, the incident record exists); 2 could not run (configuration, Docker, database, an evaluation of the automatic
 # runs that did not finish, an unknown outcome), or the pre-purge backup failed, or a deletion was interrupted (nothing
-# was deleted; the next start fails a run or a deletion request left RUNNING); 3 a run or a deletion request failed: it
-# is now FAILED, and a new run, or the deletion, must be requested again (a run that failed while purging keeps the whole
-# components it purged, which its purge receipt lists; a failed deletion request deleted nothing); 4 the reconcile after
-# a purge or a deletion did not end clean: an incident (OPERATIONS_RUNBOOK §8, Reconcile finding after a purge, or
-# Reconcile finding after a deletion).
+# was deleted; the next start fails a run or a deletion request left RUNNING), or the load or the closing of a view was
+# interrupted (the next start fails a view left LOADING, or closes a view left CLOSING); 3 a run or a deletion request
+# failed: it is now FAILED, and a new run, or the deletion, must be requested again (a run that failed while purging
+# keeps the whole components it purged, which its purge receipt lists; a failed deletion request deleted nothing), or the
+# load of a view failed, also one that a stopped start left LOADING: the view is FAILED, its loaded rows removed, and the
+# run must be opened for viewing again (after its archive folder is restored from the off-host copy when the reason says
+# that it is damaged); 4 the reconcile after a purge or a deletion did not end clean: an incident (OPERATIONS_RUNBOOK §8,
+# Reconcile finding after a purge, or Reconcile finding after a deletion).
 set -eu
 
 # The values in the shell would override the env file for every Compose command: the script sets them per command only.
@@ -165,29 +190,36 @@ is reported and the work goes on. A permanent deletion request comes first: its 
 deletion of its stored rows in one transaction (OPERATIONS_RUNBOOK §10), then the full reconcile; a start that worked on
 a deletion does no run work. The hourly work of Movement-history archival: export, verify and copy an approved run,
 take its pre-purge backup and PURGE its archived Movement history from the database (or resume the purge of a run left
-PURGING), then the full reconcile. Both DELETE from the database, always after their pre-purge backup.
+PURGING), then the full reconcile. Both DELETE from the database, always after their pre-purge backup. The viewing work
+comes after the deletion and before the run work, at any start: close-view removes the loaded rows of a view of an
+archive that a person closed or whose days ran out, and load-view checks the archive folder of a run that a person
+opened for viewing and loads it into the viewer tables; neither changes live history.
   --scheduled             the host task that starts every 5 minutes: every start first runs the cheap check
                           (history-archive settings in the running backend container) and carries out an open
-                          deletion request at once; the hourly work runs once per hour, at the first start at or after
-                          the Start minute of Administration → History archival & purge; every other start ends at
-                          once (NOT_DUE)
+                          deletion request and the viewing work at once; the hourly work runs once per hour, at the
+                          first start at or after the Start minute of Administration → History archival & purge;
+                          every other start ends at once (NOT_DUE)
   --env-file FILE         default .env.production
   --records-dir DIR       default $HOME/partflow-deployments: the release lock .release.lock, the archive lock
                           .archive.lock, the hourly stamp archive/hourly-slot, the reports archive/<UTC stamp>/ and
                           the incident record archive/reconcile-after-purge (while it exists, a start runs recover
-                          and status only and works on no run and no deletion request)
+                          and status only and works on no run, no deletion request and no view)
   --backup-wait-minutes N how long a pre-purge backup waits for another backup that holds the backup lock, polling
                           (0-1440, default 60; 0 = refused at once)
 Exit: 0 done (or nothing due), 1 refused (a release runs, the archive lock is held, a step refused, the incident record
       exists; nothing changed), 2 could not run (evaluate included), or the pre-purge backup failed, or a deletion was
-      interrupted (nothing was deleted; the next start fails a run or deletion request left RUNNING),
+      interrupted (nothing was deleted; the next start fails a run or deletion request left RUNNING), or the load or the
+      closing of a view was interrupted (the next start fails a view left LOADING, or closes one left CLOSING),
       3 a run or a deletion request failed: it is FAILED; request a new run in Administration → History archival & purge,
-      or the deletion again (a failed deletion request deleted nothing), 4 the reconcile after a purge or a deletion did
-      not end clean: an incident (OPERATIONS_RUNBOOK §8).
+      or the deletion again (a failed deletion request deleted nothing); or the load of a view failed: it is FAILED, and
+      the run is opened for viewing again, once a damaged archive folder is restored from its off-host copy,
+      4 the reconcile after a purge or a deletion did not end clean: an incident (OPERATIONS_RUNBOOK §8).
 stdout on exit 0: NOT_DUE, DEFERRED <reason>, EVALUATE <result> <run id|-> <state|-> for an hourly work that worked on
-no run (the decision of evaluate, then the open run that next named: EVALUATE off - -, EVALUATE created 7 PROPOSED),
-ARCHIVE <outcome> <run id|-> <state|-> for one that worked on a run, or, for a start that worked on a deletion
-request, DELETION <outcome> <request id> <state> (DELETION deleted 7 COMPLETED)
+no run and no view (the decision of evaluate, then the open run that next named:
+EVALUATE off - -, EVALUATE created 7 PROPOSED), ARCHIVE <outcome> <run id|-> <state|-> for one that worked on a run,
+VIEW <outcome> <view id> <state> for a start that worked on views and on no run (VIEW loaded 4 OPEN,
+VIEW closed 3 CLOSED), or, for a start that worked on a deletion request, DELETION <outcome> <request id> <state>
+(DELETION deleted 7 COMPLETED)
 EOF
 }
 
@@ -343,15 +375,31 @@ failing_checks() {
         /^      "status": "(fail|error)",?$/ { printf "%s%s", sep, id; sep = " " }
     ' "$1" 2>/dev/null
 }
-# deleted_rows FILE: the rows a deletion deleted, from its report's `deleted` object ("work_orders 1, ...").
-deleted_rows() {
-    awk '
-        !on && $0 == "  \"deleted\": {" { on = 1; next }
+# row_counts FILE OBJECT: the non-zero row counts of a report's top-level OBJECT, for example the rows a deletion
+# deleted (`deleted`: "work_orders 1, ...") or those that the closing of a view removed (`removed`).
+row_counts() {
+    awk -v key="$2" '
+        !on && $0 == "  \"" key "\": {" { on = 1; next }
         on && index($0, "  }") == 1 { exit }
         on {
             line = $0; sub(/^ +"/, "", line); sub(/,$/, "", line)
             split(line, part, "\": ")
             if (part[2] + 0 > 0) { printf "%s%s %s", sep, part[1], part[2]; sep = ", " }
+        }
+    ' "$1" 2>/dev/null
+}
+# pending_views FILE: the views of an archive that the cheap check found waiting for the job, from its `pending_views`
+# list, each with its state and the work that it waits for ("view 3 CLOSING (close_view), view 4 REQUESTED (load_view)").
+pending_views() {
+    awk '
+        !on && $0 == "  \"pending_views\": [" { on = 1; next }
+        on && /^  \]/ { exit }
+        on && /^      "id": / { id = $0; sub(/^      "id": /, "", id); sub(/,$/, "", id) }
+        on && /^      "state": "/ { state = $0; sub(/^      "state": "/, "", state); sub(/",?$/, "", state) }
+        on && /^      "action": "/ { action = $0; sub(/^      "action": "/, "", action); sub(/",?$/, "", action) }
+        on && /^    }/ {
+            printf "%sview %s %s (%s)", sep, id, state, action; sep = ", "
+            id = ""; state = ""; action = ""
         }
     ' "$1" 2>/dev/null
 }
@@ -481,8 +529,8 @@ WORK=
 LOCK=$RECORDS_DIR/.archive.lock
 RELEASE_LOCK=$RECORDS_DIR/.release.lock
 LOCK_OWNED=
-# The step that runs now (evaluate, export, verify, copy, backup, purge, start-deletion, deletion-backup, delete or
-# reconcile), for the signal handler.
+# The step that runs now (evaluate, export, verify, copy, backup, purge, start-deletion, deletion-backup, delete,
+# load-view, close-view or reconcile), for the signal handler.
 CURRENT_STEP=
 # Set once a purge or a deletion may have deleted something in this start, cleared once its reconcile result is recorded
 # (or once the deletion is known to have deleted nothing). RECONCILE_FOR says which: purge or deletion.
@@ -496,6 +544,14 @@ REQUEST_ID=
 DELETION_WORKED=
 DEL_OUTCOME=
 DEL_STATE=
+# The view of an archive this start works on (load-view, close-view), its run and the state its last report named.
+# VIEW_WORKED: the start worked on a view; such work, like deletion work, never marks the hourly slot. VIEW_LINE: what
+# became of the last view that a step loaded or closed, "<outcome> <view id> <state>" (the VIEW line).
+VIEW_ID=
+VIEW_RUN=
+VIEW_WORKED=
+VIEW_STATE=
+VIEW_LINE=
 cleanup() {
     [ -z "$WORK" ] || rm -rf "$WORK"
     if [ -n "$LOCK_OWNED" ]; then
@@ -507,8 +563,8 @@ cleanup() {
     fi
 }
 # record_incident RESULT EXIT_CODE CHECKS: the incident record of a reconcile after a purge or a deletion that did not
-# end clean, replaced in one rename. Until the operator removes it, check.sh reports it and no start works on a run or
-# a deletion request.
+# end clean, replaced in one rename. Until the operator removes it, check.sh reports it and no start works on a run, a
+# deletion request or a view.
 record_incident() {
     if [ "$RECONCILE_FOR" = deletion ]; then
         incident_run=
@@ -545,15 +601,23 @@ reconcile_subject() {
 }
 REQUEST_NEW="Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
 REQUEST_AGAIN="Request the deletion again in PartFlow, or with pf delete-permanently (OPERATIONS_RUNBOOK §10)."
+VIEW_AGAIN="Open the run for viewing again in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
 on_signal() {
     trap - INT TERM
     # The trap can run while a step's output is redirected to its report and log: speak on the script's own stdout and
     # stderr (fds 8 and 9), never into the step's files.
     exec 1>&8 2>&9
     KEEP=1
-    # A start that worked on a deletion leaves the hourly slot to the next start; any other attempted it.
-    [ -n "$DELETION_WORKED" ] || mark_slot
+    # A start that worked on a deletion or a view leaves the hourly slot to the next start (one whose `next` answered
+    # anything else after its viewing work has marked it already); any other attempted it.
+    [ -n "$DELETION_WORKED$VIEW_WORKED" ] || mark_slot
     case "$CURRENT_STEP" in
+        load-view)
+            say "interrupted during the load of view ${VIEW_ID:-?}. A load never changes live history: the next start loads a view still REQUESTED, or fails a view left LOADING (recover), which removes the rows it loaded; for a failed view, open the run for viewing again in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+            ;;
+        close-view)
+            say "interrupted during the closing of view ${VIEW_ID:-?}: the next start closes it again (a view left CLOSING, or OPEN past its days) and removes the rest of its rows."
+            ;;
         evaluate)
             say "interrupted during the evaluation of the automatic runs (history-archive evaluate). Nothing was deleted; an automatic run may have been created, and the next hourly work goes on with it."
             ;;
@@ -572,13 +636,13 @@ on_signal() {
         delete)
             # Its one transaction committed (the request is COMPLETED) or rolled back (it stays RUNNING): fail closed.
             record_incident interrupted 2 ""
-            say "interrupted during the deletion of request ${REQUEST_ID:-?}: its one transaction either committed (the request is COMPLETED, and no reconcile ran after it) or rolled back (it stays RUNNING, nothing was deleted, and the next start makes it FAILED). Read history-archive status (OPERATIONS_RUNBOOK §11) and run the reconcile by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion). $INCIDENT_FILE records the incident: no start works on a run or a deletion request until you remove it."
+            say "interrupted during the deletion of request ${REQUEST_ID:-?}: its one transaction either committed (the request is COMPLETED, and no reconcile ran after it) or rolled back (it stays RUNNING, nothing was deleted, and the next start makes it FAILED). Read history-archive status (OPERATIONS_RUNBOOK §11) and run the reconcile by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion). $INCIDENT_FILE records the incident: no start works on a run, a deletion request or a view until you remove it."
             ;;
         *)
             if [ -n "$RECONCILE_PENDING" ]; then
                 record_incident interrupted 2 ""
                 reconcile_subject
-                say "interrupted before the reconcile after $SUBJECT ended: run it by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 ($SECTION). $INCIDENT_FILE records the incident: no start works on a run or a deletion request until you remove it."
+                say "interrupted before the reconcile after $SUBJECT ended: run it by hand (OPERATIONS_RUNBOOK §7), then follow OPERATIONS_RUNBOOK §8 ($SECTION). $INCIDENT_FILE records the incident: no start works on a run, a deletion request or a view until you remove it."
             else
                 say "interrupted. The next start recovers a run or a deletion request left RUNNING (it becomes FAILED); nothing was deleted."
             fi
@@ -614,23 +678,26 @@ if [ -d "$RELEASE_LOCK" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# --scheduled: the cheap check (an open deletion request), then is the hourly work due?
+# --scheduled: the cheap check (an open deletion request, viewing work), then is the hourly work due?
 # ---------------------------------------------------------------------------
 
 # The hourly work is due (a manual start always does it); a scheduled start decides below.
 DUE=1
 # The cheap check found an open deletion request: this start carries it out first.
 DELETION_PENDING=
+# The cheap check found viewing work (contract B5 §3.1, §3.6: a view to close, a view to load, or a load that a stopped
+# start left LOADING, which recover fails): this start does it, whatever the time.
+VIEW_PENDING=
 if [ -n "$SCHEDULED" ]; then
     DUE=
-    # The incident record stops every deletion: a start within the hour has nothing to look for (the hourly start
-    # reports the record).
+    # The incident record stops every deletion and all viewing work: a start within the hour has nothing to look for
+    # (the hourly start reports the record).
     if [ -n "$WITHIN_HOUR" ] && [ -e "$INCIDENT_FILE" ]; then
         echo "NOT_DUE"
         exit 0
     fi
-    # The cheap check (contract B3 §3.1): history-archive settings in the running backend container, as the application
-    # database role; it creates no container. No answer (the backend is down) counts as no request open.
+    # The cheap check (contract B3 §3.1, B5 §3.1): history-archive settings in the running backend container, as the
+    # application database role; it creates no container. No answer (the backend is down) counts as nothing open.
     START_MINUTE=
     crc=0
     pf exec -T backend python -m app.cli history-archive settings >"$WORK/check.json" 2>"$WORK/check.log" || crc=$?
@@ -643,13 +710,19 @@ if [ -n "$SCHEDULED" ]; then
             pending_state=$(json_nested "$WORK/check.json" deletion_request state)
             say "deletion request ${pending_id:-?} (${pending_state:-?}) is open: this start carries it out now and does no run work."
         fi
+        if [ "$(json_bool "$WORK/check.json" viewing_pending)" = true ]; then
+            VIEW_PENDING=1
+            QUIET=
+            views=$(pending_views "$WORK/check.json")
+            say "viewing work waits for the job (${views:-a view of an archive}): this start does it now."
+        fi
     elif [ -z "$WITHIN_HOUR" ]; then
-        say "the deletion check (history-archive settings in the running backend container) gave no answer (exit $crc): an open deletion request waits for a later start; the hourly work goes on."
+        say "the cheap check (history-archive settings in the running backend container) gave no answer (exit $crc): the hourly work goes on, and its next step still hands out an open deletion request and viewing work first."
         tail -n 3 "$WORK/check.log" >&2 2>/dev/null || true
     fi
     if [ -n "$WITHIN_HOUR" ]; then
-        # Within the hour of the last slot: an open deletion request, or nothing to do.
-        if [ -z "$DELETION_PENDING" ]; then
+        # Within the hour of the last slot: an open deletion request, viewing work, or nothing to do.
+        if [ -z "$DELETION_PENDING$VIEW_PENDING" ]; then
             echo "NOT_DUE"
             exit 0
         fi
@@ -670,15 +743,15 @@ if [ -n "$SCHEDULED" ]; then
         SLOT=$((NOW - (NOW_MINUTE - START_MINUTE + 60) % 60))
         if [ -z "$LAST" ]; then
             # The first scheduled start (or a lost stamp) records the current slot; the work starts at the next Start
-            # minute. A start that works on a deletion request leaves that to the next start.
-            if [ -z "$DELETION_PENDING" ]; then
+            # minute. A start that works on a deletion request or a view leaves that to the next start.
+            if [ -z "$DELETION_PENDING$VIEW_PENDING" ]; then
                 mark_slot
                 echo "NOT_DUE"
                 exit 0
             fi
         elif [ "$SLOT" -le "$LAST" ]; then
             STAMP_PENDING=
-            if [ -z "$DELETION_PENDING" ]; then
+            if [ -z "$DELETION_PENDING$VIEW_PENDING" ]; then
                 echo "NOT_DUE"
                 exit 0
             fi
@@ -719,13 +792,20 @@ lock_busy() {
     fi
     if [ -n "$containers" ] || [ -n "$alive" ]; then
         # A step runs, or the owner is between two steps (its pre-purge backup or reconcile included): a scheduled start
-        # leaves this hour to it, and an open deletion request to a later start.
+        # leaves this hour to it, and an open deletion request and viewing work to a later start.
         if [ -n "$SCHEDULED" ]; then
             mark_slot
-            if [ -n "$WITHIN_HOUR" ]; then
-                say "the previous archive.sh ($who) is still working; the open deletion request waits for a later start."
+            if [ -n "$DELETION_PENDING" ] && [ -n "$VIEW_PENDING" ]; then
+                waiting="the open deletion request and the viewing work wait"
             elif [ -n "$DELETION_PENDING" ]; then
-                say "the previous archive.sh ($who) is still working; this hour's work is skipped, and the open deletion request waits for a later start."
+                waiting="the open deletion request waits"
+            else
+                waiting="the viewing work waits"
+            fi
+            if [ -n "$WITHIN_HOUR" ]; then
+                say "the previous archive.sh ($who) is still working; $waiting for a later start."
+            elif [ -n "$DELETION_PENDING$VIEW_PENDING" ]; then
+                say "the previous archive.sh ($who) is still working; this hour's work is skipped, and $waiting for a later start."
             else
                 say "the previous archive.sh ($who) is still working; this hour's work is skipped."
             fi
@@ -777,17 +857,18 @@ fi
 
 REC=$RECORDS_DIR/archive/$(date -u +%Y%m%dT%H%M%SZ)
 mkdir "$REC" 2>/dev/null || { REC=; could_not_run "the record folder $RECORDS_DIR/archive/<UTC stamp> cannot be created."; }
-if [ -n "$DELETION_PENDING" ]; then
-    # The cheap check that took this start for a deletion request.
+if [ -n "$DELETION_PENDING$VIEW_PENDING" ]; then
+    # The cheap check that took this start for a deletion request or for viewing work.
     KEEP=1
     cp "$WORK/check.json" "$REC/check.json" 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
-# The work (contract B2 §3.1, B3 §3.1, B4 §3.2)
+# The work (contract B2 §3.1, B3 §3.1, B4 §3.2, B5 §3.6)
 # ---------------------------------------------------------------------------
 
 EXIT=0
+# The run work's state and outcome (the ARCHIVE and EVALUATE lines); a view's are VIEW_STATE and VIEW_LINE.
 STATE=
 OUTCOME=
 STEP_NAME=
@@ -796,12 +877,13 @@ STEP_CMD=
 PURGE_STARTED=
 # The decision of `evaluate` at the hourly work (its result; empty when it did not run or gave none), and whether the
 # `next` loop then worked on a run (a step of export, verify, copy, the pre-purge backup or the purge): a start whose
-# hourly work worked on no run reports the decision as its final line (EVALUATE).
+# hourly work worked on no run and no view reports the decision as its final line (EVALUATE).
 EVAL_RESULT=
 RUN_WORKED=
 # step NAME COMMAND ARGS...: one history-archive command; report REC/NAME.json, stderr REC/NAME.log; sets RC, RESULT,
 # VALID and STATE (when the report names a state). The report of a command on a deletion request (start-deletion,
-# delete) must also name that request (request_id), or it is no valid report.
+# delete) must also name that request (request_id), and that of a command on a view (load-view, close-view) that view
+# (view_id), or it is no valid report.
 step() {
     STEP_NAME=$1
     STEP_CMD=$2
@@ -814,10 +896,11 @@ step() {
     CURRENT_STEP=
     VALID=
     case "$STEP_CMD" in
-        start-deletion | delete) named=$(json_number "$REC/$STEP_NAME.json" request_id) ;;
-        *) named=$REQUEST_ID ;;
+        start-deletion | delete) named=$(json_number "$REC/$STEP_NAME.json" request_id); wanted=$REQUEST_ID ;;
+        load-view | close-view) named=$(json_number "$REC/$STEP_NAME.json" view_id); wanted=$VIEW_ID ;;
+        *) named=; wanted= ;;
     esac
-    if report_valid "$REC/$STEP_NAME.json" "$RC" && [ "$named" = "$REQUEST_ID" ]; then
+    if report_valid "$REC/$STEP_NAME.json" "$RC" && [ "$named" = "$wanted" ]; then
         VALID=1
         RESULT=$(json_field "$REC/$STEP_NAME.json" result)
         state=$(json_field "$REC/$STEP_NAME.json" state)
@@ -845,6 +928,10 @@ failed() {
                 say "the outcome of the purge of run ${RUN_ID:-?} is unknown. Whole components only are ever deleted: the next start resumes a run left PURGING and reconciles when its purge ends, or fails a run that is still RUNNING (then nothing was deleted)." ;;
             start-deletion)
                 say "the outcome of the start of deletion request ${REQUEST_ID:-?} is unknown. Nothing was deleted: the next start makes the request FAILED if it was started (recover), or starts it again." ;;
+            load-view)
+                say "the outcome of the load of view ${VIEW_ID:-?} is unknown. A load never changes live history: the next start loads a view still REQUESTED, or fails a view left LOADING (recover), which removes the rows it loaded." ;;
+            close-view)
+                say "the outcome of the closing of view ${VIEW_ID:-?} is unknown: the next start closes a view left CLOSING (or OPEN past its days) again." ;;
         esac
         return 0
     fi
@@ -866,6 +953,11 @@ failed() {
                 # The requester re-check (contract B3 §2): the message says that nothing was deleted and who may
                 # ask again.
                 say "deletion request ${REQUEST_ID:-?} FAILED: $message"
+            elif [ "$STEP_CMD" = load-view ]; then
+                # Contract B5 §3.3: the view is FAILED with what it loaded removed; the message says why and what to
+                # do (a damaged or missing archive folder, which is restored from its off-host copy; the setting of
+                # runs loaded at once lowered since the request; an internal error).
+                say "view ${VIEW_ID:-?} of run ${VIEW_RUN:-?} FAILED: $message Live history was not changed (OPERATIONS_RUNBOOK §11, Viewing an archive)."
             else
                 say "run ${RUN_ID:-?} FAILED: $message Nothing was deleted. $REQUEST_NEW"
             fi
@@ -877,8 +969,17 @@ failed() {
                 # PURGING, and the reconcile waits for the resumed purge to end.
                 say "the purge of run ${RUN_ID:-?} stopped: $message"
                 say "run ${RUN_ID:-?} stays PURGING: the batch in progress was rolled back (whole components only are ever deleted), and the next start resumes the purge and reconciles when it ends."
+            elif [ "$RESULT" = interrupted ] && { [ "$STEP_CMD" = load-view ] || [ "$STEP_CMD" = close-view ]; }; then
+                # A database error that does not last (contract B5 §3.3, §3.4): the message says what the next start
+                # does with the view (LOADING: recover fails it; CLOSING: it is closed again).
+                say "view ${VIEW_ID:-?} stopped: $message"
             else
                 say "history-archive $STEP_CMD could not run: $message"
+                if [ "$STEP_CMD" = load-view ] && [ "$VIEW_STATE" = LOADING ]; then
+                    say "View ${VIEW_ID:-?} stays LOADING: the next start fails it (recover) and removes the rows it loaded. Live history was not changed. $VIEW_AGAIN"
+                elif [ "$STEP_CMD" = close-view ] && [ "$VIEW_STATE" = CLOSING ]; then
+                    say "View ${VIEW_ID:-?} stays CLOSING: the next start removes the rest of its rows."
+                fi
                 if [ "$STEP_CMD" = purge ]; then
                     say "Nothing was deleted. Run ${RUN_ID:-?} stays RUNNING, and the next start fails it (recover). $REQUEST_NEW"
                 elif [ "$STEP_CMD" = start-deletion ]; then
@@ -933,7 +1034,7 @@ reconcile_after() {
     else
         evidence="the purge receipt is $ARCHIVE_DIR/${ARCHIVE_NAME:-<archive name>}.purged.json${BACKUP_NAME:+ and the pre-purge backup $BACKUP_NAME}"
     fi
-    say "INCIDENT — the reconcile after $SUBJECT $what: $REC/reconcile.json. Stop requesting runs and deletions and follow OPERATIONS_RUNBOOK §8 ($SECTION): $evidence; $INCIDENT_FILE records the incident, and no start works on a run or a deletion request until you remove it after the investigation."
+    say "INCIDENT — the reconcile after $SUBJECT $what: $REC/reconcile.json. Stop requesting runs and deletions and follow OPERATIONS_RUNBOOK §8 ($SECTION): $evidence; $INCIDENT_FILE records the incident, and no start works on a run, a deletion request or a view until you remove it after the investigation."
 }
 
 # take_backup LABEL REASON STEP: backup.sh --kind pre-purge --label LABEL, which publishes and verifies it like every
@@ -1057,7 +1158,7 @@ carry_out_deletion() {
     if [ -n "$VALID" ] && [ "$RC" -eq 0 ]; then
         DEL_OUTCOME=deleted
         DEL_STATE=${STATE:-COMPLETED}
-        rows=$(deleted_rows "$REC/delete.json")
+        rows=$(row_counts "$REC/delete.json" deleted)
         say "deletion request $REQUEST_ID: deleted (${rows:-no rows}) in one transaction, after its pre-purge backup $BACKUP_NAME."
         reconcile_after
         return 0
@@ -1167,6 +1268,70 @@ evaluate_runs() {
     say "the work goes on (the next loop still works on an open run); the next hourly work evaluates the automatic runs again (OPERATIONS_RUNBOOK §11)."
 }
 
+# view_work COMMAND: COMMAND (close-view or load-view) --view VIEW_ID, the viewing work that `next` handed out
+# (contract B5 §3.3, §3.4); it never changes live history. Its report is REC/COMMAND-VIEW_ID.json (one start may work on
+# several views), and STATE stays the run work's. Exit 0: VIEW_LINE names what became of the view (the VIEW line), what
+# it loaded or removed is logged, and the loop asks `next` again. A refusal with the code wrong_state means that the view
+# changed after `next` handed it out (a person cancelled it before its load, or its days were raised before its
+# closing; review B5 m1): nothing was changed, it is logged, and the loop asks `next` again as well (DONE_STEPS still
+# stops a loop). Otherwise `failed` sets EXIT (3: the load FAILED, its rows removed; 2: interrupted, could not run or no
+# valid report; 1: any other refusal) and it returns 1: the start ends.
+view_work() {
+    view_record=$1-$VIEW_ID
+    run_state=$STATE
+    step "$view_record" "$1" --view "$VIEW_ID"
+    STATE=$run_state
+    report=$REC/$view_record.json
+    VIEW_STATE=$(json_field "$report" state)
+    VIEW_RUN=$(json_nested_number "$report" view run_id)
+    if [ -n "$VALID" ] && [ "$RC" -eq 1 ] && [ "$(json_nested "$report" error code)" = wrong_state ]; then
+        say "history-archive $1 refused view $VIEW_ID, which changed after next handed it out: $(error_message "$report") This start asks next again."
+        return 0
+    fi
+    if [ -z "$VALID" ] || [ "$RC" -ne 0 ]; then
+        failed
+        return 1
+    fi
+    VIEW_LINE="$RESULT $VIEW_ID ${VIEW_STATE:--}"
+    if [ "$1" = load-view ]; then
+        say "view $VIEW_ID of run ${VIEW_RUN:-?} is ${VIEW_STATE:-OPEN}: $(json_nested_number "$report" loaded movements) Movements, $(json_nested_number "$report" loaded flows) flows, $(json_nested_number "$report" loaded lineage_edges) lineage edges, $(json_nested_number "$report" loaded assigned_routes) Assigned Routes and $(json_nested_number "$report" loaded names) names loaded from the archive folder $(json_field "$report" archive_name); it stays open until $(json_nested "$report" view open_until)."
+    else
+        if [ -n "$(json_nested_number "$report" view closed_by_user_id)" ]; then
+            why="a person closed it"
+        else
+            why="its days ran out"
+        fi
+        removed=$(row_counts "$report" removed)
+        say "view $VIEW_ID of run ${VIEW_RUN:-?} is ${VIEW_STATE:-CLOSED} ($why): its loaded rows were removed (${removed:-no rows})."
+    fi
+    return 0
+}
+
+# pending_note RECORD: why the work that the cheap check found was not handed out by the first `next` (report RECORD): a
+# deletion request or a view that waits while a run is RUNNING in another history-archive command (recover ran first, so
+# that run is not this start's), or work that is no longer open.
+pending_note() {
+    note=
+    if [ -n "$DELETION_PENDING" ]; then
+        waiting=$(json_nested_number "$REC/$1.json" request id)
+        if [ -n "$waiting" ]; then
+            note="deletion request $waiting waits while run ${RUN_ID:-?} is RUNNING in another history-archive command"
+        else
+            note="deletion request ${pending_id:-?} is no longer open (it was cancelled or finished meanwhile)"
+        fi
+    fi
+    if [ -n "$VIEW_PENDING" ]; then
+        waiting=$(json_nested_number "$REC/$1.json" view id)
+        if [ -n "$waiting" ]; then
+            text="view $waiting waits while run ${RUN_ID:-?} is RUNNING in another history-archive command"
+        else
+            text="no view waits for the job any more (recover failed a load that a stopped start left, or a person cancelled the view meanwhile)"
+        fi
+        note="${note:+$note; }$text"
+    fi
+    printf '%s' "$note"
+}
+
 step recover recover
 if [ "$RC" -ne 0 ] || [ -z "$VALID" ]; then
     # Without a recover, no run or request is worked on: a run or a deletion request left RUNNING (also one restored from
@@ -1194,6 +1359,14 @@ else
             EXIT=3
             say "deletion request(s) $stale stopped while RUNNING and are FAILED now (an interrupted job, a pre-purge backup that failed, a deletion that stopped on a database error, or a database restored from the pre-purge backup of a deletion). Nothing was deleted by them in this database. $REQUEST_AGAIN"
         fi
+        stale=$(json_list "$REC/recover.json" failed_view_ids | tr '\n' ' ' | sed 's/ *$//')
+        if [ -n "$stale" ]; then
+            # A start stopped, or a database error that does not last stopped it, while it loaded a view, or the
+            # database was restored from a backup taken during a load (contract B5 §3.5): the view is FAILED now, its
+            # rows removed.
+            EXIT=3
+            say "view(s) $stale stopped while LOADING and are FAILED now (an interrupted job, a load that stopped on a database error, or a database restored from a backup taken during a load). The rows they had loaded were removed; live history was not changed. $VIEW_AGAIN"
+        fi
     fi
     problems=$(json_list "$REC/recover.json" receipt_problems)
     if [ -n "$problems" ]; then
@@ -1206,8 +1379,9 @@ else
     # Fail closed (design §10): while the incident record of a reconcile after a purge or a deletion exists, a start runs
     # recover and status only. Neither `evaluate` nor `next` is asked, so no step that changes data runs: no automatic
     # run is created, no export, verify, copy, pre-purge backup, purge or deletion, also no resumed purge of a run left
-    # PURGING. Exit 1, unless recover already set a code (3: it failed a run or a request, as after a restore of a
-    # pre-purge backup). Only the operator removes the record (OPERATIONS_RUNBOOK §8).
+    # PURGING, and no view is loaded or closed (contract B5 §3.6 step 5: a view open past its days then shows as
+    # view_not_closed an hour later). Exit 1, unless recover already set a code (3: it failed a run, a request or a view,
+    # as after a restore of a pre-purge backup). Only the operator removes the record (OPERATIONS_RUNBOOK §8).
     INCIDENT_OPEN=
     if [ -e "$INCIDENT_FILE" ]; then
         INCIDENT_OPEN=1
@@ -1222,31 +1396,36 @@ else
             what="a reconcile after a purge exists (run ${incident_run:-?}, result ${incident_result:-unknown})"
             section="Reconcile finding after a purge"
         fi
-        say "refused — the incident record $INCIDENT_FILE of $what: no run or deletion request is worked on while it exists, no evaluation of the automatic runs, export, verification, copy, pre-purge backup, purge or deletion, not even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 ($section); once the investigation is done and the reconciliation is clean, remove the record (rm $INCIDENT_FILE), and the next start goes on."
+        say "refused — the incident record $INCIDENT_FILE of $what: no run, deletion request or view is worked on while it exists, no evaluation of the automatic runs, export, verification, copy, pre-purge backup, purge, deletion, load or closing of a view, not even the resumed purge of a run left PURGING. Follow OPERATIONS_RUNBOOK §8 ($section); once the investigation is done and the reconciliation is clean, remove the record (rm $INCIDENT_FILE), and the next start goes on."
     fi
 
     # The automatic runs (contract B4 §3.2): at the hourly work only, after recover and before the `next` loop. Never in
-    # a start taken only for a deletion request (a scheduled start outside its hourly slot: DUE unset), never while the
-    # incident record exists. A run it creates PROPOSED waits for a person (`next` answers wait); one it creates APPROVED
-    # under the standing authorization is worked on by the loop below, in this start.
+    # a start taken only for a deletion request or for viewing work (a scheduled start outside its hourly slot: DUE
+    # unset), never while the incident record exists. A run it creates PROPOSED waits for a person (`next` answers wait);
+    # one it creates APPROVED under the standing authorization is worked on by the loop below, in this start.
     if [ -z "$INCIDENT_OPEN" ] && [ -n "$DUE" ]; then
         evaluate_runs
     fi
 
     # The steps that `next` names, until it answers wait, running or none, a run or a deletion finishes, or a step fails
-    # (contract B2 §3.1, B3 §3.1, B4 §3.2): an open deletion request first (start-deletion → pre-purge backup → delete →
-    # reconcile; then the start ends: no run work after a deletion), else export → verify → copy → backup → purge in one
-    # start, and no further run after a purge. An APPROVED run is exported whether it was requested, approved or created
-    # under the standing authorization; a PROPOSED run answers wait. Each step runs at most once per run or request in
-    # one start: `next` naming a step again means that a step made no progress, and the start ends instead of looping.
-    # With the incident record (above), the loop does not run at all.
+    # (contract B2 §3.1, B3 §3.1, B4 §3.2, B5 §3.6): an open deletion request first (start-deletion → pre-purge backup →
+    # delete → reconcile; then the start ends: no run work after a deletion); then the viewing work, closing before
+    # loading (close-view, load-view; each asks `next` again, and any exit but 0 ends the start); then, only when the
+    # hourly work is due, export → verify → copy → backup → purge in one start, and no further run after a purge. An
+    # APPROVED run is exported whether it was requested, approved or created under the standing authorization; a
+    # PROPOSED run answers wait. Each step runs at most once per run, request or view in one start: `next` naming a step
+    # again means that a step made no progress, and the start ends instead of looping. With the incident record (above),
+    # the loop does not run at all.
     NEXT_COUNT=0
     DONE_STEPS=' '
     DELETION_STARTED=
     WAIT_SAID=
+    VIEW_WAIT_SAID=
     while [ -z "$INCIDENT_OPEN" ]; do
         NEXT_COUNT=$((NEXT_COUNT + 1))
         if [ "$NEXT_COUNT" -eq 1 ]; then record=next; else record=next-$NEXT_COUNT; fi
+        # The state that `next` names is a view's when it hands out viewing work: STATE stays the run work's then.
+        run_state=$STATE
         step "$record" next
         run=$(json_number "$REC/$record.json" run_id)
         [ -z "$run" ] || RUN_ID=$run
@@ -1276,23 +1455,36 @@ else
                 fi
                 subject="r$REQUEST_ID"
                 ;;
+            close_view | load_view)
+                # Viewing work (contract B5 §3.2): at any start, after the deletion work and before the run work; it
+                # leaves the hourly slot to the hourly work.
+                STATE=$run_state
+                VIEW_ID=$(json_number "$REC/$record.json" view_id)
+                if [ -z "$VIEW_ID" ]; then
+                    EXIT=2
+                    KEEP=1
+                    say "history-archive next answered $action without naming its view ($REC/$record.json). Nothing was changed; the next start tries again."
+                    break
+                fi
+                subject="v$VIEW_ID"
+                ;;
             *)
-                # The hourly work begins (or there is nothing to do): this start attempted the hourly slot.
-                mark_slot
-                if [ -n "$DELETION_PENDING" ] && [ "$NEXT_COUNT" -eq 1 ]; then
-                    # `next` names a request that waits while a run is RUNNING (contract B3 §3): here that run is
-                    # another history-archive command's, since recover ran first.
-                    waiting=$(json_nested_number "$REC/$record.json" request id)
-                    if [ -n "$waiting" ]; then
-                        request_note="deletion request $waiting waits while run ${RUN_ID:-?} is RUNNING in another history-archive command"
-                    else
-                        request_note="deletion request ${pending_id:-?} is no longer open (it was cancelled or finished meanwhile)"
+                # The hourly work begins (or there is nothing to do): this start attempted the hourly slot, unless it was
+                # taken only for viewing work and has worked on a view (as after deletion work, the slot is left to the
+                # hourly work).
+                if [ -n "$DUE" ] || [ -z "$VIEW_WORKED" ]; then
+                    mark_slot
+                fi
+                if [ -z "$DUE" ]; then
+                    # A start taken only for a deletion request or for viewing work does no run work (contract B3 §3.1,
+                    # B5 §3.6). When the first `next` handed out none of that work, the note says why.
+                    if [ "$NEXT_COUNT" -eq 1 ]; then
+                        say "$(pending_note "$record"), and the hourly work is not due: this start ends."
                     fi
-                    if [ -z "$DUE" ]; then
-                        say "$request_note, and the hourly work is not due: this start ends."
-                        break
-                    fi
-                    say "$request_note: the hourly work goes on."
+                    break
+                fi
+                if [ "$NEXT_COUNT" -eq 1 ] && [ -n "$DELETION_PENDING$VIEW_PENDING" ]; then
+                    say "$(pending_note "$record"): the hourly work goes on."
                 fi
                 subject=${RUN_ID:-}
                 ;;
@@ -1303,6 +1495,8 @@ else
                 KEEP=1
                 if [ "${subject#r}" != "$subject" ]; then
                     say "history-archive next answered $action again for deletion request $REQUEST_ID: a step of this start made no progress ($REC/$record.json). The next start tries again."
+                elif [ "${subject#v}" != "$subject" ]; then
+                    say "history-archive next answered $action again for view $VIEW_ID: a step of this start made no progress ($REC/$record.json). The next start tries again."
                 else
                     say "history-archive next answered $action again for run ${RUN_ID:-?}: a step of this start made no progress ($REC/$record.json). The next start tries again."
                 fi
@@ -1311,14 +1505,28 @@ else
         esac
         DONE_STEPS="$DONE_STEPS$action:$subject "
         case "$action" in
+            close_view | load_view)
+                # close-view or load-view (contract B5 §3.3, §3.4): exit 0 asks `next` again; any other exit ends the
+                # start.
+                KEEP=1
+                VIEW_WORKED=1
+                view_work "${action%_view}-view" || break
+                continue
+                ;;
             export | verify | copy | backup | purge)
-                # The hourly work works on a run (its final line is ARCHIVE, not EVALUATE).
+                # The hourly work works on a run (its final line is ARCHIVE, not EVALUATE or VIEW).
                 RUN_WORKED=1
                 # An APPROVED request waits while this start's run is RUNNING (contract B3 §3): a later start takes it.
                 waiting=$(json_nested_number "$REC/$record.json" request id)
                 if [ -n "$waiting" ] && [ -z "$WAIT_SAID" ]; then
                     WAIT_SAID=1
                     say "deletion request $waiting waits while run ${RUN_ID:-?} is RUNNING in this start: a later start carries it out."
+                fi
+                # So does viewing work (contract B5 §3.2).
+                waiting=$(json_nested_number "$REC/$record.json" view id)
+                if [ -n "$waiting" ] && [ -z "$VIEW_WAIT_SAID" ]; then
+                    VIEW_WAIT_SAID=1
+                    say "view $waiting waits while run ${RUN_ID:-?} is RUNNING in this start: a later start does its viewing work."
                 fi
                 ;;
         esac
@@ -1418,15 +1626,21 @@ if [ -n "$VALID" ]; then
     [ -z "$findings" ] || say "status findings: $findings (OPERATIONS_RUNBOOK §11)."
 fi
 
-# A start that worked on a deletion request leaves the hourly slot to the next start; any other attempted it.
-[ -n "$DELETION_WORKED" ] || mark_slot
+# A start that worked on a deletion request or on a view leaves the hourly slot to the next start (one whose `next`
+# answered anything else after its viewing work has marked it already); any other attempted it.
+[ -n "$DELETION_WORKED$VIEW_WORKED" ] || mark_slot
+# The final line names the most consequential work of the start: a deletion, then a run, then the views, then the
+# decision of `evaluate` alone.
 if [ "$EXIT" -eq 0 ]; then
     if [ -n "$DELETION_WORKED" ]; then
         echo "DELETION ${DEL_OUTCOME:-none} ${REQUEST_ID:--} ${DEL_STATE:--}"
+    elif [ -n "$VIEW_LINE" ] && [ -z "$RUN_WORKED" ]; then
+        # Viewing work and no run: the last view that a step loaded or closed (a view that changed meanwhile is none).
+        echo "VIEW $VIEW_LINE"
     elif [ -z "$DUE" ]; then
         echo "NOT_DUE"
     elif [ -n "$EVAL_RESULT" ] && [ -z "$RUN_WORKED" ]; then
-        # The hourly work worked on no run: the decision of `evaluate`, with the open run that `next` named.
+        # The hourly work worked on no run and no view: the decision of `evaluate`, with the open run that `next` named.
         echo "EVALUATE $EVAL_RESULT ${RUN_ID:--} ${STATE:--}"
     else
         echo "ARCHIVE ${OUTCOME:-none} ${RUN_ID:--} ${STATE:--}"

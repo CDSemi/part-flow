@@ -638,6 +638,9 @@ def test_evaluate_counts_the_live_movement_rows_against_their_limit(
             "limit": limit,
             "threshold": None,
             "passes": result == "created",
+            # The size measure only (archival step 5): the whole size and the viewer space.
+            "database_bytes": None,
+            "viewer_bytes": None,
         }
     assert report.details["run"]["reason"] == (
         f"Live Movement rows {rows:,} above the limit {rows - 1:,}; retention 24 months"
@@ -708,15 +711,25 @@ def test_evaluate_compares_the_database_size_with_its_limit(
     _automatic_on(world, archive_measure="DATABASE_SIZE", archive_limit_database_gib=20)
     _due(world, monkeypatch)
     limit = 20 * history_archive.GIB
+    # The viewer tables of viewing an archive (step 5) are left out of the size: the
+    # measure is the database's size minus their space, both reported.
+    viewer = 5 * history_archive.GIB
+    monkeypatch.setattr(history_archive, "viewer_bytes", lambda _connection: viewer)
     for size, result in (
         (limit, "below_limit"),
         (limit - 1, "below_limit"),
         (limit + 1, "created"),
     ):
-        monkeypatch.setattr(history_archive, "database_bytes", lambda _connection, s=size: s)
+        monkeypatch.setattr(
+            history_archive, "database_bytes", lambda _connection, s=size: s + viewer
+        )
         report = _evaluate(job, folders, result)
         assert report.details["measure"]["value"] == size
         assert report.details["measure"]["read"] == "size"
+        assert (
+            report.details["measure"]["database_bytes"],
+            report.details["measure"]["viewer_bytes"],
+        ) == (size + viewer, viewer)
     assert report.details["run"]["reason"] == (
         f"Database size {limit + 1:,} bytes (20.0 GiB) above the limit 20 GiB; retention 24 months"
     )
@@ -943,7 +956,7 @@ def test_the_cli_evaluates(
     code = cli.main(["history-archive", "evaluate"])
     document = json.loads(capsys.readouterr().out)
     assert (code, document["command"], document["result"]) == (0, "history-archive evaluate", "off")
-    assert list(document)[:10] == [
+    assert list(document)[:11] == [
         "report_version",
         "command",
         "result",
@@ -953,6 +966,7 @@ def test_the_cli_evaluates(
         "duration_ms",
         "run_id",
         "request_id",
+        "view_id",
         "state",
     ]
     assert {

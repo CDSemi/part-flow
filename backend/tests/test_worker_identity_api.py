@@ -1820,6 +1820,9 @@ _IDENTITY_MODULES = {
     # Phase 16 history archival: the archive names the Workers of its
     # Movements in context.json; no rule reads them.
     "history_archive_job.py",
+    # Phase 16 viewing an archive (step 5): the viewer searches the archived
+    # Movements by Worker and names them as at export; no rule reads them.
+    "history_archive_views.py",
 }
 _STAMPS = {
     "intake.py": 1,

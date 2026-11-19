@@ -19,9 +19,10 @@
 // holds the settings of History archival & purge (the Movement-history
 // retention period, the shortest allowed period, the Start minute of the
 // host job, the preview time limit, the wait limit, the purge batch
-// limits and the automatic runs with the standing authorization of their
-// approval step; a partial merge, Phase 16), which the host job and the
-// preview read. Security → User sign-in reads the user sign-in
+// limits, the automatic runs with the standing authorization of their
+// approval step, and the days a loaded archive stays open with the runs
+// loaded for viewing at once; a partial merge, Phase 16), which the host
+// job and the preview read. Security → User sign-in reads the user sign-in
 // policy (how long a user's sign-in lasts, when failed sign-ins lock an
 // account, whether an administrator-set password must be replaced) —
 // readable by any signed-in user, written as a partial merge by users
@@ -277,6 +278,12 @@ export interface RetentionPolicy {
   approvalRequired: boolean;
   /** Days between automatic runs, from the end of the last one. */
   intervalDays: number;
+  /** The days a run's archive loaded for viewing stays open, counted from
+   * its opening (archival design D16). */
+  viewDays: number;
+  /** How many runs may be loaded for viewing, or wait to be loaded, at
+   * once. */
+  viewMaxLoaded: number;
   /** Set exactly while the approval step is off. */
   standingAuthorization: StandingAuthorization | null;
   /** The policy singleton's timestamp (shared by every section). */
@@ -307,6 +314,8 @@ const RETENTION_WIRE: Record<RetentionSetting, string> = {
   limitDatabaseGib: 'archive_limit_database_gib',
   approvalRequired: 'archive_approval_required',
   intervalDays: 'archive_interval_days',
+  viewDays: 'archive_view_days',
+  viewMaxLoaded: 'archive_view_max_loaded',
 };
 
 /** The settings that are not whole numbers (all others are). */
@@ -365,7 +374,12 @@ function toRetentionPolicy(wire: Record<string, unknown>): RetentionPolicy {
     const value = wire[name];
     const expected = RETENTION_TYPES[setting as RetentionSetting] ?? 'number';
     const nullable = setting === 'retentionPeriodMonths';
-    if (typeof value !== expected && !(nullable && value === null)) {
+    // A number setting is a whole number, as the server stores it.
+    const valid =
+      expected === 'number'
+        ? Number.isInteger(value)
+        : typeof value === expected;
+    if (!valid && !(nullable && value === null)) {
       throw missingSetting(name);
     }
     policy[setting] = value;

@@ -33,20 +33,24 @@ import {
 import { ADMIN_SECTIONS } from './sections';
 
 // Administration → History archival & purge (Phase 16, archival design B
-// steps 1, 2 and 4; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings of
-// the Movement-history archival (`/api/policies/data-retention` — the
+// steps 1, 2, 4 and 5; GUI_DESIGN §9, PROJECT_PROFILE §28): the settings
+// of the Movement-history archival (`/api/policies/data-retention` — the
 // retention period, the shortest allowed period, the Start minute of the
-// server's archival job, the preview time limit, the wait limit and the
-// purge batch limits; the automatic runs have a card of their own), the
-// preview of what a run would archive at a cutoff and the request of a
-// run, and the table of runs with Approve, Dismiss, Cancel and Confirm
-// off-host copy. A run exports the history to archive files and, after
-// the off-host copy and a pre-purge backup, purges it from the database.
+// server's archival job, the preview time limit, the wait limit, the
+// purge batch limits, and the days a loaded archive stays open with the
+// runs loaded for viewing at once; the automatic runs have a card of
+// their own), the preview of what a run would archive at a cutoff and the
+// request of a run, and the table of runs with Approve, Dismiss, Cancel
+// and Confirm off-host copy, and the viewing of a run's archive (Open for
+// viewing, its newest view, Cancel, Close viewing and View, the viewer
+// page). A run exports the history to archive files and, after the
+// off-host copy and a pre-purge backup, purges it from the database.
 // Every change needs the Run history archival and purge permission (the
 // server checks it); every signed-in user reads the settings and the
 // runs, with one view-only line under the header when the user may not
-// change them. The server validates every value and owns every rule: the
-// section shows its answers as given.
+// change them, and only holders of the permission see the viewing. The
+// server validates every value and owns every rule: the section shows its
+// answers as given.
 //
 // The settings cards and the Preview stand in two columns when two fit,
 // each column a stack of its own: Retention and schedule with Automatic
@@ -95,7 +99,7 @@ export function HistoryArchivalSection() {
         <div className="admin-cardcolumn">
           <SettingsCard
             title="Retention and schedule"
-            description="How long Movement history stays in the database, when the server's archival job does its work, and how much it purges at a time."
+            description="How long Movement history stays in the database, when the server's archival job does its work, how much it purges at a time, and how archives are loaded for viewing."
             edit={
               canWrite && policy
                 ? {
@@ -135,6 +139,7 @@ export function HistoryArchivalSection() {
           runsData={runsData}
           canWrite={canWrite}
           writeBlocked={writeBlocked}
+          viewDays={policy?.viewDays ?? null}
         />
         {canDeletePermanently ? (
           <DeletionRequestsCard writeBlocked={writeBlocked} />
@@ -217,6 +222,16 @@ function RetentionSettingsBody({
             {policy.purgeBatchPartNumbers.toLocaleString('en-US')}
           </span>
         </div>
+        <div className="prow">
+          <span className="k">A loaded archive stays open</span>
+          <span className="v">
+            {`${policy.viewDays} day${policy.viewDays === 1 ? '' : 's'}`}
+          </span>
+        </div>
+        <div className="prow">
+          <span className="k">Runs loaded for viewing at once</span>
+          <span className="v">{policy.viewMaxLoaded}</span>
+        </div>
       </div>
       {editing ? (
         <RetentionSettingsDialog
@@ -258,6 +273,10 @@ function RetentionSettingsDialog({
   const [batchPartNumbersText, setBatchPartNumbersText] = useState(
     String(saved.purgeBatchPartNumbers),
   );
+  const [viewDaysText, setViewDaysText] = useState(String(saved.viewDays));
+  const [viewMaxLoadedText, setViewMaxLoadedText] = useState(
+    String(saved.viewMaxLoaded),
+  );
   const [busy, setBusy] = useState(false);
   const [wrote, setWrote] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -269,6 +288,8 @@ function RetentionSettingsDialog({
   const days = parseWhole(daysText);
   const batchMovements = parseWhole(batchMovementsText);
   const batchPartNumbers = parseWhole(batchPartNumbersText);
+  const viewDays = parseWhole(viewDaysText);
+  const viewMaxLoaded = parseWhole(viewMaxLoadedText);
   const periodInvalid = keepPeriod && period === null;
   const invalid =
     periodInvalid ||
@@ -277,7 +298,9 @@ function RetentionSettingsDialog({
     seconds === null ||
     days === null ||
     batchMovements === null ||
-    batchPartNumbers === null;
+    batchPartNumbers === null ||
+    viewDays === null ||
+    viewMaxLoaded === null;
   const shortestChanged =
     shortest !== null && shortest !== saved.shortestRetentionMonths;
   // A cleared or a longer period while the approval step of automatic runs
@@ -308,6 +331,10 @@ function RetentionSettingsDialog({
     ...(batchPartNumbers !== null &&
     batchPartNumbers !== saved.purgeBatchPartNumbers
       ? { purgeBatchPartNumbers: batchPartNumbers }
+      : {}),
+    ...(viewDays !== null && viewDays !== saved.viewDays ? { viewDays } : {}),
+    ...(viewMaxLoaded !== null && viewMaxLoaded !== saved.viewMaxLoaded
+      ? { viewMaxLoaded }
       : {}),
   };
   const changed = Object.keys(patch).length > 0;
@@ -535,6 +562,48 @@ function RetentionSettingsDialog({
           <p className="admin-fieldhelp">
             A batch locks at most this many Part Numbers; work on them waits
             until the batch ends.
+          </p>
+        )}
+        <AdminField label="A loaded archive stays open (days, 1–365)">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={viewDaysText}
+            disabled={busy}
+            onChange={(event) => setViewDaysText(event.target.value)}
+          />
+        </AdminField>
+        {viewDays === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            A run opened for viewing closes this many days after it was loaded,
+            and the archival job removes its copy from the database. A change
+            applies to the runs open now as well.
+          </p>
+        )}
+        <AdminField label="Runs loaded for viewing at once (1–10)">
+          <input
+            className="field mono"
+            type="number"
+            step={1}
+            value={viewMaxLoadedText}
+            disabled={busy}
+            onChange={(event) => setViewMaxLoadedText(event.target.value)}
+          />
+        </AdminField>
+        {viewMaxLoaded === null ? (
+          <div className="err" role="alert">
+            {WHOLE_NUMBER_ERROR}
+          </div>
+        ) : (
+          <p className="admin-fieldhelp">
+            Each loaded run takes database space until it is closed, and a run
+            waiting to be loaded counts too. A lower number leaves the runs
+            loaded now open.
           </p>
         )}
         <ServerErrorNote message={serverError} />

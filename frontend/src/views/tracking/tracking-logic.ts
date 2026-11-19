@@ -4,8 +4,10 @@
 // page bounds, the status pill vocabulary, the location rows of the
 // `Current quantity by Area` section, the position line of a Quantity
 // Flow block, the audit-facing description of one Movement history
-// entry, and the archived history (Phase 16): the "History archived in
-// run N" line and its place among the Movements of a page. Everything
+// entry (which the archive viewer of History archival & purge shares, so
+// that archived history reads as live history does), and the archived
+// history (Phase 16): the "History archived in run N" line and its place
+// among the Movements of a page. Everything
 // here reads the fixed server data — derived time values take the shared
 // UI clock tick as an argument (§3.12), and no archived quantity is ever
 // computed here.
@@ -351,12 +353,34 @@ function woText(workOrderNumber: string | null): string {
   return `WO ${workOrderNumber ?? '—'}`;
 }
 
+/** What `describeMovement` reads of a Movement: a live one of Tracking,
+ * or an archived one of the archive viewer of History archival & purge
+ * (its names as they were at export, resolved by the caller). */
+export interface DescribedMovement {
+  quantityFlowId: number;
+  movementType: string;
+  quantity: number;
+  fromArea: { name: string } | null;
+  toArea: { name: string };
+  sourceMachine: { name: string } | null;
+  destinationMachine: { name: string } | null;
+  worker: { name: string } | null;
+  stationId: string | null;
+  movementReason: string | null;
+  reason: string | null;
+  reversesMovementId: number | null;
+  assignedRouteStep: { sequence: number } | null;
+  routeDeviation: Record<string, unknown> | null;
+  lineage: readonly { parentFlowId: number; childFlowId: number }[];
+  demand: { workOrderNumber: string | null } | null;
+}
+
 /**
  * The audit-facing description of one Movement: Areas, quantity,
  * Quantity Flow, Machines, recorded Worker, station, reasons and
  * relationships — canonical recorded data, never an interpretation.
  */
-export function describeMovement(movement: TrackingMovement): string {
+export function describeMovement(movement: DescribedMovement): string {
   const qf = flowId(movement.quantityFlowId);
   const qty = `qty ${movement.quantity}`;
   const to = movement.toArea.name;
@@ -557,4 +581,40 @@ export function describeArchivedHistory(
   const parts = [archivedHistoryText(entry), flowId(entry.quantityFlowId)];
   if (entry.archiveName !== null) parts.push(entry.archiveName);
   return parts.join(' · ');
+}
+
+// ---------------------------------------------------------------------------
+// Codes kept whole
+// ---------------------------------------------------------------------------
+
+/** The longest code a line keeps whole; a longer one may still break at
+ * its hyphens, so that it never widens a narrow panel. */
+export const WHOLE_CODE_MAX_LENGTH = 24;
+
+/** One run of a text: plain words, or a code kept whole. */
+export interface TextRun {
+  text: string;
+  code: boolean;
+}
+
+/**
+ * A description cut into its plain text and its codes — every run of
+ * non-space characters with a hyphen inside (`QF-44`, `ST-PACK`,
+ * `E2E-WO-1`, a Part Number), up to `WHOLE_CODE_MAX_LENGTH` characters —
+ * so that a narrow line wraps between words and never after a code's
+ * hyphen (`ST-` / `PACK`). The runs join back into the text unchanged.
+ */
+export function codeRuns(text: string): TextRun[] {
+  const runs: TextRun[] = [];
+  let last = 0;
+  for (const match of text.matchAll(/\S*[^\s-]-[^\s-]\S*/g)) {
+    const code = match[0];
+    if (code.length > WHOLE_CODE_MAX_LENGTH) continue;
+    const start = match.index ?? 0;
+    if (start > last) runs.push({ text: text.slice(last, start), code: false });
+    runs.push({ text: code, code: true });
+    last = start + code.length;
+  }
+  if (last < text.length) runs.push({ text: text.slice(last), code: false });
+  return runs;
 }

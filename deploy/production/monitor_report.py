@@ -18,16 +18,20 @@ line from `archive` instead of this one. backup_age names the newest backup of a
 `archive` (deploy/production/check.sh): prints exactly one line, `PASS|FAIL archival_proposal <reason>`, from the report
 of `python -m app.cli history-archive status` (the `maintenance` service): FAIL naming each finding
 (copy_confirmation_overdue, approval_overdue, last_run_failed, authorization_failed, standing_authorization_invalid,
-archive_dir_unusable, copy_dir_unusable, receipt_not_copied; a run that failed because the User of its authority may no
-longer run it is named once, by authorization_failed instead of last_run_failed), and deletion_request_waiting when the
-open permanent deletion request, APPROVED or RUNNING, was requested longer ago than --deletion-wait-minutes (1-1440,
-default 15: the history archive task has not carried it out, or has not finished it; an APPROVED request behind a run
-that is RUNNING or PURGING names that run); FAIL when the report is not valid (report_version 1, command
+archive_dir_unusable, copy_dir_unusable, receipt_not_copied, view_not_closed; a run that failed because the User of its
+authority may no longer run it is named once, by authorization_failed instead of last_run_failed; view_not_closed names
+each view of an archive that the history archive job could not close, CLOSING for more than an hour or OPEN more than
+an hour past its days, whose loaded rows still take database space), and deletion_request_waiting when the open
+permanent deletion request, APPROVED or RUNNING, was requested longer ago than --deletion-wait-minutes (1-1440, default
+15: the history archive task has not carried it out, or has not finished it; an APPROVED request behind a run that is
+RUNNING or PURGING names that run); FAIL when the report is not valid (report_version 1, command
 `history-archive status`, exit_code equal to RC) or carries an error; otherwise PASS with the open run (a PURGING run
 with what it purged so far, a run waiting for its copy confirmation or a PROPOSED run waiting for its approval with how
 long it has waited), the last finished run (its result, what it purged and what it skipped), the archive folder's free
-space, and the open and the last finished deletion request in the terms of archive.sh's DELETION line
-(`deletion request <id> <state>`). A FAILED deletion request is not a FAIL: its requester sees it in PartFlow. Exit 0
+space, the views of an archive that are not finished (`view <id> of run <run> <state>`, an OPEN one with the time its
+days run out) with the database space of the viewer tables, and the open and the last finished deletion request in the
+terms of archive.sh's DELETION line (`deletion request <id> <state>`). A FAILED deletion request or view is not a FAIL:
+the person who asked for it sees it in PartFlow, and a view waiting to be loaded (REQUESTED) is not one either. Exit 0
 PASS, 1 FAIL, 2 usage error only.
 --copy-reason: why check.sh did not mount the copy folder; it explains copy_dir_unusable. --purge-reconcile: the
 incident record that archive.sh writes when the reconcile after a purge or a deletion did not end clean
@@ -385,6 +389,66 @@ def deletion_waiting_text(document, wait_minutes):
     return f"{text}, and the history archive task has not finished it: is the task enabled? (SYNOLOGY_NAS §11.8)"
 
 
+def short_utc(value):
+    """A report time without its fraction of a second ("2026-10-15T12:21:03Z"); any other value as text, "?" for none."""
+    match = UTC_TIME.fullmatch(value) if isinstance(value, str) else None
+    if match:
+        return f"{match.group(1)}Z"
+    return "?" if value is None else str(value)
+
+
+def size(value):
+    """A size in bytes as MiB below 1 GiB and as GiB from it ("5.2 MiB", "1.3 GiB")."""
+    if not is_int(value):
+        return "? MiB"
+    return gib(value) if value >= 1073741824 else f"{mib(value)} MiB"
+
+
+def open_views(document):
+    """The views of an archive that are not finished (REQUESTED, LOADING, OPEN, CLOSING), as `status` lists them."""
+    return [view for view in document.get("open_views") or [] if isinstance(view, dict)]
+
+
+def view_not_closed_text(document):
+    """view_not_closed (contract B5 §6): each view that the history archive job could not close, CLOSING for more than an
+    hour or OPEN more than an hour past its days (`views_not_closed`, with the details of `open_views`)."""
+    known = {view.get("id"): view for view in open_views(document)}
+    parts = []
+    for view_id in document.get("views_not_closed") or []:
+        view = known.get(view_id)
+        if view is None:
+            parts.append(f"view {view_id}")
+            continue
+        state = view.get("state")
+        if state == "CLOSING":
+            since = f"closing since {short_utc(view.get('closing_started_at'))}"
+        else:
+            since = f"open until {short_utc(view.get('open_until'))}"
+        parts.append(f"view {view_id} of run {view.get('run_id')} ({state}, {since})")
+    if not parts:
+        return ("view_not_closed: a view of an archive was not closed by the history archive job; its loaded rows still"
+                " take database space (OPERATIONS_RUNBOOK §11)")
+    if len(parts) == 1:
+        return (f"view_not_closed: {parts[0]} was not closed by the history archive job; its loaded rows still take"
+                " database space (OPERATIONS_RUNBOOK §11)")
+    return (f"view_not_closed: {', '.join(parts)} were not closed by the history archive job; their loaded rows still"
+            " take database space (OPERATIONS_RUNBOOK §11)")
+
+
+def view_parts(document):
+    """The views of an archive on a PASS line ("view 4 of run 2 OPEN until 2026-10-15T12:21:03Z"), then the database
+    space of the viewer tables with their indexes (`viewer_bytes`); nothing without a view."""
+    parts = []
+    for view in open_views(document):
+        text = f"view {view.get('id')} of run {view.get('run_id')} {view.get('state')}"
+        if view.get("state") == "OPEN" and view.get("open_until"):
+            text += f" until {short_utc(view.get('open_until'))}"
+        parts.append(text)
+    if parts:
+        parts.append(f"viewer tables {size(document.get('viewer_bytes'))}")
+    return parts
+
+
 def deletion_parts(document):
     """The open and the last finished deletion request of a PASS line (nothing for a report without them)."""
     parts = []
@@ -458,6 +522,8 @@ def archive_line(document, rc, copy_reason=None, incident=None, wait_minutes=DEL
                 names = [str(name) for name in document.get("receipts_not_copied") or []]
                 texts.append(f"{code}: the purge receipt of {', '.join(names) or 'a finished run'} is missing or differs"
                              " in the copy folder; the next archive.sh start copies it again")
+            elif code == "view_not_closed":
+                texts.append(view_not_closed_text(document))
             else:
                 texts.append(code)
         return line("FAIL", "archival_proposal", "; ".join(texts))
@@ -481,6 +547,7 @@ def archive_line(document, rc, copy_reason=None, incident=None, wait_minutes=DEL
     parts.append(f"archive folder {gib(archive_dir.get('free_bytes'))} free")
     if copy_dir:
         parts.append(f"copy folder {gib(copy_dir.get('free_bytes'))} free")
+    parts.extend(view_parts(document))
     parts.extend(deletion_parts(document))
     return line("PASS", "archival_proposal", "; ".join(parts))
 

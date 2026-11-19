@@ -1,6 +1,7 @@
 """The host job of Movement-history archival (Phase 16, history archival design §5, §7;
 build step 1: runs without deletion; build step 2: the purge; build step 3: permanent
-deletion requests, design §6.3 and D17; build step 4: automatic runs, design §6.2).
+deletion requests, design §6.3 and D17; build step 4: automatic runs, design §6.2;
+build step 5: viewing an archive, design §9.3 and D16).
 
 ``python -m app.cli history-archive <command>`` runs these steps for the host
 script ``deploy/production/archive.sh``, as the maintenance database role
@@ -103,7 +104,20 @@ Commands (each prints one JSON report; ``JobReport``):
   approval, longer than the waiting limit of the settings, a failed last run
   (and one that failed because its authority was no longer valid), a
   standing authorization that is no longer valid while automatic runs are
-  on, and a purge receipt missing from the copy folder are findings.
+  on, and a purge receipt missing from the copy folder are findings;
+- ``load-view --view N`` and ``close-view --view N`` (build step 5) — a
+  REQUESTED view of an archive is loaded into the viewer tables after every
+  file of its archive folder was checked against its ``SHA256SUMS`` and the
+  run's manifest SHA-256 (OPEN); a view a person closed (CLOSING), or an
+  OPEN view whose days have run out, loses its loaded rows (CLOSED). Both
+  work in batches, each one transaction marked as the view's
+  (``partflow.archive_view_id``), and never touch a live table. ``settings``
+  reports the views the job has work for (``viewing_pending``), ``next``
+  hands that work out after the deletion work and before the run work
+  (``close_view``, then ``load_view``), ``recover`` removes the rows of a
+  view a stopped start left LOADING and makes it FAILED, and ``status``
+  reports the views not finished, the viewer tables' space and a view the
+  job could not close (``view_not_closed``).
 
 The purge (design §7.5) works in batches of whole components, at most the
 Movements and Part Numbers per batch of the settings (a larger component
@@ -185,25 +199,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, NamedTuple, cast
 
-from sqlalchemy import Connection, Engine, RowMapping, Table, insert, select, text, update
+from sqlalchemy import Connection, Engine, RowMapping, Table, func, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 
-from app.application import backups, history_archive, permanent_deletion, system_status
+from app.application import (
+    backups,
+    history_archive,
+    history_archive_views,
+    permanent_deletion,
+    system_status,
+)
 from app.application.migration import RunError, is_connection_failure
 from app.application.part_numbers import acquire_part_number_locks
 from app.core.config import get_settings
 from app.domain.enums import (
+    AuditEntityType,
     AuditEventType,
     DeletionRequestState,
     HistoryArchiveRunResult,
     HistoryArchiveRunState,
     HistoryArchiveRunTrigger,
+    HistoryArchiveViewState,
     MovementType,
     Permission,
 )
 from app.infrastructure import archive_files, backup_files
 from app.infrastructure.models import (
+    ARCHIVE_VIEW_NAME_KINDS,
+    ARCHIVE_VIEWER_TABLES,
     DELETION_REQUEST_FINAL_STATES,
+    ArchiveViewMovement,
     DeletionRequest,
     HistoryArchivedFlow,
     HistoryArchiveRun,
@@ -256,8 +281,10 @@ EXIT_RUN_FAILED: Final = 3
 _RUNS: Final = cast(Table, HistoryArchiveRun.__table__)
 _RECORDS: Final = cast(Table, HistoryArchivedFlow.__table__)
 _REQUESTS: Final = cast(Table, DeletionRequest.__table__)
+_VIEWS: Final = history_archive_views.VIEWS
 _STREAM: Final = {"stream_results": True, "yield_per": 5000}
 _STATE = HistoryArchiveRunState
+_VIEW = HistoryArchiveViewState
 
 _MESSAGES: Final = {
     "configuration_invalid": (
@@ -307,6 +334,8 @@ class JobReport:
     run_started: bool = False
     #: The permanent deletion request the command worked on (build step 3).
     request_id: int | None = None
+    #: The view of an archive the command worked on (build step 5).
+    view_id: int | None = None
 
 
 class _Refused(Exception):
@@ -357,6 +386,7 @@ def job_document(report: JobReport) -> dict[str, object]:
         "duration_ms": int((finished - report.started_at).total_seconds() * 1000),
         "run_id": report.run_id,
         "request_id": report.request_id,
+        "view_id": report.view_id,
         "state": report.state,
         **report.details,
         "error": (
@@ -371,6 +401,8 @@ def job_summary(report: JobReport) -> str:
     run = f" run {report.run_id}" if report.run_id is not None else ""
     if report.request_id is not None:
         run += f" deletion request {report.request_id}"
+    if report.view_id is not None:
+        run += f" view {report.view_id}"
     state = f" ({report.state})" if report.state is not None else ""
     message = f": {report.error.message}" if report.error is not None else ""
     return f"history-archive {report.command}:{run} {report.result}{state}{message}"
@@ -573,15 +605,23 @@ def _command(
     *,
     run_id: int | None = None,
     request_id: int | None = None,
+    view_id: int | None = None,
     fail_run: FailRun = _fail_run,
 ) -> JobReport:
     """Run one command; a refusal, a failed run and any error become a complete report.
 
     ``fail_run`` makes the run — or, for a command on a deletion request
-    (``request_id``), the request — FAILED (the purge's also writes the
-    receipt of what it deleted so far).
+    (``request_id``) or a view (``view_id``), the request or the view —
+    FAILED (the purge's also writes the receipt of what it deleted so far;
+    a view's first removes what its load wrote).
     """
-    report = JobReport(command=command, started_at=_now(), run_id=run_id, request_id=request_id)
+    report = JobReport(
+        command=command,
+        started_at=_now(),
+        run_id=run_id,
+        request_id=request_id,
+        view_id=view_id,
+    )
     if engine is None:
         return _fail(
             report, "configuration_invalid", _MESSAGES["configuration_invalid"], EXIT_COULD_NOT_RUN
@@ -601,6 +641,8 @@ def _command(
             deleted = (
                 "Whole components only were deleted; the purge receipt lists them."
                 if report.state == _STATE.PURGING and report.request_id is None
+                else "The rows it had loaded were removed; open the run for viewing again."
+                if report.view_id is not None
                 else "Nothing was deleted."
             )
             return _record_failure(
@@ -630,8 +672,15 @@ def _record_failure(
     exc: BaseException | None,
     fail_run: FailRun,
 ) -> JobReport:
-    subject = report.run_id if report.run_id is not None else report.request_id
-    if subject is None:  # pragma: no cover - every failing command names its run or request
+    subject = next(
+        (
+            value
+            for value in (report.run_id, report.request_id, report.view_id)
+            if value is not None
+        ),
+        None,
+    )
+    if subject is None:  # pragma: no cover - every failing command names its subject
         return _fail(report, "internal_error", reason, EXIT_COULD_NOT_RUN, exc)
     try:
         state = fail_run(engine, subject, reason, report.command)
@@ -644,7 +693,13 @@ def _record_failure(
         return _fail(report, "run_failed", reason, EXIT_RUN_FAILED, exc)
     # The run had already ended on its own (a purge that completed before its
     # lock connection was lost, say): it did not fail.
-    what = f"Run {subject}" if report.run_id is not None else f"Deletion request {subject}"
+    what = (
+        f"Run {subject}"
+        if report.run_id is not None
+        else f"Deletion request {subject}"
+        if report.request_id is not None
+        else f"View {subject}"
+    )
     logger.warning(
         "history-archive %s: %s is %s; the error after it is not its failure: %s",
         report.command,
@@ -654,13 +709,14 @@ def _record_failure(
     )
     if report.exit_code == EXIT_DONE:
         return _finish(report, report.result, EXIT_DONE)
-    return _fail(
-        report,
-        "outcome_unknown",
-        f"{what} is {state}; the command stopped after that on an error. {reason}",
-        EXIT_COULD_NOT_RUN,
-        exc,
-    )
+    if report.view_id is not None:
+        # A view that is not FAILED kept its rows (an OPEN view stays readable): the
+        # reason's "the rows it had loaded were removed" is not true of it.
+        cause = "" if exc is None else f" ({type(exc).__name__})"
+        message = f"{what} is {state} now; the command stopped on an error{cause}. See the job log."
+    else:
+        message = f"{what} is {state}; the command stopped after that on an error. {reason}"
+    return _fail(report, "outcome_unknown", message, EXIT_COULD_NOT_RUN, exc)
 
 
 #: SQLSTATEs of a statement the database refused only for the moment
@@ -692,9 +748,12 @@ def is_transient(exc: BaseException) -> bool:
 
 
 def _stays_open(report: JobReport) -> bool:
-    """A transient error leaves the work open: a PURGING run, or a deletion under way."""
+    """A transient error leaves the work open: a PURGING run, a deletion under
+    way, or a view being loaded or closed."""
     if report.request_id is not None:
         return report.run_started and report.state == DeletionRequestState.RUNNING
+    if report.view_id is not None:
+        return report.state in (_VIEW.LOADING, _VIEW.CLOSING)
     return report.state == _STATE.PURGING
 
 
@@ -716,6 +775,19 @@ def _interrupted(report: JobReport, exc: BaseException) -> JobReport:
             f" last ({type(exc).__name__}). It stays RUNNING: its one transaction was rolled"
             " back, so nothing was deleted, and the next start of the job makes it FAILED."
             " Request the deletion again.",
+            exc,
+        )
+        return _finish(report, "interrupted", EXIT_COULD_NOT_RUN)
+    if report.view_id is not None:
+        report.error = RunError(
+            "view_interrupted",
+            f"View {report.view_id} stopped loading on a database error that does not last"
+            f" ({type(exc).__name__}). It stays LOADING: the next start of the job removes the"
+            " rows it loaded and makes it FAILED. Open the run for viewing again."
+            if report.state == _VIEW.LOADING
+            else f"View {report.view_id} stopped closing on a database error that does not last"
+            f" ({type(exc).__name__}). It stays CLOSING: the next start of the job removes the"
+            " rest of its rows.",
             exc,
         )
         return _finish(report, "interrupted", EXIT_COULD_NOT_RUN)
@@ -749,12 +821,13 @@ def _timed_out(exc: DBAPIError) -> bool:
 
 def settings(engine: Engine | None, folders: JobFolders) -> JobReport:
     """What the host script needs at every start: the Start minute of the hourly
-    work, and whether a deletion request is open (the cheap check of every
-    start: no job lock, no hash, no file).
+    work, whether a deletion request is open, and whether a view of an archive
+    waits for the job (the cheap check of every start: no job lock, no hash,
+    no file).
 
     ``archive.sh`` runs it every 5 minutes, so it is bounded as ``python -m
     app.cli status`` is (``system_status``): the CLI's engine has its connect
-    timeout, and the two reads run in one READ ONLY transaction with its
+    timeout, and its reads run in one READ ONLY transaction with its
     statement and lock timeouts. A database that does not answer in time ends
     the command as could not run (exit 2, ``database_unavailable``), so the
     starts of a hung or locked database never pile up.
@@ -775,6 +848,7 @@ def settings(engine: Engine | None, folders: JobFolders) -> JobReport:
                 )
                 stored = history_archive.read_settings(connection)
                 request = permanent_deletion.open_request(connection)
+                views, view_settings = history_archive_views.pending_views(connection, _now())
         except DBAPIError as exc:
             if not _timed_out(exc):
                 raise
@@ -795,6 +869,17 @@ def settings(engine: Engine | None, folders: JobFolders) -> JobReport:
                 "deletion_request": (
                     None if request is None else permanent_deletion.request_summary(request)
                 ),
+                # Viewing an archive (build step 5): a view to load, to close
+                # (closed by a person, or its days ran out), or a load the
+                # previous start left (``recover`` removes it).
+                "viewing_pending": bool(views),
+                "pending_views": [
+                    {
+                        **history_archive_views.view_summary(pending.view, view_settings),
+                        "action": pending.action,
+                    }
+                    for pending in views
+                ],
             }
         )
         report.result, report.exit_code = "read", EXIT_DONE
@@ -989,7 +1074,8 @@ _DELETION_ACTIONS: Final = {
 
 
 def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
-    """The work the job must do now: an open deletion request first, then the
+    """The work the job must do now: an open deletion request first, then a view
+    of an archive to close or to load (``close_view``, ``load_view``), then the
     run the job must work on, and what to run for it.
 
     A deletion request: ``start_deletion`` while it is APPROVED, and
@@ -1025,6 +1111,7 @@ def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
             action = _DELETION_ACTIONS[str(request["state"])]
             report.details["run"] = None
             report.details["request"] = permanent_deletion.request_summary(request)
+            report.details["view"] = None
             if action == "deletion_backup":
                 report.details["backup"] = {
                     "kind": PRE_PURGE_KIND,
@@ -1035,6 +1122,24 @@ def next_run(engine: Engine | None, folders: JobFolders) -> JobReport:
         report.details["request"] = (
             None if request is None else permanent_deletion.request_summary(request)
         )
+        # Viewing an archive (build step 5), after the deletion work and before
+        # the run work: closing first (it frees space), then a load. A LOADING
+        # view is the next start's ``recover``. Like an APPROVED deletion
+        # request, the work waits while the open run is RUNNING between its
+        # steps of this start.
+        with engine.connect() as connection:
+            views, view_settings = history_archive_views.pending_views(connection, _now())
+        work_on = next((pending for pending in views if pending.action != "recover"), None)
+        report.details["view"] = (
+            None
+            if work_on is None
+            else history_archive_views.view_summary(work_on.view, view_settings)
+        )
+        if work_on is not None and (open_run is None or open_run["state"] != _STATE.RUNNING):
+            report.view_id, report.state = int(work_on.view["id"]), str(work_on.view["state"])
+            report.details["run"] = None
+            report.result, report.exit_code = work_on.action, EXIT_DONE
+            return
         with engine.connect() as connection:
             run = _open_run(connection)
             action = _next_action(run, folders)
@@ -1073,7 +1178,11 @@ def status(engine: Engine | None, folders: JobFolders) -> JobReport:
     it until the approval setting is saved again), and the purge receipt of
     a run the job copied off the host that is missing (or differs) beside
     the archive's copy in a usable copy folder (``receipt_not_copied``; the
-    next ``recover`` copies it again).
+    next ``recover`` copies it again). Viewing an archive (build step 5): the
+    views not finished with their loaded counts, the disk space of the viewer
+    tables, and a view open longer than its days, or CLOSING, for more than
+    ``history_archive_views.CLOSE_GRACE`` (``view_not_closed``: the job could
+    not close it).
     """
 
     def work(engine: Engine, report: JobReport) -> None:
@@ -1145,6 +1254,43 @@ def status(engine: Engine | None, folders: JobFolders) -> JobReport:
         report.details["last_finished_deletion_request"] = (
             None if last_request is None else permanent_deletion.request_summary(last_request)
         )
+        # Viewing an archive (build step 5): the views not finished, the space
+        # of the viewer tables, and a view the job could not close in time.
+        with engine.connect() as connection:
+            view_settings = history_archive_views.read_view_settings(connection)
+            views = (
+                connection.execute(
+                    select(_VIEWS)
+                    .where(
+                        _VIEWS.c.state.in_(
+                            (_VIEW.REQUESTED, _VIEW.LOADING, _VIEW.OPEN, _VIEW.CLOSING)
+                        )
+                    )
+                    .order_by(_VIEWS.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            viewer_bytes = history_archive.viewer_bytes(connection)
+        open_views: list[dict[str, Any]] = []
+        for view in views:
+            summary = history_archive_views.view_summary(view, view_settings)
+            summary["age_seconds"] = int((moment - view["requested_at"]).total_seconds())
+            open_views.append(summary)
+        not_closed = [
+            int(view["id"])
+            for view in views
+            if history_archive_views.unclosed(view, view_settings.days, moment)
+        ]
+        if not_closed:
+            findings.append("view_not_closed")
+        report.details["open_views"] = open_views
+        report.details["views_not_closed"] = not_closed
+        report.details["viewer_bytes"] = viewer_bytes
+        report.details["view_settings"] = {
+            "days": view_settings.days,
+            "max_loaded": view_settings.max_loaded,
+        }
         report.details["automatic_runs"] = {
             "enabled": automatic.enabled,
             "approval_required": automatic.approval_required,
@@ -1333,8 +1479,12 @@ _STALE_REQUEST_REASON: Final = (
 
 
 def recover(engine: Engine | None, folders: JobFolders) -> JobReport:
-    """Fail stale RUNNING runs and deletion requests; clean up after finished runs;
-    never touch a PURGING run.
+    """Fail stale RUNNING runs and deletion requests and stale loads of views;
+    clean up after finished runs; never touch a PURGING run.
+
+    A view found LOADING was left by a stopped start (or comes back with a
+    restore of a backup taken while it loaded): the rows it loaded are
+    removed, in batches, and it becomes FAILED.
 
     A RUNNING run found here is stale: nothing else holds the job's lock (or
     the database was restored from the pre-purge backup, which is taken while
@@ -1404,6 +1554,9 @@ def recover(engine: Engine | None, folders: JobFolders) -> JobReport:
                     for row in connection.execute(select(_RUNS.c.id, _RUNS.c.state))
                 }
                 receipts = _copied_receipts(connection)
+            # A view found LOADING (build step 5): its rows are removed, in
+            # batches, and it becomes FAILED.
+            failed_views = _recover_views(engine)
             removed: list[str] = []
             kept: list[str] = []
             for root in (archive_dir, folders.copy_dir):
@@ -1422,6 +1575,7 @@ def recover(engine: Engine | None, folders: JobFolders) -> JobReport:
             {
                 "failed_run_ids": failed,
                 "failed_request_ids": failed_requests,
+                "failed_view_ids": failed_views,
                 "removed_partial": removed,
                 "kept_partial": kept,
                 "copied_receipts": copied,
@@ -1429,7 +1583,9 @@ def recover(engine: Engine | None, folders: JobFolders) -> JobReport:
             }
         )
         report.result = (
-            "recovered" if failed or failed_requests or removed or copied else "nothing_to_recover"
+            "recovered"
+            if failed or failed_requests or failed_views or removed or copied
+            else "nothing_to_recover"
         )
         report.exit_code = EXIT_DONE
 
@@ -3780,6 +3936,739 @@ def delete_request(
         return _fail_request(evidence[-1] if evidence else None)(engine, subject, reason, command)
 
     return _command("delete", engine, work, request_id=request_id, fail_run=fail)
+
+
+# ---------------------------------------------------------------------------
+# Viewing an archive (build step 5; design D16 and §9.3)
+# ---------------------------------------------------------------------------
+
+#: The transaction-local setting that names the view the job loads or closes:
+#: the viewer tables' guards admit its rows only, and the views' guard its
+#: transitions only.
+VIEW_SETTING: Final = "partflow.archive_view_id"
+#: Lines of ``movements.jsonl.gz`` per load batch (one transaction each).
+VIEW_MOVEMENT_BATCH: Final = 50_000
+#: Rows per load batch of the other files (one transaction each).
+VIEW_ROW_BATCH: Final = 10_000
+#: Rows per batch when a view's rows are removed (one transaction each).
+VIEW_REMOVE_BATCH: Final = 50_000
+#: Why ``recover`` fails a view it finds LOADING.
+_STALE_VIEW_REASON: Final = (
+    "The host job stopped while it loaded this view (found by the next start of the job, also"
+    " after a restore of a backup taken meanwhile). The rows it had loaded were removed; open"
+    " the run for viewing again."
+)
+#: The key column of each section of ``context.json`` (``_CONTEXT_TABLES``).
+_NAME_KEYS: Final = {name: key for name, _table, key, _columns in _CONTEXT_TABLES}
+#: The columns of a Movement, as ``movements.jsonl.gz`` holds them, loaded as they
+#: are: every column of the viewer table but its view (it mirrors ``part_movements``).
+_MOVEMENT_COLUMNS: Final = tuple(
+    column.name for column in ArchiveViewMovement.__table__.columns if column.name != "view_id"
+)
+#: The staging table of a load's Movement lines: each line goes in verbatim
+#: (COPY in CSV format with a quote and a delimiter that canonical JSON never
+#: holds unescaped), and the database turns it into a row.
+_STAGE: Final = "archive_view_lines"
+_CREATE_STAGE: Final = (
+    f"CREATE TEMPORARY TABLE IF NOT EXISTS {_STAGE} (line jsonb NOT NULL) ON COMMIT DELETE ROWS"
+)
+_COPY_LINES: Final = (
+    f"COPY {_STAGE} (line) FROM STDIN WITH (FORMAT csv, QUOTE E'\\x01', DELIMITER E'\\x02')"
+)
+_INSERT_MOVEMENTS: Final = (
+    "INSERT INTO archive_view_movements (view_id, "
+    + ", ".join(_MOVEMENT_COLUMNS)
+    + ") SELECT CAST(:view AS integer), "
+    + ", ".join(f"r.{column}" for column in _MOVEMENT_COLUMNS)
+    + f" FROM pg_temp.{_STAGE} s"
+    " CROSS JOIN LATERAL jsonb_populate_record(NULL::archive_view_movements, s.line) r"
+)
+
+
+def _mark_view(connection: Connection, view_id: int) -> None:
+    connection.execute(
+        text("SELECT set_config(:name, :value, true)"),
+        {"name": VIEW_SETTING, "value": str(view_id)},
+    )
+
+
+def _view_row(connection: Connection, view_id: int, *, lock: bool) -> RowMapping | None:
+    query = select(_VIEWS).where(_VIEWS.c.id == view_id)
+    if lock:
+        query = query.with_for_update()
+    return connection.execute(query).mappings().one_or_none()
+
+
+def _change_view(
+    connection: Connection, view: RowMapping, command: str, **values: object
+) -> RowMapping:
+    """The job's change of a view (marked as its own), with its audit row (no RETURNING)."""
+    _mark_view(connection, int(view["id"]))
+    after = (
+        connection.execute(
+            update(_VIEWS).where(_VIEWS.c.id == view["id"]).values(**values).returning(*_VIEWS.c)
+        )
+        .mappings()
+        .one()
+    )
+    connection.execute(
+        text(
+            "INSERT INTO audit_events (event_type, entity_type, entity_id, occurred_at,"
+            " before_data, after_data, metadata) VALUES (:event_type, :entity_type, :entity_id,"
+            " now(), CAST(:before AS jsonb), CAST(:after AS jsonb), CAST(:metadata AS jsonb))"
+        ),
+        {
+            "event_type": AuditEventType.UPDATED.value,
+            "entity_type": AuditEntityType.HISTORY_ARCHIVE_VIEW.value,
+            "entity_id": str(after["id"]),
+            "before": json.dumps(history_archive_views.view_snapshot(view)),
+            "after": json.dumps(history_archive_views.view_snapshot(after)),
+            "metadata": json.dumps({"source": "maintenance", "command": command}),
+        },
+    )
+    return after
+
+
+def _remove_view_rows(engine: Engine, view_id: int) -> dict[str, int]:
+    """Delete every row of a LOADING or CLOSING view, in batches (each one transaction,
+    marked as the view's: the viewer tables' guards judge every row)."""
+    removed: dict[str, int] = {}
+    with engine.connect() as connection:
+        for table in ARCHIVE_VIEWER_TABLES:
+            total = 0
+            while True:
+                with connection.begin():
+                    _mark_view(connection, view_id)
+                    deleted = connection.execute(
+                        text(
+                            f"DELETE FROM {table} WHERE ctid = ANY(ARRAY(SELECT ctid FROM {table}"
+                            " WHERE view_id = :view LIMIT :limit))"
+                        ),
+                        {"view": view_id, "limit": VIEW_REMOVE_BATCH},
+                    ).rowcount
+                total += deleted
+                if deleted < VIEW_REMOVE_BATCH:
+                    break
+            removed[table] = total
+    return removed
+
+
+def _fail_view(
+    engine: Engine,
+    view_id: int,
+    reason: str,
+    command: str,
+    report: JobReport | None = None,
+) -> str | None:
+    """A view command's ``fail_run``: a REQUESTED or LOADING view loses what its load
+    wrote and becomes FAILED; returns its state (an OPEN or CLOSING view stays). With
+    ``report``, the report's ``view`` becomes the FAILED view."""
+    with engine.connect() as connection:
+        view = _view_row(connection, view_id, lock=False)
+    if view is None:
+        return None
+    if view["state"] not in (_VIEW.REQUESTED, _VIEW.LOADING):
+        return str(view["state"])
+    if view["state"] == _VIEW.LOADING:
+        _remove_view_rows(engine, view_id)
+    with engine.connect() as connection, connection.begin():
+        current = _view_row(connection, view_id, lock=True)
+        if current is None or current["state"] not in (_VIEW.REQUESTED, _VIEW.LOADING):
+            return None if current is None else str(current["state"])
+        after = _change_view(
+            connection,
+            current,
+            command,
+            state=_VIEW.FAILED.value,
+            failure_reason=reason[:2000],
+            finished_at=func.now(),
+        )
+        if report is not None:
+            _view_report(report, after, history_archive_views.read_view_settings(connection))
+    return str(after["state"])
+
+
+def _recover_views(engine: Engine) -> list[int]:
+    """Every view found LOADING: its rows removed, FAILED (``recover``, under the job lock)."""
+    with engine.connect() as connection:
+        loading = [
+            int(value)
+            for value in connection.execute(
+                select(_VIEWS.c.id).where(_VIEWS.c.state == _VIEW.LOADING).order_by(_VIEWS.c.id)
+            ).scalars()
+        ]
+    failed: list[int] = []
+    for view_id in loading:
+        if _fail_view(engine, view_id, _STALE_VIEW_REASON, "recover") == _VIEW.FAILED:
+            failed.append(view_id)
+    return failed
+
+
+def _view_for(engine: Engine, report: JobReport, view_id: int) -> RowMapping:
+    with engine.connect() as connection:
+        view = _view_row(connection, view_id, lock=False)
+    if view is None:
+        raise _Refused("unknown_view", f"There is no archive view {view_id}. Nothing was changed.")
+    report.state = str(view["state"])
+    return view
+
+
+def _view_report(
+    report: JobReport, view: RowMapping, settings: history_archive_views.ViewSettings
+) -> None:
+    report.state = str(view["state"])
+    report.details["view"] = history_archive_views.view_summary(view, settings)
+
+
+def _start_view(
+    engine: Engine, report: JobReport, view_id: int
+) -> tuple[RowMapping, RowMapping] | None:
+    """REQUESTED → LOADING (its own transaction): (the view, its run); or REQUESTED →
+    FAILED when the setting no longer allows another loaded run (None)."""
+    with engine.connect() as connection, connection.begin():
+        view = _view_row(connection, view_id, lock=True)
+        if view is None:
+            raise _Refused(
+                "unknown_view", f"There is no archive view {view_id}. Nothing was changed."
+            )
+        if view["state"] != _VIEW.REQUESTED:
+            raise _Refused(
+                "wrong_state",
+                f"View {view_id} is {view['state']}; only a REQUESTED view can be loaded."
+                " Nothing was changed.",
+            )
+        run = _run_row(connection, int(view["run_id"]), lock=False)
+        if run is None:  # pragma: no cover - a foreign key names the run
+            raise _Refused("unknown_run", "The view's run disappeared. Nothing was changed.")
+        settings = history_archive_views.read_view_settings(connection)
+        loaded = int(
+            connection.execute(
+                select(func.count())
+                .select_from(_VIEWS)
+                .where(
+                    _VIEWS.c.id != view_id,
+                    _VIEWS.c.state.in_((_VIEW.LOADING, _VIEW.OPEN)),
+                )
+            ).scalar_one()
+        )
+        if loaded >= settings.max_loaded:
+            reason = (
+                f"Run {run['id']} was not loaded for viewing: {loaded} loaded"
+                f" {'run is' if loaded == 1 else 'runs are'} open already, and History archival &"
+                f" purge allows {settings.max_loaded} at once now. Close a view, then open run"
+                f" {run['id']} for viewing again."
+            )
+            after = _change_view(
+                connection,
+                view,
+                "load-view",
+                state=_VIEW.FAILED.value,
+                failure_reason=reason,
+                finished_at=func.now(),
+            )
+            _view_report(report, after, settings)
+            report.error = RunError("run_failed", reason)
+            report.result, report.exit_code = "failed", EXIT_RUN_FAILED
+            return None
+        after = _change_view(
+            connection, view, "load-view", state=_VIEW.LOADING.value, started_at=func.now()
+        )
+        _view_report(report, after, settings)
+        return after, run
+
+
+#: What identifies a file as the check saw it: device, inode, size and modification
+#: time (``os.lstat``, so a file replaced by a link differs too).
+_FileStamp = tuple[int, int, int, int]
+
+
+def _file_stamp(path: Path) -> _FileStamp:
+    status = os.lstat(path)
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+
+
+class _CheckedArchive(NamedTuple):
+    manifest: dict[str, Any]
+    #: Every archive file as the check found it, taken before it was hashed.
+    stamps: dict[str, _FileStamp]
+
+
+def _view_files(folder: Path, run: RowMapping) -> _CheckedArchive:
+    """Every file of the published archive against ``SHA256SUMS``, the run's manifest
+    SHA-256 and the manifest's own entries (each file hashed once); returns the manifest
+    and each file's stamp, which ``_unchanged`` compares again after the load. Nothing
+    is loaded before this holds: a missing folder or file, or any mismatch, fails the
+    view."""
+    name = folder.name
+    restore = (
+        " Nothing was loaded; restore the archive folder from its off-host copy, then open"
+        " the run for viewing again."
+    )
+    if not backup_files.is_real_directory(folder):
+        raise _RunFailed(f"The archive folder {name} of run {run['id']} is missing.{restore}")
+    names = backup_files.entry_names(folder)
+    missing = [file for file in ARCHIVE_FILES if file not in names]
+    if missing:
+        raise _RunFailed(f"The archive folder {name} is missing {', '.join(missing)}.{restore}")
+    if tuple(names) != ARCHIVE_FILES:
+        extra = sorted(set(names) - set(ARCHIVE_FILES))
+        raise _RunFailed(
+            f"The archive folder {name} holds files that are not the archive's"
+            f" ({', '.join(extra)}): it was changed after its verification.{restore}"
+        )
+    stamps = {file: _file_stamp(folder / file) for file in ARCHIVE_FILES}
+    try:
+        sums = archive_files.read_sums(folder / SUMS_FILE)
+    except archive_files.SumsError as exc:
+        raise _RunFailed(f"{exc} in the archive folder {name}.{restore}") from exc
+    if set(sums) != set(ARCHIVE_FILES) - {SUMS_FILE}:
+        raise _RunFailed(f"SHA256SUMS of {name} does not list exactly the archive files.{restore}")
+    if sums[MANIFEST_FILE] != run["manifest_sha256"]:
+        raise _RunFailed(
+            f"manifest.json of {name} is not the manifest run {run['id']} verified (its SHA-256"
+            f" differs).{restore}"
+        )
+    digests: dict[str, backup_files.FileDigest] = {}
+    for file, expected in sorted(sums.items()):
+        digests[file] = archive_files.digest(folder / file)
+        if digests[file].sha256 != expected:
+            raise _RunFailed(
+                f"{file} of {name} does not match its SHA-256 in SHA256SUMS: the archive was"
+                f" changed after its verification.{restore}"
+            )
+    manifest: dict[str, Any] = json.loads(backup_files.read_bytes(folder / MANIFEST_FILE))
+    listed = manifest.get("files", {})
+    for file in (*DATA_FILES, CONTEXT_FILE, README_FILE):
+        entry = listed.get(file, {})
+        if entry.get("sha256") != sums[file] or entry.get("bytes") != digests[file].size:
+            raise _RunFailed(f"manifest.json of {name} does not describe {file}.{restore}")
+    return _CheckedArchive(manifest, stamps)
+
+
+def _unchanged(folder: Path, stamps: Mapping[str, _FileStamp]) -> None:
+    """Every archive file is still the one the check hashed: none was replaced, written
+    or removed while the job loaded it (its device, inode, size and modification time)."""
+    for file, stamp in sorted(stamps.items()):
+        try:
+            current: _FileStamp | None = _file_stamp(folder / file)
+        except FileNotFoundError:
+            current = None
+        if current != stamp:
+            raise _RunFailed(
+                f"{file} of {folder.name} changed while the job loaded it, so the rows it had"
+                " loaded were removed. Restore the archive folder from its off-host copy, then"
+                " open the run for viewing again."
+            )
+
+
+def _copy_rows(
+    connection: Connection,
+    view_id: int,
+    table: str,
+    columns: Sequence[str],
+    rows: Iterator[Sequence[object]],
+) -> int:
+    """COPY rows into a viewer table, ``VIEW_ROW_BATCH`` per transaction, each marked as
+    the view's (the table's statement guard judges every row of a batch)."""
+    statement = f"COPY {table} (view_id, {', '.join(columns)}) FROM STDIN"
+    count = 0
+    exhausted = False
+    while not exhausted:
+        written = 0
+        with connection.begin():
+            _mark_view(connection, view_id)
+            raw: Any = connection.connection.driver_connection
+            with raw.cursor() as cursor, cursor.copy(statement) as copy:
+                for row in rows:
+                    copy.write_row((view_id, *row))
+                    written += 1
+                    if written >= VIEW_ROW_BATCH:
+                        break
+                else:
+                    exhausted = True
+        count += written
+    return count
+
+
+class _LoadCounts(NamedTuple):
+    movements: int
+    flows: int
+    lineage_edges: int
+    assigned_routes: int
+    names: int
+
+
+def _name_rows(path: Path, demands: dict[int, int]) -> Iterator[tuple[object, ...]]:
+    """The rows of ``context.json`` as names; collects each demand line's Work Order."""
+    for section, row in archive_files.read_readable_rows(path):
+        if section not in ARCHIVE_VIEW_NAME_KINDS or not isinstance(row, dict):
+            raise _RunFailed(f"context.json holds an unknown section {section!r}.")
+        key = row.get(_NAME_KEYS[section])
+        if key is None:
+            raise _RunFailed(f"context.json has a row of {section} without its key.")
+        if section == "work_order_demands":
+            work_order = row.get("work_order_id")
+            if isinstance(work_order, int) and isinstance(key, int):
+                demands[key] = work_order
+        yield section, str(key), history_archive_views.json_text(row)
+
+
+def _lineage_rows(path: Path, parents: dict[int, list[int]]) -> Iterator[tuple[object, ...]]:
+    """The rows of ``lineage.jsonl.gz``; collects each flow's parents."""
+    for _line, value in archive_files.read_json_lines(path):
+        parent, child = int(value["parent_flow_id"]), int(value["child_flow_id"])
+        parents.setdefault(child, []).append(parent)
+        yield (
+            int(value["id"]),
+            value["relation"],
+            parent,
+            child,
+            value["device_event_id"],
+            value["created_at"],
+            bool(value["void"]),
+        )
+
+
+def _work_orders_of(
+    path: Path, parents: Mapping[int, list[int]], demands: Mapping[int, int]
+) -> Callable[[int], tuple[int, ...]]:
+    """Each flow's Work Orders: the one its release named (its record's demand line),
+    and those of every flow it was split or merged from (void edges too: an undone
+    split's Movements are still that Work Order's history). One pass over the flows
+    file for the releases; the lineage closure is computed on demand and kept."""
+    released: dict[int, int] = {}
+    for _line, value in archive_files.read_json_lines(path):
+        demand = value["record"].get("received_demand_id")
+        work_order = None if demand is None else demands.get(int(demand))
+        if work_order is not None:
+            released[int(value["flow"]["id"])] = work_order
+    known: dict[int, frozenset[int]] = {}
+    empty: frozenset[int] = frozenset()
+
+    def of(flow_id: int) -> tuple[int, ...]:
+        stack = [flow_id]
+        visiting: set[int] = set()
+        while stack:
+            current = stack[-1]
+            if current in known:
+                stack.pop()
+                continue
+            waiting = [parent for parent in parents.get(current, ()) if parent not in known]
+            if waiting:
+                if current in visiting:
+                    raise _RunFailed(
+                        f"The lineage of Quantity Flow {current} in lineage.jsonl.gz is a cycle."
+                    )
+                visiting.add(current)
+                stack.extend(waiting)
+                continue
+            found = set().union(*(known[parent] for parent in parents.get(current, ())))
+            if current in released:
+                found.add(released[current])
+            known[current] = frozenset(found) if found else empty
+            stack.pop()
+        return tuple(sorted(known[flow_id]))
+
+    return of
+
+
+def _flow_rows(
+    path: Path, work_orders_of: Callable[[int], tuple[int, ...]]
+) -> Iterator[tuple[object, ...]]:
+    """The rows of ``flows.jsonl.gz``: the flow, its record and its Work Orders."""
+    for _line, value in archive_files.read_json_lines(path):
+        flow, record = value["flow"], value["record"]
+        flow_id = int(flow["id"])
+        yield (
+            flow_id,
+            int(value["component_id"]),
+            flow["part_number"],
+            flow["status"],
+            int(flow["quantity"]),
+            flow["route_mode"],
+            flow.get("assigned_route_id"),
+            flow["created_at"],
+            flow.get("closed_at"),
+            record.get("received_demand_id"),
+            list(work_orders_of(flow_id)),
+            history_archive_views.json_text(flow),
+            history_archive_views.json_text(record),
+        )
+
+
+def _route_rows(path: Path) -> Iterator[tuple[object, ...]]:
+    """The rows of ``assigned_routes.jsonl.gz``: each route with its steps."""
+    for _line, value in archive_files.read_json_lines(path):
+        route = value["assigned_route"]
+        yield (
+            int(route["id"]),
+            route.get("source_route_template_id"),
+            route["created_at"],
+            history_archive_views.json_text(value["steps"]),
+        )
+
+
+def _load_movements(connection: Connection, view_id: int, path: Path) -> int:
+    """The Movements file, ``VIEW_MOVEMENT_BATCH`` lines per transaction: each line goes
+    into the staging table verbatim and the database turns it into a viewer row."""
+    with connection.begin():
+        connection.execute(text(_CREATE_STAGE))
+    lines = archive_files.raw_lines(path)
+    count = 0
+    exhausted = False
+    while not exhausted:
+        written = 0
+        with connection.begin():
+            _mark_view(connection, view_id)
+            raw: Any = connection.connection.driver_connection
+            with raw.cursor() as cursor, cursor.copy(_COPY_LINES) as copy:
+                for line in lines:
+                    copy.write(line)
+                    written += 1
+                    if written >= VIEW_MOVEMENT_BATCH:
+                        break
+                else:
+                    exhausted = True
+            if written:
+                inserted = connection.execute(text(_INSERT_MOVEMENTS), {"view": view_id}).rowcount
+                if inserted != written:  # pragma: no cover - one row per line
+                    raise _RunFailed(
+                        f"The load wrote {inserted} Movements for {written} lines of"
+                        f" {MOVEMENTS_FILE}."
+                    )
+        count += written
+    with connection.begin():
+        connection.execute(text(f"DROP TABLE IF EXISTS pg_temp.{_STAGE}"))
+    return count
+
+
+def _load_archive(engine: Engine, view_id: int, folder: Path) -> _LoadCounts:
+    """Every file of the checked archive into the viewer tables, each in batches."""
+    demands: dict[int, int] = {}
+    parents: dict[int, list[int]] = {}
+    with engine.connect() as connection:
+        names = _copy_rows(
+            connection,
+            view_id,
+            "archive_view_names",
+            ("kind", "key", "value"),
+            _name_rows(folder / CONTEXT_FILE, demands),
+        )
+        lineage = _copy_rows(
+            connection,
+            view_id,
+            "archive_view_lineage",
+            (
+                "id",
+                "relation",
+                "parent_flow_id",
+                "child_flow_id",
+                "device_event_id",
+                "created_at",
+                "void",
+            ),
+            _lineage_rows(folder / LINEAGE_FILE, parents),
+        )
+        flows = _copy_rows(
+            connection,
+            view_id,
+            "archive_view_flows",
+            (
+                "flow_id",
+                "component_id",
+                "part_number",
+                "status",
+                "quantity",
+                "route_mode",
+                "assigned_route_id",
+                "created_at",
+                "closed_at",
+                "received_demand_id",
+                "work_order_ids",
+                "flow",
+                "record",
+            ),
+            _flow_rows(
+                folder / FLOWS_FILE,
+                _work_orders_of(folder / FLOWS_FILE, parents, demands),
+            ),
+        )
+        routes = _copy_rows(
+            connection,
+            view_id,
+            "archive_view_routes",
+            ("assigned_route_id", "source_route_template_id", "created_at", "steps"),
+            _route_rows(folder / ROUTES_FILE),
+        )
+        movements = _load_movements(connection, view_id, folder / MOVEMENTS_FILE)
+    return _LoadCounts(movements, flows, lineage, routes, names)
+
+
+#: (count, table, manifest file) checked before a view opens.
+_LOADED_FILES: Final = (
+    ("movements", "archive_view_movements", MOVEMENTS_FILE),
+    ("flows", "archive_view_flows", FLOWS_FILE),
+    ("lineage_edges", "archive_view_lineage", LINEAGE_FILE),
+    ("assigned_routes", "archive_view_routes", ROUTES_FILE),
+    ("names", "archive_view_names", None),
+)
+
+
+def _open_loaded(
+    engine: Engine, view_id: int, counts: _LoadCounts, manifest: Mapping[str, Any]
+) -> tuple[RowMapping, history_archive_views.ViewSettings]:
+    """LOADING → OPEN once the rows in the database are exactly what the archive holds;
+    the view as it opened and the viewing settings, both read in that transaction, so
+    nothing reads the database after the view is OPEN (review of step 5, m2)."""
+    with engine.connect() as connection, connection.begin():
+        current = _view_row(connection, view_id, lock=True)
+        if current is None or current["state"] != _VIEW.LOADING:  # pragma: no cover - job lock
+            raise _Refused("wrong_state", f"View {view_id} changed meanwhile. Nothing was changed.")
+        settings = history_archive_views.read_view_settings(connection)
+        for key, table, file in _LOADED_FILES:
+            stored = int(
+                connection.execute(
+                    text(f"SELECT count(*) FROM {table} WHERE view_id = :view"), {"view": view_id}
+                ).scalar_one()
+            )
+            expected = getattr(counts, key)
+            listed = None if file is None else manifest.get("files", {}).get(file, {}).get("rows")
+            if stored != expected or (listed is not None and listed != expected):
+                raise _RunFailed(
+                    f"The load holds {stored} rows of {table}, read {expected}, and the manifest"
+                    f" lists {listed}. This is a defect to report."
+                )
+        opened = _change_view(
+            connection,
+            current,
+            "load-view",
+            state=_VIEW.OPEN.value,
+            opened_at=func.now(),
+            loaded_movements=counts.movements,
+            loaded_flows=counts.flows,
+            loaded_lineage_edges=counts.lineage_edges,
+            loaded_assigned_routes=counts.assigned_routes,
+            loaded_names=counts.names,
+        )
+    return opened, settings
+
+
+def load_view(engine: Engine | None, folders: JobFolders, view_id: int) -> JobReport:
+    """Load a REQUESTED view's archive into the viewer tables (design §9.3): OPEN.
+
+    REQUESTED → LOADING; every file of the run's published archive folder is
+    checked against ``SHA256SUMS``, the run's manifest SHA-256 and the
+    manifest (a missing folder or file, or any mismatch, fails the view with
+    nothing loaded); then the names of ``context.json``, the lineage, the
+    flows with their records and Work Orders, the Assigned Routes and the
+    Movements are loaded in batches, each one transaction marked as this
+    view's; the counts in the database must equal the archive's; LOADING →
+    OPEN. A failure removes what the load wrote and makes the view FAILED
+    (exit 3); so does a file of the folder that changed while it was loaded
+    (its device, inode, size or modification time against the check's). A
+    database error that does not last leaves it LOADING (exit 2
+    ``interrupted``) for the next start's ``recover``. A view the setting of
+    runs loaded at once no longer allows fails before it starts.
+    """
+    reports: list[JobReport] = []
+
+    def work(engine: Engine, report: JobReport) -> None:
+        reports.append(report)
+        archive_dir = _require_archive_dir(folders)
+        with _job_lock(engine):
+            started = _start_view(engine, report, view_id)
+            if started is None:
+                return
+            _view, run = started
+            report.run_started = True
+            name = str(run["archive_name"])
+            report.details["archive_name"] = name
+            folder = archive_dir / name
+            checked = _view_files(folder, run)
+            counts = _load_archive(engine, view_id, folder)
+            _unchanged(folder, checked.stamps)
+            after, settings = _open_loaded(engine, view_id, counts, checked.manifest)
+            # OPEN from here on: an error after this point never says the view stays
+            # LOADING (``_record_failure`` reports the view as it is).
+            report.state = str(after["state"])
+            _view_report(report, after, settings)
+            report.details["loaded"] = counts._asdict()
+            report.result, report.exit_code = "loaded", EXIT_DONE
+
+    def fail(engine: Engine, subject: int, reason: str, command: str) -> str | None:
+        # The report's ``view`` becomes the FAILED view (not the LOADING one it showed).
+        return _fail_view(engine, subject, reason, command, reports[-1] if reports else None)
+
+    return _command("load-view", engine, work, view_id=view_id, fail_run=fail)
+
+
+def close_view(engine: Engine | None, folders: JobFolders, view_id: int) -> JobReport:
+    """Remove the loaded rows of a view a person closed (CLOSING), or of an OPEN view
+    whose days have run out (→ CLOSING first), in batches; then CLOSED.
+
+    A database error leaves the view CLOSING (exit 2): the next start goes on
+    with the rows that are left.
+    """
+
+    def work(engine: Engine, report: JobReport) -> None:
+        with _job_lock(engine):
+            _view_for(engine, report, view_id)
+            with engine.connect() as connection, connection.begin():
+                settings = history_archive_views.read_view_settings(connection)
+                current = _view_row(connection, view_id, lock=True)
+                if current is None:  # pragma: no cover - views are never deleted
+                    raise _Refused("unknown_view", f"There is no archive view {view_id}.")
+                if current["state"] == _VIEW.OPEN:
+                    if not history_archive_views.expired(current, settings.days, _now()):
+                        until = history_archive_views.open_until(
+                            current["opened_at"], settings.days
+                        )
+                        raise _Refused(
+                            "wrong_state",
+                            f"View {view_id} is open until {iso(until)} and nobody closed it."
+                            " Nothing was changed.",
+                        )
+                    current = _change_view(
+                        connection,
+                        current,
+                        "close-view",
+                        state=_VIEW.CLOSING.value,
+                        closing_started_at=func.now(),
+                    )
+                elif current["state"] != _VIEW.CLOSING:
+                    raise _Refused(
+                        "wrong_state",
+                        f"View {view_id} is {current['state']}; only a CLOSING view, or an OPEN"
+                        " view whose days have run out, is closed. Nothing was changed.",
+                    )
+            _view_report(report, current, settings)
+            removed = _remove_view_rows(engine, view_id)
+            with engine.connect() as connection, connection.begin():
+                current = _view_row(connection, view_id, lock=True)
+                if current is None or current["state"] != _VIEW.CLOSING:  # pragma: no cover
+                    raise _Refused("wrong_state", f"View {view_id} changed meanwhile.")
+                after = _change_view(
+                    connection,
+                    current,
+                    "close-view",
+                    state=_VIEW.CLOSED.value,
+                    finished_at=func.now(),
+                )
+            _view_report(report, after, settings)
+            report.details["removed"] = removed
+            report.result, report.exit_code = "closed", EXIT_DONE
+
+    return _command("close-view", engine, work, view_id=view_id, fail_run=_keep_view)
+
+
+def _keep_view(engine: Engine, view_id: int, reason: str, command: str) -> str | None:
+    """``close-view``'s ``fail_run``: a closing is never failed (a view ends CLOSED only
+    once its rows are gone, and the next start goes on with them), so this changes
+    nothing and returns the view's state (review of step 5, m4)."""
+    del reason, command
+    with engine.connect() as connection:
+        view = _view_row(connection, view_id, lock=False)
+    return None if view is None else str(view["state"])
 
 
 def environment_folders() -> JobFolders:

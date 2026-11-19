@@ -53,7 +53,7 @@ postgres_password, partflow_app_password and partflow_maintenance_password; the 
 (`--profile ops run --rm -T db-roles`) before its migrate, and backend connects as partflow_app. SM-17a/b use an empty
 partflow_app_password (backend no longer mounts postgres_password); new cases:
 - SM-17c: an empty postgres_password stops migrate and db-roles with configuration_invalid (exit 2, one JSON document).
-- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (39 tables).
+- SM-29: db-roles twice (created, then unchanged). SM-30: migrate applied the grants (45 tables, 29 sequences).
 - SM-31: every partflow-api session in pg_stat_activity is partflow_app.
 - SM-32: the privilege probe (DEPLOYMENT §3.1, one `sh -c` psql per table and statement) over the guarded tables, the
   two tables of Movement-history archival and the two of permanent deletion requests included; (archival step 2) the
@@ -62,7 +62,11 @@ partflow_app_password (backend no longer mounts postgres_password); new cases:
   DELETE of a row of work_orders, work_order_demands and audit_events outside a RUNNING deletion request; and
   (archival step 4) the run guard trg_history_archive_runs_guard_mutation refusing partflow_maintenance's INSERT of a
   manual (requested) run with P0001: the role holds INSERT on history_archive_runs for the automatic runs of
-  `history-archive evaluate` only, so the privilege check (42501) no longer refuses it.
+  `history-archive evaluate` only, so the privilege check (42501) no longer refuses it; and (archival step 5) the views
+  of an archive: partflow_app may update history_archive_views (UPDATE 0) but neither delete nor truncate it, and may
+  only read the five viewer tables (42501 for UPDATE, DELETE and TRUNCATE), and the statement guard
+  trg_archive_view_names_guard_insert refusing partflow_maintenance's INSERT into archive_view_names with P0001 outside
+  the load of the view it belongs to, even when the INSERT inserts no row.
 - SM-33: reconcile through backend: check (h) pass, connected as partflow_app (not a superuser).
 - SM-34: restore convergence: a --no-privileges dump restored into partflow_restore_s4, apply-grants, then (h) pass.
 - SM-35: the write flows through web (SM-6, SM-7..SM-9, SM-21, SM-36) pass as partflow_app.
@@ -117,14 +121,18 @@ FILE_TOO_LARGE_MESSAGE = "The file is larger than 1 MB. Split it into smaller fi
 EMPTY_PASSWORD_FILE_MESSAGE = "DATABASE_PASSWORD_FILE /run/secrets/partflow_app_password is empty."
 APP_ROLE = "partflow_app"
 ROLE_SECRETS = ("partflow_app_password", "partflow_maintenance_password")
-# SM-32: the guarded tables (P16-S4 SPEC section 3.2, the two tables of Movement-history archival and the two of
-# permanent deletion requests) and the cells the application database role may run (its classes: worker_sessions,
-# history_archive_runs and deletion_requests guarded update, assigned_route_steps no update, history_archived_flows read
-# only, deletion_request_rows append-only).
+# SM-32: the guarded tables (P16-S4 SPEC section 3.2, the two tables of Movement-history archival, the two of
+# permanent deletion requests, and the views of an archive with their five viewer tables) and the cells the
+# application database role may run (its classes: worker_sessions, history_archive_runs, deletion_requests and
+# history_archive_views guarded update, assigned_route_steps no update, history_archived_flows and the viewer tables
+# read only, deletion_request_rows append-only).
+VIEWER_TABLES = (
+    "archive_view_movements", "archive_view_flows", "archive_view_lineage", "archive_view_routes", "archive_view_names",
+)
 GUARDED_TABLES = (
     "part_movements", "audit_events", "machine_lifecycle_events", "quantity_flow_lineage", "work_order_allocations",
     "worker_sessions", "assigned_route_steps", "history_archive_runs", "history_archived_flows", "deletion_requests",
-    "deletion_request_rows",
+    "deletion_request_rows", "history_archive_views", *VIEWER_TABLES,
 )
 PROBE_STATEMENTS = {
     "UPDATE": "UPDATE {table} SET {column} = {column} WHERE false",
@@ -133,13 +141,17 @@ PROBE_STATEMENTS = {
 }
 # The column the UPDATE probe assigns to itself. It must exist, because PostgreSQL resolves the columns before it checks
 # the privilege; history_archived_flows has no id (its key is run_id, flow_id), deletion_request_rows neither (its key
-# is request_id, table_name, row_key).
-PROBE_UPDATE_COLUMNS = {"history_archived_flows": "run_id", "deletion_request_rows": "request_id"}
+# is request_id, table_name, row_key), and every viewer table has its view_id.
+PROBE_UPDATE_COLUMNS = {
+    "history_archived_flows": "run_id", "deletion_request_rows": "request_id",
+    **{table: "view_id" for table in VIEWER_TABLES},
+}
 PROBE_ALLOWED = {
     ("worker_sessions", "UPDATE"): "UPDATE 0",
     ("assigned_route_steps", "DELETE"): "DELETE 0",
     ("history_archive_runs", "UPDATE"): "UPDATE 0",
     ("deletion_requests", "UPDATE"): "UPDATE 0",
+    ("history_archive_views", "UPDATE"): "UPDATE 0",
 }
 # SM-32, archival step 2 (contract §1.5, §1.7): partflow_maintenance holds DELETE on part_movements, and the row guard
 # trg_part_movements_guard_delete refuses every Movement outside the purge of a PURGING run, for every role. A row
@@ -174,8 +186,17 @@ MANUAL_RUN_INSERT = (
     " (SELECT min(id) FROM users), 1, 1, 1, 0)"
 )
 MANUAL_RUN_GUARD_MESSAGE = "P0001: the maintenance role creates automatic history archive runs only"
+# SM-32, archival step 5 (contract B5 §1.4): partflow_maintenance holds INSERT on the viewer tables for the load of a
+# view, and their statement guards admit only the rows of the LOADING view that partflow.archive_view_id names. A
+# statement trigger fires even when no row is inserted, so the INSERT below, without the marker, passes the privilege
+# check and is refused by trg_archive_view_names_guard_insert with SQLSTATE P0001. The probe runs in a transaction that
+# is rolled back.
+VIEWER_INSERT = "INSERT INTO archive_view_names (view_id, kind, key, value) SELECT 1, 'areas', '1', '{}' WHERE false"
+VIEWER_GUARD_MESSAGE = ("P0001: archive_view_names rows are inserted only by the host job loading the view they belong"
+                        " to (LOADING)")
 RESTORE_DATABASE = "partflow_restore_s4"
-CLASSIFIED_TABLES = 39
+CLASSIFIED_TABLES = 45
+CLASSIFIED_SEQUENCES = 29
 MULTI_WORKER_STOP = "failed to start, stopping the parent process"
 TOKEN_PATTERN = re.compile(r"Setup token: ([A-Z2-7]{4}(?:-[A-Z2-7]{4})+)")
 IMPORT_HEADER = "Work Order Number,Part Number,Requested Quantity,Job Number,Due Date\r\n"
@@ -960,6 +981,8 @@ class Smoke:
             observed.update({"rc": self.first_migrate.returncode, "result": report.get("result"), "grants": grants})
             check(self.first_migrate.returncode == 0 and report.get("result") == "upgraded", "the first migrate did not upgrade")
             check(grants.get("status") == "applied" and grants.get("tables") == CLASSIFIED_TABLES, "migrate did not apply the grants")
+            check(grants.get("sequences") == CLASSIFIED_SEQUENCES,
+                  f"the grants of migrate counted {grants.get('sequences')} sequences, not {CLASSIFIED_SEQUENCES}")
         with self.case("SM-31") as observed:
             check(self.client.request("GET", "/api/health").status == 200, "health is not 200")
             result = self.owner_psql("SELECT usename FROM pg_stat_activity WHERE application_name = 'partflow-api'", "-At")
@@ -1019,6 +1042,19 @@ class Smoke:
                 "expected": "refused by trg_history_archive_runs_guard_mutation (P0001)",
                 "verdict": "refused" if MANUAL_RUN_GUARD_MESSAGE in result.stderr else "wrong",
                 "privilege_refused": "permission denied for table history_archive_runs" in result.stderr,
+                "psql_rc": result.returncode, "stderr": result.stderr.strip()[-300:],
+            }
+            # The statement guard of a viewer table (archival step 5): the maintenance role passes the privilege check of
+            # an INSERT into archive_view_names (it loads views), and the guard refuses it outside the load of a view,
+            # also when no row is inserted (P0001, not 42501).
+            script = ('psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=0 -v VERBOSITY=verbose -c BEGIN'
+                      ' -c "SET LOCAL ROLE partflow_maintenance"'
+                      f' -c "{VIEWER_INSERT}" -c ROLLBACK')
+            result = self.compose("exec", "-T", "db", "sh", "-c", script, check_rc=False, timeout=120)
+            cells["archive_view_names INSERT as partflow_maintenance outside the load of a view"] = {
+                "expected": "refused by trg_archive_view_names_guard_insert (P0001)",
+                "verdict": "refused" if VIEWER_GUARD_MESSAGE in result.stderr else "wrong",
+                "privilege_refused": "permission denied for table archive_view_names" in result.stderr,
                 "psql_rc": result.returncode, "stderr": result.stderr.strip()[-300:],
             }
             observed["cells"] = cells

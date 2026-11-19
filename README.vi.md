@@ -2,8 +2,8 @@
 
 > **Ngôn ngữ:** Đây là bản tiếng Việt của [`README.md`](./README.md). Bản tiếng
 > Anh là nguồn chuẩn (source of truth); khi hai bản khác nhau, bản tiếng Anh có
-> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `1874636` cộng các thay đổi
-> chưa commit ngày 2026-11-18.
+> hiệu lực. Đồng bộ với bản tiếng Anh tại commit `3cb40f2` cộng các thay đổi
+> chưa commit ngày 2026-11-19.
 >
 > Xem [mục lục tài liệu tiếng Việt](./docs/README.vi.md) và
 > [hướng dẫn triển khai](./docs/DEPLOYMENT.vi.md).
@@ -81,7 +81,9 @@ cách nói của người dùng:
   chính sách Due Soon, sao lưu (backup), và việc lưu trữ (archival) lịch sử
   Movement cũ (xuất ra các tệp lưu trữ đã kiểm tra, chép ra ngoài máy chủ, rồi
   xóa dọn (purge) khỏi database mà vẫn giữ mọi số lượng), được yêu cầu thủ công
-  hoặc, khi đã bật, do máy chủ đề xuất khi lịch sử vượt một giới hạn.
+  hoặc, khi đã bật, do máy chủ đề xuất khi lịch sử vượt một giới hạn. Bản
+  lưu trữ của một lần chạy đã hoàn tất có thể được mở để xem trong PartFlow
+  trong một số ngày đã đặt, tách biệt khỏi lịch sử đang dùng.
 - **Xóa vĩnh viễn.** Một Work Order hoặc một Part Number nhập nhầm, chẳng hạn để
   thử nghiệm, có thể bị xóa cùng toàn bộ dữ liệu của nó như thể chưa từng được
   nhập: người dùng có quyền yêu cầu việc này trong Work Order Details hoặc trong
@@ -280,7 +282,7 @@ docker compose up --build -V
 ## Migration database (Alembic)
 
 Áp dụng các migration (từ baseline no-op của repository foundation đến head hiện
-tại, `0043_phase16_automatic_runs`):
+tại, `0044_phase16_archive_viewing`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -571,11 +573,15 @@ Bộ test pytest gồm ba loại:
   `0042_phase16_deletion_requests`, các yêu cầu xóa vĩnh viễn cùng chốt chặn cấp
   dòng của mọi bảng mà một lần xóa xóa dữ liệu; `tests/test_deletion_requests.py`
   bao phủ các yêu cầu, việc xóa do job trên máy chủ thực hiện và API;
-  `tests/test_automatic_runs_schema.py` bao phủ head duy nhất
-  `0043_phase16_automatic_runs`, chốt chặn lần chạy của các lần chạy tự động, và
-  sự tương đồng giữa model và migration; `tests/test_automatic_runs.py` bao phủ
-  các thiết lập của lần chạy tự động, `history-archive evaluate`, việc duyệt và
-  bỏ qua, các lần kiểm tra lại thẩm quyền của một lần chạy và các lời nhắc.
+  `tests/test_automatic_runs_schema.py` bao phủ
+  `0043_phase16_automatic_runs` và chốt chặn lần chạy của các lần chạy tự động;
+  `tests/test_automatic_runs.py` bao phủ các thiết lập của lần chạy tự động,
+  `history-archive evaluate`, việc duyệt và bỏ qua, các lần kiểm tra lại thẩm
+  quyền của một lần chạy và các lời nhắc; `tests/test_archive_viewing_schema.py`
+  bao phủ head duy nhất `0044_phase16_archive_viewing`, chốt chặn của các lần xem
+  và các bảng xem, và sự tương đồng giữa model và migration;
+  `tests/test_archive_viewing.py` bao phủ các thiết lập xem, việc nạp và các lỗi
+  của nó, việc đóng, giới hạn số lần chạy được nạp và trang xem.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` và
   `tests/test_revision_cli.py` bao phủ write gate (409 `release_mismatch`, 503
   `not_ready`), job `migrate` (một transaction, các từ chối, lock) và báo cáo
@@ -801,7 +807,8 @@ docs/              canonical project documentation
 
 | Ngày | Commit | Thay đổi |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | Head migration là `0043_phase16_automatic_runs`, được bao phủ bởi `tests/test_automatic_runs_schema.py`; các lần chạy archival có thể do máy chủ đề xuất khi các lần chạy tự động được bật. |
+| 2026-11-19 | uncommitted | Head migration là `0044_phase16_archive_viewing`, được bao phủ bởi `tests/test_archive_viewing_schema.py`; bản lưu trữ của một lần chạy đã hoàn tất có thể được mở để xem. |
+| 2026-11-18 | `bac89d7` | Head migration là `0043_phase16_automatic_runs`, được bao phủ bởi `tests/test_automatic_runs_schema.py`; các lần chạy archival có thể do máy chủ đề xuất khi các lần chạy tự động được bật. |
 | 2026-11-18 | `1874636` | Head migration là `0042_phase16_deletion_requests`, được bao phủ bởi `tests/test_deletion_requests_schema.py`; một Work Order hoặc Part Number có thể bị xóa vĩnh viễn qua một yêu cầu mà máy chủ thực hiện. |
 | 2026-11-18 | `d094f5e` | Head migration là `0041_phase16_history_purge`, được bao phủ bởi `tests/test_history_purge_schema.py`; các lần chạy archival xóa dọn lịch sử Movement đã lưu trữ, và check (g) của reconcile đã được hiện thực. |
 | 2026-11-17 | `2f12d33` | Head migration là `0040_phase16_history_archive`, được bao phủ bởi `tests/test_history_archive_schema.py`; các lần chạy archival xuất lịch sử Movement cũ mà không xóa nó. |

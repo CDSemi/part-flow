@@ -473,8 +473,9 @@ A backup that stays on the NAS is lost with the NAS. Copy the backup folder else
 2. Choose a destination outside this NAS: another NAS, Synology C2 Storage or an S3-compatible service.
 3. As the source, select the folders `docker/partflow/backups` and `docker/partflow/archive` (the archive folder of
    §11.8; select it once it exists). Once a run has purged its history from the database, its archive is the only
-   copy of that history apart from the pre-purge backups that are still kept, so this copy is the archive's only copy
-   outside the NAS unless you set a copy folder (§11.8). The backup folder also holds those pre-purge backups: this task
+   copy of that history apart from the pre-purge backups that are still kept (and, while the run is open for viewing in
+   PartFlow, a temporary copy in the database), so this copy is the archive's only copy outside the NAS unless you set
+   a copy folder (§11.8). The backup folder also holds those pre-purge backups: this task
    covers them like every backup.
 4. Enable **client-side encryption**. Keep the password and the key file outside the NAS: without them, the copies
    cannot be read.
@@ -569,11 +570,14 @@ too:** the same job carries out the deletion of Work Orders and Part Numbers ent
 PartFlow (**Delete permanently…**) or with `pf delete-permanently` (the runbook §10), within 5 minutes of the request:
 it takes a pre-purge backup and deletes them from the database. Once **Automatic runs** are switched on in
 Administration (they are off initially), the same task also creates the runs that their measure calls for, at most once
-an hour: a run then waits for a person to approve it, or, with the approval step switched off, runs at once. The
-history archive job needs an archive folder on the NAS, optionally a copy folder on another device, and a task that
-starts it every 5 minutes. Do this before the first run is requested in Administration, before automatic runs are
-switched on and before the first deletion is requested: **without this task, a deletion request is never carried out
-and no automatic run is ever created**, `pf delete-permanently --confirm` refuses while the archive folder is not set,
+an hour: a run then waits for a person to approve it, or, with the approval step switched off, runs at once. It also
+loads the archive of a finished run that a person opens for viewing in PartFlow, within 5 minutes, into the database
+(never into live history), and removes it again once the view is closed or its days run out. The history archive job
+needs an archive folder on the NAS, optionally a copy folder on another device, and a task that starts it every 5
+minutes. Do this before the first run is requested in Administration, before automatic runs are switched on and before
+the first deletion is requested: **without this task, a deletion request is never carried out, no automatic run is
+ever created, and no archive is loaded for viewing or closed**, `pf delete-permanently --confirm` refuses while the
+archive folder is not set,
 and `check.sh` reports a request made in PartFlow meanwhile as `FAIL archival_proposal deletion_request_waiting` once
 it has waited 15 minutes (cancel it in PartFlow, or finish this section).
 
@@ -631,23 +635,26 @@ it has waited 15 minutes (cancel it in PartFlow, or finish this section).
      ```
 
    Every start first checks, in a few seconds, whether a permanent deletion request is open, and carries it out at
-   once: the pre-purge backup in the backup folder, the deletion, and the reconciliation after it. Most starts then
-   end. Once an hour, at the first start at or after the **Start minute** set in Administration → History archival &
-   purge (20 initially), the task does the hourly work: it first evaluates the automatic runs (it creates one when they
-   are on and due), then exports, verifies and copies an approved run, takes its pre-purge backup in the backup folder,
-   purges the archived Movement history from the database and runs the reconciliation after it. A start that carried
-   out a deletion leaves the hourly work to the next start. The very first start only records the current hour, so
-   the first hourly work comes at the next Start minute. A refusal or a failure sends one email for its hour, except
-   that while a deletion request is open, every start that cannot carry it out sends one; exit code 4 is an incident
-   (the reconciliation after a purge or a deletion did not end clean: the runbook §8), and until it is closed every
-   hourly start refuses with exit code 1, creates no automatic run, works on no run and carries out no deletion
-   request. Keep the Start minute away from minute 0: a pre-purge backup waits for the hourly backup while
-   that one runs (up to 60 minutes), and a release is refused while the task works.
+   once: the pre-purge backup in the backup folder, the deletion, and the reconciliation after it. It also looks for
+   viewing work and does it at once: it removes the loaded rows of a view of an archive that was closed or whose days
+   ran out, and loads an archive opened for viewing. Most starts then end. Once an hour, at the first start at or after
+   the **Start minute** set in Administration → History archival & purge (20 initially), the task does the hourly
+   work: it first evaluates the automatic runs (it creates one when they are on and due), then exports, verifies and
+   copies an approved run, takes its pre-purge backup in the backup folder, purges the archived Movement history from
+   the database and runs the reconciliation after it. A start that carried out a deletion leaves the hourly work to the
+   next start. The very first start only records the current hour, so the first hourly work comes at the next Start
+   minute. A refusal or a failure sends one email for its hour, except that while a deletion request is open or
+   viewing work waits, every start that cannot do it sends one; exit code 4 is an incident (the reconciliation after a
+   purge or a deletion did not end clean: the runbook §8), and until it is closed every hourly start refuses with exit
+   code 1, creates no automatic run, works on no run, carries out no deletion request and loads or closes no view. Keep
+   the Start minute away from minute 0: a pre-purge backup waits for the hourly backup while that one runs (up to 60
+   minutes), and a release is refused while the task works.
 
 5. **Test it.** Select the task and click **Run**. Then check that the job can reach its folder and the database,
-   which prints the work's lines and ends with a line that starts with `EVALUATE` when it worked on no run
+   which prints the work's lines and ends with a line that starts with `EVALUATE` when it worked on no run and no view
    (`EVALUATE off - -` while automatic runs are off and no run is open: then nothing is exported or deleted), with
-   `ARCHIVE` when it worked on a run, or with `DELETION` when it carried out a deletion request:
+   `ARCHIVE` when it worked on a run, with `VIEW` when it loaded or closed a view of an archive and worked on no run, or
+   with `DELETION` when it carried out a deletion request:
 
    ```sh
    deploy/production/pf archive
@@ -659,13 +666,15 @@ it has waited 15 minutes (cancel it in PartFlow, or finish this section).
 6. Add the archive folder to the Hyper Backup task (§11.3, step 3), if you have not done so yet.
 
 **Before any restore of the database** (a rollback, a restore after an incident, a move to a new NAS: the runbook §6
-and §8), untick **Enabled** for this task, and tick it again only after you have checked the runs and the permanent
-deletion requests in Administration → History archival & purge. A restored backup that holds a run in `PURGING` (for
-example the hourly backup taken while a purge ran) resumes that purge at the task's next start, unless the task is
-disabled or the incident record of the runbook §8 exists. A restored backup that holds a deletion request in
-`APPROVED` (taken between the request and its deletion) has it carried out at the task's next start: cancel it in
-PartFlow first unless the deletion is still wanted. To undo a purge or a deletion, restore its pre-purge backup: the
-run or the request is `RUNNING` in it, the next start fails it, and nothing is purged or deleted again.
+and §8), untick **Enabled** for this task, and tick it again only after you have checked the runs, the permanent
+deletion requests and the views of archives in Administration → History archival & purge. A restored backup that holds
+a run in `PURGING` (for example the hourly backup taken while a purge ran) resumes that purge at the task's next start,
+unless the task is disabled or the incident record of the runbook §8 exists. A restored backup that holds a deletion
+request in `APPROVED` (taken between the request and its deletion) has it carried out at the task's next start: cancel
+it in PartFlow first unless the deletion is still wanted. A restored backup holds the views of archives too: a view
+`LOADING` is failed at the next start, a view `REQUESTED` is loaded, and a view `OPEN` keeps its loaded rows until a
+person closes it or its days run out. To undo a purge or a deletion, restore its pre-purge backup: the run or the
+request is `RUNNING` in it, the next start fails it, and nothing is purged or deleted again.
 
 ## 12. Installing a new release
 
@@ -673,8 +682,9 @@ Every later release is installed with `deploy/production/release.sh`. It takes a
 images without touching the running ones, migrates the database, switches PartFlow to the new release and checks it.
 Choose a time when no Work Order import runs, a few minutes after the full hour, once the hourly backup has finished
 and well before the Start minute of the history archive task: a release is refused while that task does its hourly
-work or carries out a permanent deletion request (start it again once the work has finished; a deletion takes a few
-minutes for its pre-purge backup and reconciliation), and the task refuses while a release runs. A run's purge, and a
+work, carries out a permanent deletion request, or loads or closes a view of an archive (start it again once the work
+has finished; a deletion takes a few minutes for its pre-purge backup and reconciliation, and a load of 2 million
+Movements took about half a minute in a rehearsal), and the task refuses while a release runs. A run's purge, and a
 first large run, can keep the task busy for long.
 
 ```sh
@@ -695,9 +705,9 @@ deploy/production/release.sh --release <NEW_TAG> --operator "<your name>" --appr
 - `.env.production` is not tracked by git, so it stays in place; `release.sh` writes the new tag into it at the switch.
   The scheduled tasks need no change, because they run in the same folder.
 - Keep the previous release's images (never `docker image prune -a`) until you are sure you will not roll back
-  (runbook §6). Before a rollback that restores a backup, disable the history archive task (§11.8), check the runs
-  and the permanent deletion requests after the restore, and cancel in PartFlow every deletion request found `APPROVED`
-  that is no longer wanted before you enable the task again.
+  (runbook §6). Before a rollback that restores a backup, disable the history archive task (§11.8), check the runs,
+  the permanent deletion requests and the views of archives after the restore, and cancel in PartFlow every deletion
+  request found `APPROVED` that is no longer wanted before you enable the task again.
 
 ## 13. Capacity and resource limits
 
@@ -727,13 +737,16 @@ every archival run; nothing removes archives automatically. The backup folder al
 the history archive task takes before each purge and each permanent deletion (the newest 3 by default, one dump each,
 both kinds together: a series of deletions can rotate out the pre-purge backup of an earlier purge). A purge frees
 space inside the database for new Movements, so the database stops growing, but its files get smaller only with
-`VACUUM FULL` (the runbook §11). `/root/partflow-monitoring/growth.tsv` records the database size once a day.
+`VACUUM FULL` (the runbook §11). A view of an archive takes space in the database while it is loaded, roughly 7 times
+the size of its archive, until it is closed, and so do the backups taken meanwhile (the runbook §11, Viewing an
+archive). `/root/partflow-monitoring/growth.tsv` records the database size once a day.
 
 ## Change history
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | §11.8: the history archive task also creates the automatic runs once they are switched on (none without the task), its hourly work evaluates them first, and its test ends with the `EVALUATE` line when it worked on no run. |
+| 2026-11-18 | uncommitted | §11.8: the history archive task also loads the archives opened for viewing and removes them once the views are closed, at any start (none without the task), and its test ends with the `VIEW` line when it worked only on views; §11.8 and §12: after a restore, check the views too, and a release is refused while the task loads or closes a view; §11.3 and §13: a view holds a temporary copy of its archive in the database and takes space there until it is closed. |
+| 2026-11-18 | `bac89d7` | §11.8: the history archive task also creates the automatic runs once they are switched on (none without the task), its hourly work evaluates them first, and its test ends with the `EVALUATE` line when it worked on no run. |
 | 2026-11-18 | `1874636` | §11.8: the history archive task also carries out permanent deletion requests within 5 minutes, after a pre-purge backup, and a deletion needs it; §7, §11.8 and §12: after a restore, check the deletion requests too and cancel the `APPROVED` requests that are no longer wanted, because a restored `APPROVED` request is carried out; §8: `check.sh` reports a deletion request that waits, also while archival is not set up; §11, §11.2, §12 and §13: the pre-purge backups of deletions, which share Pre-purge backups kept with purges, and releases refused during a deletion. |
 | 2026-11-18 | `d094f5e` | §7, §11.8 and §12: disable the history archive task before any restore and check the runs before enabling it, because a restored `PURGING` run resumes its purge. |
 | 2026-11-18 | `d094f5e` | §11.8: a run purges its archived Movement history after the off-host copy and a pre-purge backup, then reconciles, and an incident stops the task's work until it is closed; the Start minute away from the hourly backup; §11.2, §11.3, §12 and §13: the pre-purge backups in the backup folder and in Hyper Backup, the archive as the only copy after a purge, a long purge before a release, and `VACUUM FULL`. |

@@ -143,6 +143,13 @@ class RunAuthorization(BaseModel):
     authorized_at: datetime.datetime | None
 
 
+class RunViewRef(BaseModel):
+    """The newest view of a run's archive (build step 5)."""
+
+    id: int
+    state: str
+
+
 class RunResponse(BaseModel):
     id: int
     state: str
@@ -185,6 +192,10 @@ class RunResponse(BaseModel):
     failure_reason: str | None
     # The run failed because the User of its authority may no longer run it.
     authorization_failed: bool
+    # Viewing an archive (build step 5): whether Open for viewing applies — a
+    # finished run whose archive was verified — and its newest view.
+    viewable: bool
+    view: RunViewRef | None
 
 
 class RunRequest(BaseModel):
@@ -309,6 +320,12 @@ def _run_response(view: RunView) -> RunResponse:
         result=run.result,
         failure_reason=run.failure_reason,
         authorization_failed=run.authorization_failed,
+        viewable=view.viewable,
+        view=(
+            None
+            if view.archive_view is None
+            else RunViewRef(id=view.archive_view[0], state=view.archive_view[1])
+        ),
     )
 
 

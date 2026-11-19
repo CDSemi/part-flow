@@ -79,8 +79,21 @@ export type Route =
    * sub-view bar keeps Work Orders active on it.
    */
   | { view: 'management'; subview: ManagementSubview; page?: 'completed' }
-  | { view: 'administration' }
+  /**
+   * `archiveViewId` is the archive viewer page of Administration →
+   * History archival & purge (`/administration/history-archival/views/:id`,
+   * GUI_DESIGN §9): a run's archive loaded for viewing, read-only and
+   * separate from live history — a real, deep-linkable route inside the
+   * one Administration view, whose sidebar keeps History archival & purge
+   * active on it.
+   */
+  | { view: 'administration'; archiveViewId?: number }
   | { view: 'not-found'; path: string };
+
+/** The address of the archive viewer page of view `viewId`. */
+export function archiveViewerPath(viewId: number): string {
+  return `/administration/history-archival/views/${viewId}`;
+}
 
 export const DEFAULT_MANAGEMENT_SUBVIEW: ManagementSubview = 'area-board';
 
@@ -153,6 +166,13 @@ export function resolvePath(
     return { view: 'production-board', mode: 'kiosk' };
   }
   if (path === '/administration') return { view: 'administration' };
+  // The archive viewer of History archival & purge: a view number (a
+  // positive whole number; the server answers an unknown one).
+  const viewerMatch =
+    /^\/administration\/history-archival\/views\/([1-9]\d{0,9})$/.exec(path);
+  if (viewerMatch) {
+    return { view: 'administration', archiveViewId: Number(viewerMatch[1]) };
+  }
   if (path === '/management') {
     const entry = managementEntrySubview(lastManagementSubview, readable);
     return { redirect: `/management/${entry}` };

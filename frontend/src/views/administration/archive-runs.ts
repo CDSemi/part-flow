@@ -1,14 +1,19 @@
 // Presentation of the history archival runs and previews of
 // Administration → History archival & purge (Phase 16, archival design B
-// steps 1, 2 and 4): the plain words of each run state and result, who
+// steps 1, 2, 4 and 5): the plain words of each run state and result, who
 // started a run and on whose authority (a requester, or an automatic run
 // with its approval or its standing authorization), the counts
-// (exported, purged, skipped), sizes and times, and the purge's evidence
-// (the pre-purge backup and the receipt). Presentation only — the server
-// owns every rule and decides what a run may do; the actions offered here
-// follow the states it answers.
+// (exported, purged, skipped), sizes and times, the purge's evidence
+// (the pre-purge backup and the receipt), and the viewing of a run's
+// archive (its newest view, and what Open for viewing does). Presentation
+// only — the server owns every rule and decides what a run or a view may
+// do; the actions offered here follow the states it answers.
 
 import type { ArchiveCounts, ArchiveRun } from '../../api/history-archive';
+import type {
+  ArchiveView,
+  ArchiveViewState,
+} from '../../api/history-archive-views';
 import { formatIsoDate, formatTimeOfDay, todayIso } from '../dates';
 
 /** The disclosure of a pre-purge backup in the runs and requests tables.
@@ -294,4 +299,121 @@ export function purgedLine(run: ArchiveRun): string | null {
   if (purged === null) return null;
   const label = run.state === 'PURGING' ? 'Purged so far' : 'Purged';
   return `${label}: ${movementsText(purged.movements)} · ${componentsAndFlows(purged)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Viewing a run's archive (archival design D16, build step 5)
+// ---------------------------------------------------------------------------
+
+/** The plain words of a view's state (a run's newest view). */
+export function viewStateLabel(state: ArchiveViewState): string {
+  switch (state) {
+    case 'REQUESTED':
+      return 'Waiting to be loaded for viewing';
+    case 'LOADING':
+      return 'Being loaded for viewing';
+    case 'OPEN':
+      return 'Open for viewing';
+    case 'CLOSING':
+      return 'Viewing closed — removing the copy';
+    case 'CLOSED':
+      return 'Viewing closed';
+    case 'FAILED':
+      return 'Loading for viewing failed';
+    case 'CANCELLED':
+      return 'Viewing cancelled';
+  }
+}
+
+/** The status-pill tone of a view's state. */
+export function viewStateTone(
+  state: ArchiveViewState,
+): 'on' | 'off' | 'term' | 'err' {
+  switch (state) {
+    case 'OPEN':
+      return 'on';
+    case 'REQUESTED':
+    case 'LOADING':
+    case 'CLOSING':
+      return 'term';
+    case 'FAILED':
+      return 'err';
+    default:
+      return 'off';
+  }
+}
+
+/** A view waiting to be loaded, being loaded or open: the run's one active
+ * view (the server allows no second one). */
+export function viewIsActive(state: ArchiveViewState): boolean {
+  return state === 'REQUESTED' || state === 'LOADING' || state === 'OPEN';
+}
+
+/** Open for viewing is offered on a run the server marks viewable (a
+ * finished run whose archive was verified) while it has no active view;
+ * the runs loaded at once are the server's to judge, and its refusal is
+ * shown as given. */
+export function runCanBeOpenedForViewing(run: ArchiveRun): boolean {
+  return run.viewable && (run.view === null || !viewIsActive(run.view.state));
+}
+
+/** The line under a view's state: until when an open view stays open, why
+ * its load failed, who closed or cancelled it; null when the state says
+ * it all. */
+export function viewDetailText(view: ArchiveView): string | null {
+  switch (view.state) {
+    case 'OPEN':
+      return view.openUntil === null
+        ? null
+        : `Until ${formatInstant(view.openUntil)}`;
+    case 'FAILED':
+      return view.failureReason;
+    case 'CLOSING':
+    case 'CLOSED':
+      return view.closedBy === null
+        ? 'Its days ran out.'
+        : `Closed by ${view.closedBy.displayName}.`;
+    case 'CANCELLED':
+      return view.cancelledBy === null
+        ? null
+        : `Cancelled by ${view.cancelledBy.displayName}.`;
+    default:
+      return null;
+  }
+}
+
+/** A loaded archive takes roughly this many times its archive's size in
+ * the database: the backend contract of build step 5 (§5.3) measured
+ * 1.34 GB for a 184 MB archive of 2.0 million Movements and lets the
+ * confirmation of Open for viewing say so before a run is opened. */
+export const VIEW_SPACE_FACTOR = 7;
+
+/** `7 days`, `1 day`. */
+function daysText(days: number): string {
+  return `${days} day${days === 1 ? '' : 's'}`;
+}
+
+/** What Open for viewing does, said before a run is opened: a separate,
+ * read-only copy that never joins live history; the database space it
+ * takes until it is closed; and when it closes (`viewDays`, the setting;
+ * null when the settings are not loaded). */
+export function openForViewingText(
+  run: ArchiveRun,
+  viewDays: number | null,
+): string[] {
+  const space =
+    run.archiveBytes === null
+      ? 'Until it is closed, the copy takes space in the database.'
+      : `Until it is closed, the copy takes space in the database: roughly ${VIEW_SPACE_FACTOR} times the archive's size, about ${formatArchiveSize(run.archiveBytes * VIEW_SPACE_FACTOR)} for this run (${
+          run.exported === null
+            ? ''
+            : `${movementsText(run.exported.movements)} in ${plural(run.exported.flows, 'flow')}, `
+        }an archive of ${formatArchiveSize(run.archiveBytes)}).`;
+  return [
+    "The archival job on the server loads a copy of this run's archive within minutes, for reading on a page of its own. The copy is read-only and separate from the live history: nothing is added to the live history, and Tracking and every figure stay as they are.",
+    space,
+    viewDays === null
+      ? 'It closes by itself after the days set under Retention and schedule, or earlier with Close viewing.'
+      : `It closes by itself ${daysText(viewDays)} after it opens, or earlier with Close viewing.`,
+  ];
 }

@@ -33,7 +33,7 @@ from tests.conftest import owner_engine
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _HEAD = schema_revision.code_head()
-_PREVIOUS = "0042_phase16_deletion_requests"
+_PREVIOUS = "0043_phase16_automatic_runs"
 _ALL = schema_revision.pending_revisions(None)
 
 

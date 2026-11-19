@@ -13,6 +13,7 @@ from app.api.environment import router as environment_router
 from app.api.errors import register_exception_handlers
 from app.api.health import router as health_router
 from app.api.history_archive import router as history_archive_router
+from app.api.history_archive_views import router as history_archive_views_router
 from app.api.hot_list import router as hot_list_router
 from app.api.machines import router as machines_router
 from app.api.part_numbers import router as part_numbers_router
@@ -116,6 +117,7 @@ def create_app() -> FastAPI:
     app.include_router(roles_router)
     app.include_router(policies_router)
     app.include_router(history_archive_router)
+    app.include_router(history_archive_views_router)
     app.include_router(permanent_deletion_router)
     app.include_router(machines_router)
     app.include_router(part_numbers_router)

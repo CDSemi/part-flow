@@ -290,6 +290,9 @@ test('only the session UI, the sign-in gate, the Administration sections, the Ma
     'app/management-access.ts',
     'app/session-context.ts',
     'app/session-provider.tsx',
+    // The archive viewer of History archival & purge (its own address
+    // inside Administration) needs Run history archival and purge.
+    'views/administration/ArchiveViewerPage.tsx',
     'views/administration/AreasSection.tsx',
     'views/administration/BackupsSection.tsx',
     'views/administration/BarcodeConfigurationSection.tsx',

@@ -29,6 +29,12 @@ Cases:
                waiting, exit 1 and 2 of evaluate going on with the loop, no evaluate in a deletion-only start or while
                the incident record exists, the help, and check.sh's approval_overdue, authorization_failed and
                standing_authorization_invalid lines
+  AR-65..AR-76 step 5, viewing an archive: the cheap check's viewing work at any start (no evaluate, no run work, the
+               slot unmarked), close_view and load_view after the deletion work and before the run work, the VIEW line,
+               a failed load (exit 3), an interrupted load or closing (exit 2), a refusal (exit 1), no valid report, no
+               progress, a signal, recover's failed views, no viewing work while the incident record exists, the lock
+               held, the help, check.sh's views and view_not_closed (AR-75), and a view that changed after `next`
+               handed it out, which a start skips (AR-76)
 Nothing touches a Docker daemon, a database or the network.
 
 Run with the other production tests:
@@ -77,11 +83,11 @@ BACKUP_ARGUMENTS = ["--kind", "pre-purge", "--label", ARCHIVE_NAME, "--operator"
 REQUEST_NEW = "Request a new run in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
 REQUEST_AGAIN = "Request the deletion again in PartFlow, or with pf delete-permanently (OPERATIONS_RUNBOOK §10)."
 # The refusal of a start while the incident record of a reconcile after a purge exists (after the record's path).
-INCIDENT_REFUSAL = (f" of a reconcile after a purge exists (run {RUN}, result mismatch): no run or deletion request is"
-                    " worked on while it exists, no evaluation of the automatic runs, export, verification, copy,"
-                    " pre-purge backup, purge or deletion, not even the resumed purge of a run left PURGING. Follow"
-                    " OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); once the investigation is done and the"
-                    " reconciliation is clean, remove the record (rm ")
+INCIDENT_REFUSAL = (f" of a reconcile after a purge exists (run {RUN}, result mismatch): no run, deletion request or view"
+                    " is worked on while it exists, no evaluation of the automatic runs, export, verification, copy,"
+                    " pre-purge backup, purge, deletion, load or closing of a view, not even the resumed purge of a run"
+                    " left PURGING. Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a purge); once the"
+                    " investigation is done and the reconciliation is clean, remove the record (rm ")
 # Step 3: permanent deletion request 7, its pre-purge backup and the deletion.
 REQ = 7
 DEL_LABEL = "deletion-7-20261008T122031Z"
@@ -148,21 +154,22 @@ def epoch_minute(hour, minute):
     return calendar.timegm((2026, 10, 8, hour, minute, 0)) // 60
 
 
-def job_doc(step, result, rc=0, run_id=None, state=None, error=None, request_id=None, **fields):
+def job_doc(step, result, rc=0, run_id=None, state=None, error=None, request_id=None, view_id=None, **fields):
     """A `python -m app.cli history-archive <step>` report (contract B1 §2.3 key order; step 3 adds the common key
-    request_id right after run_id)."""
+    request_id right after run_id, step 5 the common key view_id right after request_id)."""
     document = {"report_version": 1, "command": f"history-archive {step.split()[0]}", "result": result,
                 "exit_code": rc, "started_at": "2026-10-08T12:20:00Z", "finished_at": "2026-10-08T12:20:01Z",
-                "duration_ms": 1000, "run_id": run_id, "request_id": request_id, "state": state, **fields,
-                "error": None if error is None else {"code": error[0], "message": error[1]}}
+                "duration_ms": 1000, "run_id": run_id, "request_id": request_id, "view_id": view_id, "state": state,
+                **fields, "error": None if error is None else {"code": error[0], "message": error[1]}}
     return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
 
-def job_out(step, result, rc=0, run_id=None, state=None, error=None, request_id=None, **fields):
+def job_out(step, result, rc=0, run_id=None, state=None, error=None, request_id=None, view_id=None, **fields):
     run = f" run {run_id}" if run_id is not None else ""
     run += f" deletion request {request_id}" if request_id is not None else ""
+    run += f" view {view_id}" if view_id is not None else ""
     summary = f"history-archive {step.split()[0]}:{run} {result}" + (f" ({state})" if state else "") + "\n"
-    return out(job_doc(step, result, rc, run_id, state, error, request_id, **fields), rc=rc, stderr=summary)
+    return out(job_doc(step, result, rc, run_id, state, error, request_id, view_id, **fields), rc=rc, stderr=summary)
 
 
 def run_object(state, **fields):
@@ -184,14 +191,15 @@ def automatic_run(state, **fields):
     return run_object(state, trigger="AUTOMATIC", reason=AUTOMATIC_REASON, authorization_id=12, **fields)
 
 
-def next_out(action, state=None, rc=0, error=None, request=None, run=None):
+def next_out(action, state=None, rc=0, error=None, request=None, run=None, view=None):
     """A `history-archive next` answer: ACTION for run 3 in STATE (`none`: no open run); with `backup`, the pre-purge
     backup's kind and label; exit 3: the re-check of the run's authority failed the run. REQUEST: an APPROVED deletion
     request that waits while the run is RUNNING (step 3; `request_id` stays null). RUN: the run summary, when it is not
-    a requested run's (step 4: an automatic run)."""
+    a requested run's (step 4: an automatic run). VIEW: a view of an archive whose viewing work waits while the run is
+    RUNNING (step 5; `view_id` stays null)."""
     if action == "none":
-        return job_out("next", "none", run=None, request=request)
-    fields = {"run": run or run_object(state), "request": request}
+        return job_out("next", "none", run=None, request=request, view=view)
+    fields = {"run": run or run_object(state), "request": request, "view": view}
     if action == "backup":
         fields["backup"] = {"kind": "pre-purge", "label": ARCHIVE_NAME}
     return job_out("next", "failed" if rc == 3 else action, rc=rc, run_id=RUN, state=state, error=error, **fields)
@@ -273,15 +281,18 @@ def request_object(state, request_id=REQ, **fields):
     return document
 
 
-def settings_out(pending=False, request_state="APPROVED", start_minute=20, request=None):
+def settings_out(pending=False, request_state="APPROVED", start_minute=20, request=None, views=()):
     """The cheap check: `history-archive settings` through `exec` in the backend container (contract B3 §3); REQUEST:
-    the open request's summary (pending)."""
+    the open request's summary (pending). VIEWS (step 5, contract B5 §3.1): the views with work for the job, as
+    (view id, state, action) in the order of `pending_views`."""
     if request is not None:
         pending = True
     elif pending:
         request = request_object(request_state)
     return job_out("settings", "read", start_minute=start_minute, archive_dir=None, copy_dir=None,
-                   site_timezone="UTC", deletion_pending=pending, deletion_request=request)
+                   site_timezone="UTC", deletion_pending=pending, deletion_request=request,
+                   viewing_pending=bool(views),
+                   pending_views=[{**view_object(state, view_id), "action": action} for view_id, state, action in views])
 
 
 def next_deletion_out(action, state):
@@ -319,6 +330,83 @@ def deletion_status(open_request=None, last_request=None, rc=0):
                    copy_dir=None, receipts_not_copied=[], open_deletion_request=open_request,
                    last_finished_deletion_request=last_request, automatic_runs=AUTOMATIC_OFF, max_wait_days=7,
                    findings=[])
+
+
+# Step 5, viewing an archive (contract B5): view 4 of run 2 waits to be loaded; view 3 of run 2, closed by a person,
+# waits for the job to remove its rows.
+VIEW = 4
+CLOSED_VIEW = 3
+VIEW_RUN = 2
+VIEW_ARCHIVE = "run-2-20261001T122000Z"
+LOADED = {"movements": 4190, "flows": 305, "lineage_edges": 12, "assigned_routes": 40, "names": 97}
+REMOVED = {"archive_view_names": 97, "archive_view_lineage": 12, "archive_view_flows": 305, "archive_view_routes": 40,
+           "archive_view_movements": 4190}
+VIEW_AGAIN = "Open the run for viewing again in Administration → History archival & purge (OPERATIONS_RUNBOOK §11)."
+
+
+def view_object(state, view_id=VIEW, **fields):
+    """The view summary of `settings`, `next`, `load-view`, `close-view` and `status` (contract B5 §3): view VIEW_ID of
+    run 2, requested by user 1; loaded and open for 7 days once it opened, and closed by user 1 once it is closing."""
+    opened = state in ("OPEN", "CLOSING", "CLOSED")
+    closing = state in ("CLOSING", "CLOSED")
+    document = {"id": view_id, "run_id": VIEW_RUN, "state": state, "requested_at": "2026-10-08T12:17:00.000000Z",
+                "requested_by_user_id": 1,
+                "started_at": None if state in ("REQUESTED", "CANCELLED") else "2026-10-08T12:20:31.000000Z",
+                "opened_at": "2026-10-08T12:21:03.000000Z" if opened else None,
+                "open_until": "2026-10-15T12:21:03.000000Z" if opened else None,
+                "loaded": dict(LOADED) if opened else None,
+                "closing_started_at": "2026-10-08T12:30:00.000000Z" if closing else None,
+                "closed_by_user_id": 1 if closing else None,
+                "finished_at": "2026-10-08T12:30:05.000000Z" if state in ("CLOSED", "FAILED", "CANCELLED") else None,
+                "failure_reason": None}
+    document.update(fields)
+    return document
+
+
+def next_view_out(action, state, view_id=VIEW):
+    """A `next` answer that hands out viewing work, `close_view` or `load_view`, for VIEW_ID in STATE (`run` and
+    `request` null; `view_id` and `state` name the view)."""
+    return job_out("next", action, view_id=view_id, state=state, run=None, request=None,
+                   view=view_object(state, view_id))
+
+
+def load_view_out(result="loaded", rc=0, view_id=VIEW, error=None, state=None):
+    """A `history-archive load-view` answer (contract B5 §3.3): `loaded` (OPEN, with what it loaded), `refused` (the
+    view untouched: no state, no view), `interrupted` or `could_not_run` (LOADING by default), `failed` (FAILED, its
+    rows removed)."""
+    if state is None:
+        state = {"loaded": "OPEN", "refused": None, "interrupted": "LOADING", "could_not_run": "LOADING",
+                 "failed": "FAILED"}[result]
+    fields = {}
+    if state is not None:
+        fields = {"view": view_object(state, view_id, failure_reason=error[1] if state == "FAILED" else None),
+                  "archive_name": VIEW_ARCHIVE}
+    if result == "loaded":
+        fields["loaded"] = dict(LOADED)
+    return job_out("load-view", result, rc=rc, view_id=view_id, state=state, error=error, **fields)
+
+
+def close_view_out(result="closed", rc=0, view_id=CLOSED_VIEW, error=None, state=None, by_person=True):
+    """A `history-archive close-view` answer (contract B5 §3.4): `closed` (CLOSED, with the rows it removed per viewer
+    table), `refused` (no state, no view), `interrupted` or `could_not_run` (CLOSING by default). BY_PERSON: a person
+    closed the view (closed_by_user_id), otherwise its days ran out."""
+    if state is None:
+        state = {"closed": "CLOSED", "refused": None, "interrupted": "CLOSING", "could_not_run": "CLOSING"}[result]
+    fields = {}
+    if state is not None:
+        fields["view"] = view_object(state, view_id, closed_by_user_id=1 if by_person else None)
+    if result == "closed":
+        fields["removed"] = dict(REMOVED)
+    return job_out("close-view", result, rc=rc, view_id=view_id, state=state, error=error, **fields)
+
+
+def recover_out(**lists):
+    """A `history-archive recover` answer with the lists of contract B5 §3.5 (`failed_view_ids` added by step 5)."""
+    fields = {"failed_run_ids": [], "failed_request_ids": [], "failed_view_ids": [], "removed_partial": [],
+              "kept_partial": [], "copied_receipts": [], "receipt_problems": [], **lists}
+    changed = any(fields[key] for key in ("failed_run_ids", "failed_request_ids", "failed_view_ids", "removed_partial",
+                                          "copied_receipts"))
+    return job_out("recover", "recovered" if changed else "nothing_to_recover", **fields)
 
 
 def default_jobs(*nexts):
@@ -909,9 +997,10 @@ class Scheduled(ArchiveHarness):
         self.assertExit(0)
         self.assertEqual(self.steps()[:2], ["settings", "recover"])
         self.assertEqual(self.stamp_value(), epoch_minute(12, 50))
-        self.assertIn("the deletion check (history-archive settings in the running backend container) gave no answer"
-                      " (exit 1): an open deletion request waits for a later start; the hourly work goes on.",
-                      self.result.stderr)
+        # The hourly work's `next` still hands out an open deletion request and viewing work first (step 5).
+        self.assertIn("the cheap check (history-archive settings in the running backend container) gave no answer"
+                      " (exit 1): the hourly work goes on, and its next step still hands out an open deletion request"
+                      " and viewing work first.", self.result.stderr)
 
     # AR-15: a missed slot (the host was down at 11:20) is caught up once by the next start; 12:20 runs as usual.
     def test_ar15_missed_slot(self):
@@ -1194,6 +1283,9 @@ class PfArchive(PfHarness):
         self.assertNotIn("never deletes", help_text)
         # Step 4: pf archive runs the hourly work, the evaluation of the automatic runs included.
         self.assertIn("evaluates the automatic runs: when Administration has them on", help_text)
+        # Step 5: and the viewing work before the work on a run.
+        self.assertIn("Before the work on a run, it removes the loaded\n                            rows of a view of an"
+                      " archive that was closed or whose days ran out, and loads an archive", help_text)
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1294,10 @@ class PfArchive(PfHarness):
 
 
 def archive_status(findings=(), rc=None, open_run=None, last=None, copy=False, receipts=(), open_deletion=None,
-                   last_deletion=None, automatic=AUTOMATIC_OFF):
+                   last_deletion=None, automatic=AUTOMATIC_OFF, views=(), not_closed=(), viewer_bytes=106496):
+    """A `history-archive status` report. Step 5 (contract B5 §3, §6): VIEWS, the views not finished (open_views, each
+    with age_seconds); NOT_CLOSED, the ids of views_not_closed; VIEWER_BYTES, the space of the viewer tables (by default
+    that of empty viewer tables and their indexes)."""
     rc = (1 if findings else 0) if rc is None else rc
     return job_doc("status", "finding" if findings else "ok", rc=rc, open_run=open_run, last_finished_run=last,
                    archive_dir={"path": "/archive", "usable": "archive_dir_unusable" not in findings,
@@ -1210,7 +1305,9 @@ def archive_status(findings=(), rc=None, open_run=None, last=None, copy=False, r
                    copy_dir=({"path": "/archive-copy", "usable": True, "free_bytes": 1073741824,
                               "total_bytes": 2 * 1073741824, "partial": []} if copy else None),
                    receipts_not_copied=list(receipts), open_deletion_request=open_deletion,
-                   last_finished_deletion_request=last_deletion, automatic_runs=automatic, max_wait_days=7,
+                   last_finished_deletion_request=last_deletion, open_views=list(views),
+                   views_not_closed=list(not_closed), viewer_bytes=viewer_bytes,
+                   view_settings={"days": 7, "max_loaded": 1}, automatic_runs=automatic, max_wait_days=7,
                    findings=list(findings))
 
 
@@ -1512,6 +1609,39 @@ class CheckArchival(CheckHarness):
         self.assertEqual(text, f"FAIL archival_proposal standing_authorization_invalid: {problem}")
         self.assertExit(1)
 
+    # AR-75 (step 5, contract B5 §6, lead decision 5): the views of an archive. The PASS line names each view that is not
+    # finished, an OPEN one with the time its days run out, and the space of the viewer tables; a view that waits to be
+    # loaded (REQUESTED) is no finding. view_not_closed fails the line with the view, its state and since when: the job
+    # could not remove its loaded rows.
+    def test_ar75_views_of_an_archive(self):
+        opened = {**view_object("OPEN"), "age_seconds": 4 * 3600}
+        waiting = {**view_object("REQUESTED", view_id=5, run_id=3), "age_seconds": 120}
+        text = self.archival(archive_status(views=(opened, waiting), viewer_bytes=1395864371), 0)
+        self.assertEqual(text, "PASS archival_proposal no open run; no finished run; archive folder 5.0 GiB free; view 4"
+                               " of run 2 OPEN until 2026-10-15T12:21:03Z; view 5 of run 3 REQUESTED; viewer tables 1.3"
+                               " GiB")
+        self.assertExit(0)
+        self.reset()
+        # No view: the PASS line stays as it was (the empty viewer tables are not named).
+        text = self.archival(archive_status(), 0)
+        self.assertEqual(text, "PASS archival_proposal no open run; no finished run; archive folder 5.0 GiB free")
+        self.reset()
+        expired = {**view_object("OPEN"), "open_until": "2026-10-08T10:00:00.000000Z", "age_seconds": 8 * 86400}
+        text = self.archival(archive_status(findings=("view_not_closed",), views=(expired,), not_closed=(VIEW,),
+                                            viewer_bytes=5 * 1048576), 1)
+        self.assertEqual(text, "FAIL archival_proposal view_not_closed: view 4 of run 2 (OPEN, open until"
+                               " 2026-10-08T10:00:00Z) was not closed by the history archive job; its loaded rows still"
+                               " take database space (OPERATIONS_RUNBOOK §11)")
+        self.assertExit(1)
+        self.reset()
+        closing = {**view_object("CLOSING", view_id=CLOSED_VIEW), "age_seconds": 3 * 86400}
+        text = self.archival(archive_status(findings=("view_not_closed",), views=(closing, expired),
+                                            not_closed=(CLOSED_VIEW, VIEW)), 1)
+        self.assertEqual(text, "FAIL archival_proposal view_not_closed: view 3 of run 2 (CLOSING, closing since"
+                               " 2026-10-08T12:30:00Z), view 4 of run 2 (OPEN, open until 2026-10-08T10:00:00Z) were not"
+                               " closed by the history archive job; their loaded rows still take database space"
+                               " (OPERATIONS_RUNBOOK §11)")
+
 
 # ---------------------------------------------------------------------------
 # AR-29..AR-39: build step 2, the pre-purge backup, the purge and the reconcile after it
@@ -1605,8 +1735,8 @@ class Purge(ArchiveHarness):
                           "request": "", "pre_purge_backup": BACKUP, "failing_checks": "c g"})
         self.assertRegex(values["finished_at"], r"^2026-10-08T12:20:30Z$")
         self.assertTrue(values["report"].endswith("/reconcile.json"), values["report"])
-        self.assertIn("records the incident, and no start works on a run or a deletion request until you remove it after"
-                      " the investigation.", self.result.stderr)
+        self.assertIn("records the incident, and no start works on a run, a deletion request or a view until you remove it"
+                      " after the investigation.", self.result.stderr)
         # The next start, with another run to work on, runs recover and status only; the record stays.
         self.rules["docker"] = default_jobs()
         self.reset_calls()
@@ -2089,8 +2219,8 @@ class Deletion(ArchiveHarness):
         self.archive()
         self.assertExit(1)
         self.assertEqual(self.order(), ["recover", "status"])
-        self.assertIn(f" of a reconcile after a deletion exists (deletion request {REQ}, result mismatch): no run or"
-                      " deletion request is worked on while it exists", self.result.stderr)
+        self.assertIn(f" of a reconcile after a deletion exists (deletion request {REQ}, result mismatch): no run,"
+                      " deletion request or view is worked on while it exists", self.result.stderr)
         self.assertIn("Follow OPERATIONS_RUNBOOK §8 (Reconcile finding after a deletion);", self.result.stderr)
         # A scheduled start within the hour does not even look for the request.
         self.reset_calls()
@@ -2400,9 +2530,452 @@ class AutomaticRuns(ArchiveHarness):
                      "EVALUATE off - -, EVALUATE created 7 PROPOSED", "2 could not run (evaluate included)"):
             self.assertIn(text, result.stdout)
         header = ARCHIVE_SH.read_text(encoding="utf-8").split("\nset -eu\n", 1)[0]
-        for text in ("`EVALUATE <result> <run id|-> <state|->`", "build steps 1 to 4",
-                     "never in a start taken only for a deletion request and never while the incident record exists"):
+        for text in ("`EVALUATE <result> <run id|-> <state|->`", "build steps 1 to 5",
+                     "never in a start taken only for a deletion request or for viewing work, and never while the incident"):
             self.assertIn(text, header)
+
+
+# ---------------------------------------------------------------------------
+# AR-65..AR-74: build step 5, viewing an archive (AR-75, the check.sh lines, is in CheckArchival)
+# ---------------------------------------------------------------------------
+
+LOAD_VIEW = f"load-view --view {VIEW}"
+CLOSE_VIEW = f"close-view --view {CLOSED_VIEW}"
+# The step after a load, in a start within the hour of its slot: the viewing work only.
+VIEW_ONLY = ["recover", "next", LOAD_VIEW, "next", "status"]
+LOADED_TEXT = (f"view {VIEW} of run {VIEW_RUN} is OPEN: 4190 Movements, 305 flows, 12 lineage edges, 40 Assigned Routes"
+               f" and 97 names loaded from the archive folder {VIEW_ARCHIVE}; it stays open until"
+               " 2026-10-15T12:21:03.000000Z.")
+
+
+class Viewing(ArchiveHarness):
+    def set_views(self, views=((VIEW, "REQUESTED", "load_view"),), after=(("none",),), nexts=None):
+        """Viewing work (contract B5 §3.1, §3.2): the cheap check lists VIEWS as (view id, state, action); `next` hands
+        out NEXTS (by default the close_view and load_view of VIEWS, in their order), then the run answers AFTER
+        (next_out arguments); load-view loads view 4 and close-view closes view 3."""
+        self.set_rule(CHEAP, settings_out(views=views))
+        if nexts is None:
+            nexts = [next_view_out(action, state, view_id) for view_id, state, action in views if action != "recover"]
+        self.set_rule(MAINT + "next$", *nexts, *[next_out(*answer) for answer in after])
+        self.set_job(LOAD_VIEW, load_view_out())
+        self.set_job(CLOSE_VIEW, close_view_out())
+
+    def within_the_hour(self):
+        """A scheduled start at 12:35, within the hour of its 12:20 slot."""
+        self.write_stamp(epoch_minute(12, 20))
+        self.at(12, 35)
+
+    def at_the_slot(self):
+        """A scheduled start at 12:20, the Start minute: the hourly work is due."""
+        self.write_stamp(epoch_minute(11, 20))
+        self.at(12, 20)
+
+    def restart(self):
+        """The calls and the answer counts of the fakes start again (the rules of a later start)."""
+        self.reset_calls()
+        counts = self.state / "counts.json"
+        if counts.exists():
+            counts.unlink()
+
+    # AR-65 (lead decision 1): the cheap check finds viewing work, so a start within the hour does it at once: recover,
+    # next, load-view, next, status, under the archive lock (release.sh refuses meanwhile), with no evaluate and no run
+    # work; the final line is VIEW; the hourly slot stays as it was; the reports and the check are kept. Once nothing
+    # waits, the next start ends after the cheap check (NOT_DUE); without an answer of the check it ends quietly.
+    def test_ar65_viewing_work_at_any_start(self):
+        self.within_the_hour()
+        self.set_views()
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), VIEW_ONLY)
+        self.assertEqual(self.result.stdout, f"VIEW loaded {VIEW} OPEN\n")
+        self.assertIn(f"archive: viewing work waits for the job (view {VIEW} REQUESTED (load_view)): this start does it"
+                      " now.", self.result.stderr)
+        self.assertIn(f"archive: history-archive load-view: view {VIEW} loaded (OPEN)\n", self.result.stderr)
+        self.assertIn(f"archive: {LOADED_TEXT}\n", self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        owner = self.lock_during("recover")
+        self.assertIn("by=archive.sh\n", owner)
+        self.assertEqual(self.lock_during(LOAD_VIEW), owner)
+        self.assertIsNone(self.docker_entries(CHEAP)[0]["watch"][str(self.lock / "owner")])
+        self.assertFalse(self.lock.exists())
+        record = self.record_dirs()[0]
+        for name in ("check.json", "recover.json", "next.json", f"load-view-{VIEW}.json", f"load-view-{VIEW}.log",
+                     "next-2.json", "status.json", "messages.log"):
+            self.assertTrue((record / name).is_file(), name)
+        self.assertEqual(self.backup_calls(), [])
+        # 12:40: nothing waits any more.
+        self.restart()
+        self.set_rule(CHEAP, settings_out())
+        self.at(12, 40)
+        self.archive("--scheduled")
+        self.assertEqual((self.result.returncode, self.result.stdout), (0, "NOT_DUE\n"))
+        self.assertTrue(self.cheap_only())
+        with self.subTest(case="the check gives no answer"):
+            self.reset()
+            self.within_the_hour()
+            self.set_views()
+            self.set_rule(CHEAP, out("", rc=1, stderr='service "backend" is not running\n'))
+            self.archive("--scheduled")
+            self.assertEqual((self.result.returncode, self.result.stdout, self.result.stderr), (0, "NOT_DUE\n", ""))
+            self.assertTrue(self.cheap_only())
+
+    # AR-66 (contract B5 §3.2, §3.6): the order of one start. Deletion work first, then closing before loading, then the
+    # run work: a manual start (pf archive) closes view 3, loads view 4, then exports, verifies, copies, backs up and
+    # purges run 3 (the final line is ARCHIVE). A start at its slot does the same and marks the slot once its run work
+    # begins. A start with a deletion request and a waiting view carries out the deletion only (DELETION; the view waits
+    # for the next start). A start within the hour does the viewing work and no run work, also when `next` then names a
+    # run step.
+    def test_ar66_viewing_work_between_deletion_and_run_work(self):
+        both = ((CLOSED_VIEW, "CLOSING", "close_view"), (VIEW, "REQUESTED", "load_view"))
+        self.set_views(views=both, after=HAPPY)
+        self.archive()
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", CLOSE_VIEW, "next", LOAD_VIEW, *RUN_WORK])
+        self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
+        self.assertIn(f"view {CLOSED_VIEW} of run {VIEW_RUN} is CLOSED (a person closed it): its loaded rows were removed"
+                      " (archive_view_names 97, archive_view_lineage 12, archive_view_flows 305, archive_view_routes 40,"
+                      " archive_view_movements 4190).", self.result.stderr)
+        self.assertIn(LOADED_TEXT, self.result.stderr)
+        record = self.record_dirs()[0]
+        for name in (f"close-view-{CLOSED_VIEW}.json", f"load-view-{VIEW}.json", "next-3.json", "export.json"):
+            self.assertTrue((record / name).is_file(), name)
+        with self.subTest(case="at the slot"):
+            self.reset()
+            self.at_the_slot()
+            self.set_views(views=both, after=HAPPY)
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "evaluate", "next", CLOSE_VIEW, "next", LOAD_VIEW, *RUN_WORK])
+            self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
+            self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="a deletion request comes first"):
+            self.reset()
+            self.within_the_hour()
+            self.set_deletion()
+            self.set_rule(CHEAP, settings_out(pending=True, views=((VIEW, "REQUESTED", "load_view"),)))
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), DELETION_ORDER)
+            self.assertEqual(self.result.stdout, f"DELETION deleted {REQ} COMPLETED\n")
+            self.assertIn(f"deletion request {REQ} (APPROVED) is open: this start carries it out now", self.result.stderr)
+            self.assertIn(f"viewing work waits for the job (view {VIEW} REQUESTED (load_view))", self.result.stderr)
+            self.assertNotIn(LOAD_VIEW, self.order())
+        with self.subTest(case="within the hour: no run work"):
+            self.reset()
+            self.within_the_hour()
+            self.set_views(after=(("export", "APPROVED"),))
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), VIEW_ONLY)
+            self.assertEqual(self.result.stdout, f"VIEW loaded {VIEW} OPEN\n")
+            self.assertNotIn("hourly work is not due", self.result.stderr)
+            self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+
+    # AR-67 (lead decision 4): the final line. A start whose hourly work worked on views and on no run prints VIEW (not
+    # EVALUATE), naming the last view; a closing by the days says so. Viewing work that comes up while this start's run
+    # is RUNNING waits for a later start, which the log says once.
+    def test_ar67_the_view_line(self):
+        self.at_the_slot()
+        self.set_views(views=((CLOSED_VIEW, "OPEN", "close_view"), (VIEW, "REQUESTED", "load_view")),
+                       after=(("wait", "WAITING_FOR_COPY"),))
+        self.set_job(CLOSE_VIEW, close_view_out(by_person=False))
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", CLOSE_VIEW, "next", LOAD_VIEW, "next", "status"])
+        self.assertEqual(self.result.stdout, f"VIEW loaded {VIEW} OPEN\n")
+        self.assertIn(f"view {CLOSED_VIEW} of run {VIEW_RUN} is CLOSED (its days ran out)", self.result.stderr)
+        self.assertIn(f"run {RUN} waits for its off-host copy to be confirmed", self.result.stderr)
+        # The hourly work happened (evaluate, then `next` named the waiting run): the slot is attempted.
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="a close only"):
+            self.reset()
+            self.within_the_hour()
+            self.set_views(views=((CLOSED_VIEW, "CLOSING", "close_view"),))
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "next", CLOSE_VIEW, "next", "status"])
+            self.assertEqual(self.result.stdout, f"VIEW closed {CLOSED_VIEW} CLOSED\n")
+        with self.subTest(case="a view waits behind this start's run"):
+            self.reset()
+            waiting = view_object("REQUESTED")
+            self.set_next(("export", "APPROVED"), ("verify", "RUNNING", 0, None, None, None, waiting),
+                          ("copy", "RUNNING", 0, None, None, None, waiting),
+                          ("backup", "RUNNING", 0, None, None, None, waiting))
+            self.archive()
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "evaluate", *RUN_WORK])
+            self.assertEqual(self.result.stdout, f"ARCHIVE completed {RUN} COMPLETED\n")
+            message = (f"view {VIEW} waits while run {RUN} is RUNNING in this start: a later start does its viewing"
+                       " work.")
+            self.assertEqual(self.result.stderr.count(message), 1)
+
+    # AR-68 (lead decision 3): a failed load ends the start with exit 3: the view is FAILED with its rows removed, and
+    # its message says why and what to do; no run work follows, and the hourly slot is left to the next start, which
+    # does the hourly work.
+    def test_ar68_failed_load(self):
+        reason = (f"manifest.json of {VIEW_ARCHIVE} is not the manifest run {VIEW_RUN} verified (its SHA-256 differs)."
+                  " Nothing was loaded; restore the archive folder from its off-host copy, then open the run for viewing"
+                  " again.")
+        self.at_the_slot()
+        self.set_views(after=HAPPY)
+        self.set_job(LOAD_VIEW, load_view_out("failed", 3, error=("run_failed", reason)))
+        self.archive("--scheduled")
+        self.assertExit(3)
+        self.assertEqual(self.order(), ["recover", "evaluate", "next", LOAD_VIEW, "status"])
+        self.assertEqual(self.result.stdout, "")
+        self.assertIn(f"archive: view {VIEW} of run {VIEW_RUN} FAILED: {reason} Live history was not changed"
+                      " (OPERATIONS_RUNBOOK §11, Viewing an archive).", self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(11, 20))
+        self.assertEqual(len(self.record_dirs()), 1)
+        self.assertFalse(self.lock.exists())
+        # 12:25: the view is FAILED, nothing waits: the hourly work, evaluate included.
+        self.restart()
+        self.set_rule(CHEAP, settings_out())
+        self.set_next(*HAPPY)
+        self.at(12, 25)
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), ["recover", "evaluate", *RUN_WORK])
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+
+    # AR-69 (lead decision 3): a load or a closing that a database error interrupted ends the start with exit 2 (the
+    # view stays LOADING, which the next recover fails, or CLOSING, which the next start closes); so does a load that
+    # could not run, a step without a valid report (also one that names another view) and a view that `next` hands out
+    # again (no progress); a refusal other than wrong_state (AR-76) ends it with exit 1. Nothing follows but status, and
+    # the slot stays unmarked.
+    def test_ar69_interrupted_refused_or_unknown(self):
+        load_stopped = (f"View {VIEW} stopped loading on a database error that does not last (OperationalError). It"
+                        " stays LOADING: the next start of the job removes the rows it loaded and makes it FAILED. Open"
+                        " the run for viewing again.")
+        close_stopped = (f"View {CLOSED_VIEW} stopped closing on a database error that does not last"
+                         " (OperationalError). It stays CLOSING: the next start of the job removes the rest of its rows.")
+        unknown = (f"View {VIEW} is LOADING; the command stopped after that on an error. The host job stopped on an"
+                   " internal error (OperationalError).")
+        refused = "Another history-archive command is running. Nothing was changed."
+        loads = ((VIEW, "REQUESTED", "load_view"),)
+        closes = ((CLOSED_VIEW, "CLOSING", "close_view"),)
+        cases = (
+            ("load interrupted", loads, LOAD_VIEW, load_view_out("interrupted", 2, error=("view_interrupted",
+                                                                                           load_stopped)), 2,
+             [f"archive: view {VIEW} stopped: {load_stopped}"]),
+            ("close interrupted", closes, CLOSE_VIEW, close_view_out("interrupted", 2, error=("view_interrupted",
+                                                                                              close_stopped)), 2,
+             [f"archive: view {CLOSED_VIEW} stopped: {close_stopped}"]),
+            ("load outcome unknown", loads, LOAD_VIEW, load_view_out("could_not_run", 2, error=("outcome_unknown",
+                                                                                                 unknown)), 2,
+             [f"history-archive load-view could not run: {unknown}",
+              f"View {VIEW} stays LOADING: the next start fails it (recover) and removes the rows it loaded. Live"
+              f" history was not changed. {VIEW_AGAIN}"]),
+            ("close could not run", closes, CLOSE_VIEW, close_view_out("could_not_run", 2, error=(
+                "database_unavailable", "PartFlow could not reach its database. Nothing was changed.")), 2,
+             ["history-archive close-view could not run: PartFlow could not reach its database.",
+              f"View {CLOSED_VIEW} stays CLOSING: the next start removes the rest of its rows."]),
+            ("load refused", loads, LOAD_VIEW, load_view_out("refused", 1, error=("job_running", refused)), 1,
+             [f"history-archive load-view refused: {refused}"]),
+            ("no report", loads, LOAD_VIEW, out("", rc=137, stderr="Error response from daemon: container killed\n"), 2,
+             ["history-archive load-view gave no valid report (exit 137;",
+              f"the outcome of the load of view {VIEW} is unknown. A load never changes live history: the next start"
+              " loads a view still REQUESTED, or fails a view left LOADING (recover), which removes the rows it"
+              " loaded."]),
+            ("a report of another view", loads, LOAD_VIEW, load_view_out(view_id=5), 2,
+             ["history-archive load-view gave no valid report (exit 0;"]),
+            ("a closing without a report", closes, CLOSE_VIEW, out("", rc=137), 2,
+             [f"the outcome of the closing of view {CLOSED_VIEW} is unknown: the next start closes a view left CLOSING"
+              " (or OPEN past its days) again."]),
+        )
+        for name, views, command, answer, code, texts in cases:
+            with self.subTest(case=name):
+                self.reset()
+                self.within_the_hour()
+                self.set_views(views=views)
+                self.set_job(command, answer)
+                self.archive("--scheduled")
+                self.assertExit(code)
+                self.assertEqual(self.order(), ["recover", "next", command, "status"])
+                for text in texts:
+                    self.assertIn(text, self.result.stderr)
+                self.assertEqual(self.result.stdout, "")
+                self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+                self.assertEqual(len(self.record_dirs()), 1)
+                self.assertFalse(self.lock.exists())
+                self.assertFalse(self.incident.exists())
+        with self.subTest(case="no progress"):
+            self.reset()
+            self.within_the_hour()
+            self.set_views(nexts=[next_view_out("load_view", "REQUESTED"), next_view_out("load_view", "REQUESTED")])
+            self.archive("--scheduled")
+            self.assertExit(2)
+            self.assertEqual(self.order(), VIEW_ONLY)
+            self.assertIn(f"history-archive next answered load_view again for view {VIEW}: a step of this start made no"
+                          " progress", self.result.stderr)
+        with self.subTest(case="interrupted by a signal"):
+            for command, views, answer, text in (
+                (LOAD_VIEW, loads, load_view_out(), f"interrupted during the load of view {VIEW}. A load never changes"
+                 " live history: the next start loads a view still REQUESTED, or fails a view left LOADING (recover)"),
+                (CLOSE_VIEW, closes, close_view_out(), f"interrupted during the closing of view {CLOSED_VIEW}: the next"
+                 " start closes it again (a view left CLOSING, or OPEN past its days) and removes the rest of its"
+                 " rows."),
+            ):
+                self.reset()
+                self.at_the_slot()
+                self.set_views(views=views, after=HAPPY)
+                self.set_job(command, {**answer, "signal": "TERM"})
+                self.archive("--scheduled")
+                self.assertExit(2)
+                self.assertIn(text, self.result.stderr)
+                # The start worked on a view only: the hourly slot is left to the next start.
+                self.assertEqual(self.stamp_value(), epoch_minute(11, 20))
+                self.assertFalse(self.lock.exists())
+                self.assertFalse(self.incident.exists())
+
+    # AR-70 (contract B5 §3.5): recover fails a view that a stopped start left LOADING (its rows removed): exit 3, the
+    # message says that live history was not changed and how to see it again. The cheap check takes a start for such a
+    # view too; its recover does the work, and `next` then has no viewing work (the note says so).
+    def test_ar70_recover_fails_a_stopped_load(self):
+        self.within_the_hour()
+        self.set_views(views=((VIEW, "LOADING", "recover"),))
+        self.set_job("recover", recover_out(failed_view_ids=[VIEW]))
+        self.archive("--scheduled")
+        self.assertExit(3)
+        self.assertEqual(self.order(), ["recover", "next", "status"])
+        self.assertEqual(self.result.stdout, "")
+        self.assertIn(f"view(s) {VIEW} stopped while LOADING and are FAILED now (an interrupted job, a load that stopped"
+                      " on a database error, or a database restored from a backup taken during a load). The rows they"
+                      f" had loaded were removed; live history was not changed. {VIEW_AGAIN}", self.result.stderr)
+        self.assertIn("no view waits for the job any more (recover failed a load that a stopped start left, or a person"
+                      " cancelled the view meanwhile), and the hourly work is not due: this start ends.",
+                      self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="the work goes on"):
+            self.reset()
+            self.set_job("recover", recover_out(failed_view_ids=[VIEW]))
+            self.archive()
+            self.assertExit(3)
+            self.assertEqual(self.order(), ["recover", "evaluate", *RUN_WORK])
+        with self.subTest(case="a view that waits behind a run of another command"):
+            self.reset()
+            self.within_the_hour()
+            self.set_views(nexts=[next_out("running", "RUNNING", view=view_object("REQUESTED"))])
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "next", "status"])
+            self.assertEqual(self.result.stdout, "NOT_DUE\n")
+            self.assertIn(f"view {VIEW} waits while run {RUN} is RUNNING in another history-archive command, and the"
+                          " hourly work is not due: this start ends.", self.result.stderr)
+
+    # AR-71 (lead decision 2): while the incident record exists, no viewing work either: a start at its slot (and a
+    # manual one) runs recover and status only, exit 1, and the refusal names the views; a start within the hour ends
+    # without Docker although a view waits.
+    def test_ar71_no_viewing_work_while_the_incident_record_exists(self):
+        self.write_incident(self.incident)
+        self.at_the_slot()
+        self.set_views()
+        self.archive("--scheduled")
+        self.assertExit(1)
+        self.assertEqual(self.order(), ["recover", "status"])
+        self.assertIn(INCIDENT_REFUSAL, self.result.stderr)
+        self.assertEqual(self.result.stdout, "")
+        self.restart()
+        self.at(12, 25)
+        self.archive("--scheduled")
+        self.assertEqual((self.result.returncode, self.result.stdout), (0, "NOT_DUE\n"))
+        self.assertEqual(self.calls("docker"), [])
+        self.restart()
+        self.archive()
+        self.assertExit(1)
+        self.assertEqual(self.order(), ["recover", "status"])
+        self.assertTrue(self.incident.exists())
+
+    # AR-72: a scheduled start that finds viewing work while another archive.sh holds the lock defers it (exit 0), and
+    # says what waits: the viewing work, or the open deletion request and the viewing work.
+    def test_ar72_lock_held(self):
+        self.write_lock()
+        self.within_the_hour()
+        self.set_views()
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.result.stdout, "DEFERRED archive_running\n")
+        self.assertIn("is still working; the viewing work waits for a later start.", self.result.stderr)
+        self.assertEqual(self.steps(), [])
+        self.restart()
+        self.set_rule(CHEAP, settings_out(pending=True, views=((VIEW, "REQUESTED", "load_view"),)))
+        self.archive("--scheduled")
+        self.assertEqual(self.result.stdout, "DEFERRED archive_running\n")
+        self.assertIn("is still working; the open deletion request and the viewing work wait for a later start.",
+                      self.result.stderr)
+        self.restart()
+        self.at_the_slot()
+        self.set_rule(CHEAP, settings_out(views=((VIEW, "REQUESTED", "load_view"),)))
+        self.archive("--scheduled")
+        self.assertIn("is still working; this hour's work is skipped, and the viewing work waits for a later start.",
+                      self.result.stderr)
+
+    # AR-73: the help and the header name the viewing work, its exits and the VIEW line.
+    def test_ar73_help(self):
+        result = self.archive("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in ("The viewing work\ncomes after the deletion and before the run work, at any start",
+                     "VIEW <outcome> <view id> <state> for a start that worked on views and on no run (VIEW loaded 4 OPEN,",
+                     "or the load of a view failed: it is FAILED", "no run, no deletion request and no view",
+                     "carries out an open\n                          deletion request and the viewing work at once"):
+            self.assertIn(text, result.stdout)
+        header = ARCHIVE_SH.read_text(encoding="utf-8").split("\nset -eu\n", 1)[0]
+        for text in ("`VIEW <outcome> <view id> <state>`", "`close_view`: close-view --view N",
+                     "`load_view`: load-view --view N", "`load-view-<view id>` and `close-view-<view id>`"):
+            self.assertIn(text, header)
+
+    # AR-76 (review B5 m1): a view that changed after `next` handed it out (a person cancelled it before its load, or its
+    # days were raised before its closing) is refused with wrong_state, which changed nothing: the start logs it and asks
+    # `next` again instead of ending with exit 1. The final line names only a view that a step loaded or closed; the
+    # DONE_STEPS rule still stops a `next` that hands the same view out again.
+    def test_ar76_a_view_that_changed_meanwhile(self):
+        cancelled = f"View {VIEW} is CANCELLED; only a REQUESTED view can be loaded. Nothing was changed."
+        not_expired = (f"View {CLOSED_VIEW} is open until 2026-10-20T12:21:03.000000Z and nobody closed it. Nothing was"
+                       " changed.")
+        self.within_the_hour()
+        self.set_views()
+        self.set_job(LOAD_VIEW, load_view_out("refused", 1, error=("wrong_state", cancelled)))
+        self.archive("--scheduled")
+        self.assertExit(0)
+        self.assertEqual(self.order(), VIEW_ONLY)
+        self.assertEqual(self.result.stdout, "NOT_DUE\n")
+        self.assertIn(f"archive: history-archive load-view refused view {VIEW}, which changed after next handed it out:"
+                      f" {cancelled} This start asks next again.\n", self.result.stderr)
+        self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        self.assertFalse(self.lock.exists())
+        with self.subTest(case="the days were raised before the closing, at the slot"):
+            self.reset()
+            self.at_the_slot()
+            self.set_views(views=((CLOSED_VIEW, "OPEN", "close_view"), (VIEW, "REQUESTED", "load_view")))
+            self.set_job(CLOSE_VIEW, close_view_out("refused", 1, error=("wrong_state", not_expired)))
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "evaluate", "next", CLOSE_VIEW, "next", LOAD_VIEW, "next",
+                                            "status"])
+            self.assertEqual(self.result.stdout, f"VIEW loaded {VIEW} OPEN\n")
+            self.assertIn(f"history-archive close-view refused view {CLOSED_VIEW}, which changed after next handed it"
+                          f" out: {not_expired} This start asks next again.", self.result.stderr)
+            self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="no other work at the slot"):
+            self.reset()
+            self.at_the_slot()
+            self.set_views(views=((CLOSED_VIEW, "OPEN", "close_view"),))
+            self.set_job(CLOSE_VIEW, close_view_out("refused", 1, error=("wrong_state", not_expired)))
+            self.archive("--scheduled")
+            self.assertExit(0)
+            self.assertEqual(self.order(), ["recover", "evaluate", "next", CLOSE_VIEW, "next", "status"])
+            self.assertEqual(self.result.stdout, "EVALUATE off - -\n")
+            self.assertEqual(self.stamp_value(), epoch_minute(12, 20))
+        with self.subTest(case="the same view handed out again"):
+            self.reset()
+            self.within_the_hour()
+            self.set_views(nexts=[next_view_out("load_view", "REQUESTED"), next_view_out("load_view", "REQUESTED")])
+            self.set_job(LOAD_VIEW, load_view_out("refused", 1, error=("wrong_state", cancelled)))
+            self.archive("--scheduled")
+            self.assertExit(2)
+            self.assertEqual(self.order(), VIEW_ONLY)
+            self.assertIn(f"history-archive next answered load_view again for view {VIEW}: a step of this start made no"
+                          " progress", self.result.stderr)
 
 
 if __name__ == "__main__":

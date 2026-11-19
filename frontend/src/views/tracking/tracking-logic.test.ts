@@ -11,12 +11,14 @@ import { formatTimeOfDay, formatTimestampShort } from '../dates';
 import {
   archivedHistoryText,
   archivedTimestamp,
+  codeRuns,
   describeArchivedHistory,
   detailRevisions,
   historyEntries,
   historyEntryKey,
   routeSteps,
   timestamp,
+  WHOLE_CODE_MAX_LENGTH,
 } from './tracking-logic';
 
 // The per-section revision signatures of a polled Tracking detail: a
@@ -251,4 +253,28 @@ test('the snapshot steps of an archived flow read archived — neither done nor 
     'cur',
     'future',
   ]);
+});
+
+test('a history row keeps its codes whole: every hyphenated run of characters up to the limit, the text unchanged', () => {
+  const text =
+    'QC → PACK · qty 10 · QF-44 · W: Anna-Lee · ST-PACK · reason: rework — re-cut';
+  const runs = codeRuns(text);
+  expect(runs.map((run) => run.text).join('')).toBe(text);
+  expect(runs.filter((run) => run.code).map((run) => run.text)).toEqual([
+    'QF-44',
+    'Anna-Lee',
+    'ST-PACK',
+    're-cut',
+  ]);
+  // A dash between words and a lone hyphen are not codes.
+  expect(codeRuns('Lathe — ready · -3 · a--b')).toEqual([
+    { text: 'Lathe — ready · -3 · a--b', code: false },
+  ]);
+  // A code longer than the limit may still break at its hyphens.
+  const long = `PN-${'X'.repeat(WHOLE_CODE_MAX_LENGTH)}`;
+  expect(codeRuns(`${long} · QF-1`)).toEqual([
+    { text: `${long} · `, code: false },
+    { text: 'QF-1', code: true },
+  ]);
+  expect(codeRuns('')).toEqual([]);
 });

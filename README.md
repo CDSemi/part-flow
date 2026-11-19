@@ -74,6 +74,8 @@ backend. In user terms:
   history (exported to checked archive files, copied off the server, then
   purged from the database with every quantity kept), requested by hand or,
   once switched on, proposed by the server when the history grows past a limit.
+  A finished run's archive can be opened for viewing in PartFlow for a set
+  number of days, apart from the live history.
 - **Permanent deletion.** A Work Order or a Part Number entered by mistake, for
   example for a test, can be deleted with all its data as if it had never been
   entered: a user who holds the permission requests it in Work Order Details or
@@ -267,7 +269,7 @@ docker compose up --build -V
 ## Database migrations (Alembic)
 
 Apply the migrations (from the no-op repository-foundation baseline up to the
-current head, `0043_phase16_automatic_runs`):
+current head, `0044_phase16_archive_viewing`):
 
 ```bash
 docker compose exec backend uv run alembic upgrade head
@@ -561,11 +563,15 @@ The pytest suite holds three kinds of tests:
   `0042_phase16_deletion_requests`, the permanent deletion requests with the
   row guards of every table a deletion deletes from;
   `tests/test_deletion_requests.py` covers the requests, the host job's
-  deletion and the API; `tests/test_automatic_runs_schema.py` covers the single
-  head `0043_phase16_automatic_runs`, the run guard of automatic runs, and the
-  parity between the models and the migrations; `tests/test_automatic_runs.py`
-  covers the settings of automatic runs, `history-archive evaluate`, approval
-  and dismissal, the re-checks of a run's authority and the reminders.
+  deletion and the API; `tests/test_automatic_runs_schema.py` covers
+  `0043_phase16_automatic_runs` and the run guard of automatic runs;
+  `tests/test_automatic_runs.py` covers the settings of automatic runs,
+  `history-archive evaluate`, approval and dismissal, the re-checks of a run's
+  authority and the reminders; `tests/test_archive_viewing_schema.py` covers
+  the single head `0044_phase16_archive_viewing`, the guards of the views and
+  the viewer tables, and the parity between the models and the migrations;
+  `tests/test_archive_viewing.py` covers the viewing settings, the load and
+  its failures, the closing, the limit of loaded runs and the viewer.
   `tests/test_release_gate_api.py`, `tests/test_migrate_cli.py` and
   `tests/test_revision_cli.py` cover the write gate (409 `release_mismatch`, 503
   `not_ready`), the `migrate` job (one transaction, refusals, locks) and the
@@ -792,7 +798,8 @@ docs/              canonical project documentation
 
 | Date | Commit | Change |
 | --- | --- | --- |
-| 2026-11-18 | uncommitted | The migration head is `0043_phase16_automatic_runs`, covered by `tests/test_automatic_runs_schema.py`; archival runs can be proposed by the server once automatic runs are switched on. |
+| 2026-11-19 | uncommitted | The migration head is `0044_phase16_archive_viewing`, covered by `tests/test_archive_viewing_schema.py`; a finished run's archive can be opened for viewing. |
+| 2026-11-18 | `bac89d7` | The migration head is `0043_phase16_automatic_runs`, covered by `tests/test_automatic_runs_schema.py`; archival runs can be proposed by the server once automatic runs are switched on. |
 | 2026-11-18 | `1874636` | The migration head is `0042_phase16_deletion_requests`, covered by `tests/test_deletion_requests_schema.py`; a Work Order or Part Number can be deleted permanently through a request that the server carries out. |
 | 2026-11-18 | `d094f5e` | The migration head is `0041_phase16_history_purge`, covered by `tests/test_history_purge_schema.py`; archival runs purge the archived Movement history, and reconcile check (g) is implemented. |
 | 2026-11-17 | `2f12d33` | The migration head is `0040_phase16_history_archive`, covered by `tests/test_history_archive_schema.py`; archival runs export old Movement history without deleting it. |

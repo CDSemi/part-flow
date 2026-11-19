@@ -12,6 +12,8 @@ import { PERMISSIONS } from '../../api/roles';
 import type { SessionUser } from '../../api/session';
 import { ConnectivityContext } from '../../app/connectivity-context';
 import type { ConnectivityStatus } from '../../app/connectivity-context';
+import { RouterContext } from '../../app/router-context';
+import type { RouterValue } from '../../app/router-context';
 import { SessionContext, hasPermission } from '../../app/session-context';
 import type { SessionValue } from '../../app/session-context';
 import { hasUnsavedWork } from '../../app/unsaved-work';
@@ -780,6 +782,8 @@ async function handle(url: string, init?: RequestInit): Promise<Response> {
       archive_limit_database_gib: 20,
       archive_approval_required: true,
       archive_interval_days: 7,
+      archive_view_days: 7,
+      archive_view_max_loaded: 1,
       standing_authorization: null,
       updated_at: T0,
     });
@@ -1568,14 +1572,26 @@ function signedInUser(
 
 let session: SessionValue;
 
+/** The router at `/administration` (the archive viewer of History archival
+ * & purge has its own suite, ArchiveViewerPage.test.tsx). */
+const ADMIN_ROUTER: RouterValue = {
+  route: { view: 'administration' },
+  path: '/administration',
+  navigate: () => undefined,
+  setNavigationGuard: () => undefined,
+  setManagementReadable: () => undefined,
+};
+
 /** Administration under the current `session` and a connectivity. */
 function adminTree(status: ConnectivityStatus = 'connected') {
   return (
-    <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
-      <SessionContext.Provider value={session}>
-        <AdministrationView />
-      </SessionContext.Provider>
-    </ConnectivityContext.Provider>
+    <RouterContext.Provider value={ADMIN_ROUTER}>
+      <ConnectivityContext.Provider value={{ status, retry: vi.fn() }}>
+        <SessionContext.Provider value={session}>
+          <AdministrationView />
+        </SessionContext.Provider>
+      </ConnectivityContext.Provider>
+    </RouterContext.Provider>
   );
 }
 
@@ -6320,6 +6336,8 @@ test('FA-3: without its permission every section is view-only — values as text
     'Report a waiting run after': '7 days',
     'Movements per purge batch': '50,000',
     'Part Numbers per purge batch': '20',
+    'A loaded archive stays open': '7 days',
+    'Runs loaded for viewing at once': '1',
     'Automatic runs': 'Off',
     Measure: 'Live Movement rows',
     Limit: '5,000,000 rows',

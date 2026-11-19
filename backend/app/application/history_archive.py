@@ -94,10 +94,12 @@ from app.domain.enums import (
     Permission,
 )
 from app.infrastructure.models import (
+    ARCHIVE_VIEWER_TABLES,
     HISTORY_ARCHIVE_FINAL_STATES,
     HISTORY_ARCHIVE_OPEN_STATES,
     ApplicationPolicy,
     HistoryArchiveRun,
+    HistoryArchiveView,
 )
 
 #: The one group of build step 1 (the optional groups are a later step).
@@ -742,6 +744,13 @@ class RunView:
     approved_by: RunUser | None = None
     dismissed_by: RunUser | None = None
     authorization: RunAuthorization | None = None
+    #: The newest view of its archive (build step 5): its id and state.
+    archive_view: tuple[int, str] | None = None
+
+    @property
+    def viewable(self) -> bool:
+        """Whether its archive can be opened for viewing: finished, verified."""
+        return is_final(self.run.state) and self.run.verified_at is not None
 
 
 def _users(session: Session, ids: set[int]) -> dict[int, RunUser]:
@@ -796,6 +805,7 @@ def views(session: Session, runs: Sequence[HistoryArchiveRun]) -> list[RunView]:
         actor, at = authorizations.get(audit_event_id, (None, None))
         return RunAuthorization(audit_event_id, user(actor), at)
 
+    archive_views = _newest_views(session, {run.id for run in runs})
     return [
         RunView(
             run,
@@ -805,9 +815,29 @@ def views(session: Session, runs: Sequence[HistoryArchiveRun]) -> list[RunView]:
             approved_by=user(run.approved_by_user_id),
             dismissed_by=user(run.dismissed_by_user_id),
             authorization=authorization(run.authorization_id),
+            archive_view=archive_views.get(run.id),
         )
         for run in runs
     ]
+
+
+def _newest_views(session: Session, run_ids: set[int]) -> dict[int, tuple[int, str]]:
+    """The newest view (its id and state) of each of these runs that has one."""
+    if not run_ids:
+        return {}
+    newest = (
+        select(func.max(HistoryArchiveView.id))
+        .where(HistoryArchiveView.run_id.in_(run_ids))
+        .group_by(HistoryArchiveView.run_id)
+    )
+    return {
+        int(row.run_id): (int(row.id), str(row.state))
+        for row in session.execute(
+            select(
+                HistoryArchiveView.run_id, HistoryArchiveView.id, HistoryArchiveView.state
+            ).where(HistoryArchiveView.id.in_(newest))
+        )
+    }
 
 
 def list_runs(session: Session, *, limit: int = DEFAULT_RUN_LIMIT) -> list[RunView]:
@@ -1112,6 +1142,15 @@ OLDEST_RETAINED_MOVEMENT_SQL: Final = (
 )
 #: The database's size: the exact sum of its files on disk.
 DATABASE_SIZE_SQL: Final = "SELECT pg_database_size(current_database())"
+#: The disk space of the viewer tables of viewing an archive (build step 5) with
+#: their indexes and TOAST: every loaded view's rows and the space closed views
+#: freed in them. A copy of archived history, never live history, so the
+#: database-size measure leaves it out.
+VIEWER_BYTES_SQL: Final = (
+    "SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0) FROM pg_class c"
+    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE n.nspname = 'public' AND c.relname = ANY(:tables)"
+)
 #: How each measure is read (the report's ``measure.read``): all exact, no estimate.
 MEASURE_READS: Final = {
     HistoryArchiveMeasure.LIVE_MOVEMENT_ROWS.value: "count",
@@ -1124,8 +1163,8 @@ class Measurement(NamedTuple):
     """What the measure of automatic runs read now, and whether it passes its limit."""
 
     measure: str
-    #: Live Movement rows, the database's bytes, or the time of the oldest
-    #: retained Movement (None: no Movement is retained).
+    #: Live Movement rows, the database's bytes without the viewer tables, or
+    #: the time of the oldest retained Movement (None: no Movement is retained).
     value: int | datetime.datetime | None
     #: Rows, months or GiB, as the setting of the measure holds it.
     limit: int
@@ -1133,6 +1172,10 @@ class Measurement(NamedTuple):
     #: The age measure only: the instant the oldest retained Movement is older
     #: than when it passes (the cutoff's day, the limit's months earlier).
     threshold: datetime.datetime | None = None
+    #: The size measure only: the database's whole size, and the space of the
+    #: viewer tables subtracted from it (``value`` is the difference).
+    database_bytes: int | None = None
+    viewer_bytes: int | None = None
 
     def document(self) -> dict[str, Any]:
         value = iso(self.value) if isinstance(self.value, datetime.datetime) else self.value
@@ -1143,12 +1186,24 @@ class Measurement(NamedTuple):
             "limit": self.limit,
             "threshold": iso(self.threshold),
             "passes": self.passes,
+            "database_bytes": self.database_bytes,
+            "viewer_bytes": self.viewer_bytes,
         }
 
 
 def database_bytes(connection: Session | Connection) -> int:
     """The database's size in bytes (the seam the size tests pin)."""
     return int(connection.execute(text(DATABASE_SIZE_SQL)).scalar_one())
+
+
+def viewer_bytes(connection: Session | Connection) -> int:
+    """The disk space of the viewer tables with their indexes and TOAST (``status`` reports
+    it; the database-size measure subtracts it)."""
+    return int(
+        connection.execute(
+            text(VIEWER_BYTES_SQL), {"tables": list(ARCHIVE_VIEWER_TABLES)}
+        ).scalar_one()
+    )
 
 
 def measure(
@@ -1163,6 +1218,11 @@ def measure(
     limit in GiB; the retained history when its oldest Movement is older
     than the cutoff by more than the limit's months (strictly older than the
     start of the cutoff's day that many months earlier).
+
+    The database size leaves out the viewer tables of viewing an archive
+    (their rows, indexes and TOAST, and the space closed views freed in them):
+    a loaded view is a copy of archived history, and opening one must never
+    make an automatic run (review of step 5, M1). Both sizes are reported.
     """
     if settings.measure == HistoryArchiveMeasure.RETAINED_HISTORY_AGE:
         oldest = connection.execute(text(OLDEST_RETAINED_MOVEMENT_SQL)).scalar_one()
@@ -1175,12 +1235,16 @@ def measure(
             threshold,
         )
     if settings.measure == HistoryArchiveMeasure.DATABASE_SIZE:
-        size = database_bytes(connection)
+        whole = database_bytes(connection)
+        viewer = viewer_bytes(connection)
+        size = max(whole - viewer, 0)
         return Measurement(
             settings.measure,
             size,
             settings.limit_database_gib,
             size > settings.limit_database_gib * GIB,
+            database_bytes=whole,
+            viewer_bytes=viewer,
         )
     rows = int(connection.execute(text(LIVE_MOVEMENT_ROWS_SQL)).scalar_one())
     return Measurement(

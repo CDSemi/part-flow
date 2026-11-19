@@ -3,8 +3,9 @@
 Runs the real Alembic chain against isolated, temporary PostgreSQL databases
 (created and dropped by the fixtures) and verifies:
 
-- the revision in the chain (``0043_phase16_automatic_runs``, history
-  archival step 4, is the head since; its own test pins the single head),
+- the revision in the chain (``0043_phase16_automatic_runs`` and
+  ``0044_phase16_archive_viewing``, history archival steps 4 and 5, follow
+  it; the head's own test pins the single head),
   the models matching the schema migrated to head, and the migration's
   literals against the models, the enums, ``permanent_deletion`` and
   migrations 0040 and 0041;
@@ -65,6 +66,7 @@ _CODE_HEAD = schema_revision.code_head()
 _MIGRATION_FILE = _VERSIONS / "20261118_0042_phase16_deletion_requests.py"
 _PURGE_FILE = _VERSIONS / "20261118_0041_phase16_history_purge.py"
 _ARCHIVE_FILE = _VERSIONS / "20261117_0040_phase16_history_archive.py"
+_VIEWING_FILE = _VERSIONS / "20261118_0044_phase16_archive_viewing.py"
 _HEAD_TEMPLATE = "partflow_test_deletion_requests_schema_head"
 _CASE = "partflow_test_deletion_requests_schema_case"
 _PREVIOUS = "partflow_test_deletion_requests_schema_previous"
@@ -223,6 +225,7 @@ def test_the_migration_literals_match_the_models_and_earlier_revisions() -> None
     migration = _load(_MIGRATION_FILE, "deletion_requests_migration")
     purge = _load(_PURGE_FILE, "history_purge_migration_for_0042")
     archive = _load(_ARCHIVE_FILE, "history_archive_migration_for_0042")
+    viewing = _load(_VIEWING_FILE, "archive_viewing_migration_for_0042")
     assert (migration.revision, migration.down_revision) == (_HEAD_REVISION, _PREVIOUS_REVISION)
     assert tuple(state.value for state in DeletionRequestState) == migration._STATES
     assert migration._FINAL_STATES == models.DELETION_REQUEST_FINAL_STATES
@@ -241,9 +244,10 @@ def test_the_migration_literals_match_the_models_and_earlier_revisions() -> None
     assert tuple(permission.value for permission in Permission) == migration._PERMISSIONS
     assert migration._PERMISSION_SQL == models.ROLE_PERMISSION_SQL
     assert migration._PREVIOUS_ENTITY_TYPES == archive._ENTITY_TYPES
-    assert (
-        _model_checks(models.AuditEvent)["ck_audit_events_entity_type"] == migration._ENTITY_TYPES
-    )
+    # 0044 (step 5) appends HistoryArchiveView and repeats this revision's list as
+    # its previous one.
+    assert migration._ENTITY_TYPES == viewing._PREVIOUS_ENTITY_TYPES
+    assert _model_checks(models.AuditEvent)["ck_audit_events_entity_type"] == viewing._ENTITY_TYPES
     # The bodies the downgrade restores are 0041's Movement guard and 0040's audit scope.
     assert migration._PREVIOUS_MOVEMENTS_BODY == purge._DELETE_BODY
     assert _body(archive._CREATE_AUDIT_FUNCTION) == migration._PREVIOUS_AUDIT_BODY
@@ -254,7 +258,6 @@ def test_the_migration_literals_match_the_models_and_earlier_revisions() -> None
         (migration._GUARD_FUNCTION, migration._GUARD_BODY),
         (migration._LOCK_FUNCTION, migration._LOCK_BODY),
         (migration._MOVEMENTS_FUNCTION, migration._MOVEMENTS_BODY),
-        (migration._AUDIT_FUNCTION, migration._AUDIT_BODY),
     ):
         assert hashlib.sha256(body.encode("utf-8")).hexdigest() == GUARD_FUNCTION_SHA256[name]
     for name, _statement, table in migration._TRIGGERS:
@@ -267,10 +270,15 @@ def test_the_migration_literals_match_the_models_and_earlier_revisions() -> None
         "CREATE TRIGGER trg_machine_lifecycle_events_forbid_mutation BEFORE DELETE OR UPDATE OR"
         " TRUNCATE ON"
     )
-    # The maintenance role deletes from exactly the tables a deletion deletes from.
+    # The audit scope this revision wrote is the one 0044 (step 5) replaces and
+    # its downgrade restores; the pin is 0044's.
+    assert migration._AUDIT_FUNCTION == viewing._AUDIT_FUNCTION
+    assert migration._AUDIT_BODY == viewing._PREVIOUS_AUDIT_BODY
+    # The maintenance role deletes from exactly the tables a deletion deletes from,
+    # and (step 5) from the viewer tables, under their own statement guards.
     assert {
         table for table, privileges in MAINTENANCE_PRIVILEGES.items() if "DELETE" in privileges
-    } == set(migration._TABLES)
+    } == set(migration._TABLES) | set(viewing._VIEWER_TABLES)
     assert {
         table for table, privileges in MAINTENANCE_PRIVILEGES.items() if "UPDATE" in privileges
     } == {
@@ -278,6 +286,7 @@ def test_the_migration_literals_match_the_models_and_earlier_revisions() -> None
         "history_archive_runs",
         "history_archived_flows",
         migration._REQUESTS,
+        "history_archive_views",
     }
     # The pre-purge backup of a request is labelled with it.
     assert backups.PRE_PURGE_LABEL_PATTERN.fullmatch("deletion-7-20271110T050102Z")

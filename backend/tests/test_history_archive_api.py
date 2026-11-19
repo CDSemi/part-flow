@@ -73,6 +73,9 @@ _DEFAULTS = {
     "archive_limit_database_gib": 20,
     "archive_approval_required": True,
     "archive_interval_days": 7,
+    # Viewing an archive (history archival step 5, migration 0044).
+    "archive_view_days": 7,
+    "archive_view_max_loaded": 1,
 }
 _E_DENIED = "Your account does not have permission to do this."
 
@@ -165,7 +168,8 @@ def restore_settings(owner: Engine) -> Iterator[None]:
                 " archive_automatic_runs = false, archive_measure = 'LIVE_MOVEMENT_ROWS',"
                 " archive_limit_movement_rows = 5000000, archive_limit_history_months = 1,"
                 " archive_limit_database_gib = 20, archive_approval_required = true,"
-                " archive_interval_days = 7, archive_authorization_id = NULL"
+                " archive_interval_days = 7, archive_authorization_id = NULL,"
+                " archive_view_days = 7, archive_view_max_loaded = 1"
             )
         )
         open_ids = list(

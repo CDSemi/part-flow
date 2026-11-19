@@ -1508,8 +1508,9 @@ def test_the_cli_prints_one_json_report_with_its_exit_code(
         20,
     )
     assert document["archive_dir"] == str(folders.archive_dir)
-    # The common keys (build step 3 adds request_id: the deletion request worked on).
-    assert list(document)[:10] == [
+    # The common keys (build step 3 adds request_id: the deletion request worked on;
+    # build step 5 view_id: the view of an archive worked on).
+    assert list(document)[:11] == [
         "report_version",
         "command",
         "result",
@@ -1519,6 +1520,7 @@ def test_the_cli_prints_one_json_report_with_its_exit_code(
         "duration_ms",
         "run_id",
         "request_id",
+        "view_id",
         "state",
     ]
     assert list(document)[-1] == "error"

@@ -77,6 +77,9 @@ _OTHER_SETTINGS = {
     "archive_limit_database_gib": 20,
     "archive_approval_required": True,
     "archive_interval_days": 7,
+    # Viewing an archive (history archival step 5, migration 0044).
+    "archive_view_days": 7,
+    "archive_view_max_loaded": 1,
 }
 
 _E_T1 = (

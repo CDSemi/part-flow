@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
+import type { ReactNode } from 'react';
 
 import { errorMessage } from '../../api/client';
 import {
@@ -8,8 +9,21 @@ import {
   dismissArchiveRun,
 } from '../../api/history-archive';
 import type { ArchiveRun } from '../../api/history-archive';
+import {
+  cancelArchiveView,
+  closeArchiveView,
+  listArchiveViews,
+  openArchiveForViewing,
+} from '../../api/history-archive-views';
+import type {
+  ArchiveRunView,
+  ArchiveView,
+} from '../../api/history-archive-views';
 import { writeOutcomeUnknown } from '../../api/scan-station';
+import { useApiData } from '../../api/use-api-data';
 import type { ApiData } from '../../api/use-api-data';
+import { Link } from '../../app/link';
+import { archiveViewerPath } from '../../app/router-core';
 import { useCloseGuard } from '../../components/close-guard';
 import { DiscardInputDialog } from '../../components/close-guard-dialogs';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -28,11 +42,13 @@ import {
   formatInstant,
   latestRunStep,
   movementsText,
+  openForViewingText,
   PRE_PURGE_BACKUP_LABEL,
   purgedLine,
   runAwaitsApproval,
   runAwaitsCopyConfirmation,
   runCanBeCancelled,
+  runCanBeOpenedForViewing,
   runCounts,
   runEffectText,
   runOutcome,
@@ -41,11 +57,14 @@ import {
   runStateTone,
   runTimes,
   startedWithoutApprovalText,
+  viewDetailText,
+  viewStateLabel,
+  viewStateTone,
 } from './archive-runs';
 import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 
 // Administration → History archival & purge → Runs (archival design B
-// steps 1, 2 and 4): every run, newest first, with its state in plain
+// steps 1, 2, 4 and 5): every run, newest first, with its state in plain
 // words, the cutoff with the previewed, exported, purged and skipped
 // counts, who requested it and why — or Automatic, with the approval or
 // the standing authorization it started under —, its times, and what it
@@ -62,20 +81,45 @@ import { AdminField, ServerErrorNote, SettingsCard } from './section-widgets';
 // then takes the pre-purge backup and purges. The server decides every
 // transition and its refusals are shown as given; an action whose answer
 // was lost reloads the runs and says so (every action is safe to repeat).
+//
+// Viewing (D16, build step 5), for holders of the key only: under the
+// run's state, its newest view with its state — until when an open view
+// stays open, why a load failed, who closed or cancelled it (the details
+// come from the views list, read beside the runs) — then View (the viewer
+// page) and Close viewing… on an open view, Cancel… on a waiting one, and
+// Open for viewing… on a run the server marks viewable while it has no
+// active view. Each asks first; Open for viewing says what loading does.
 
 type Notice =
   { kind: 'done'; text: string } | { kind: 'unknown'; text: string } | null;
 
-type RunAction = 'approve' | 'dismiss' | 'cancel' | 'confirm-copy';
+type RunAction =
+  | 'approve'
+  | 'dismiss'
+  | 'cancel'
+  | 'confirm-copy'
+  | 'open-view'
+  | 'cancel-view'
+  | 'close-view';
+
+/** No views: only a holder of the key reads them, beside the runs (the
+ * server's default number of the newest views). */
+function noViews(): Promise<ArchiveView[]> {
+  return Promise.resolve([]);
+}
 
 export function ArchiveRunsCard({
   runsData,
   canWrite,
   writeBlocked,
+  viewDays,
 }: {
   runsData: ApiData<ArchiveRun[]>;
   canWrite: boolean;
   writeBlocked: boolean;
+  /** The days a loaded archive stays open (the setting); null while the
+   * settings are not loaded. */
+  viewDays: number | null;
 }) {
   const [acting, setActing] = useState<{
     action: RunAction;
@@ -83,11 +127,22 @@ export function ArchiveRunsCard({
   } | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const { state } = runsData;
+  const loadViews = useCallback(
+    () => (canWrite ? listArchiveViews() : noViews()),
+    [canWrite],
+  );
+  const viewsData = useApiData(loadViews);
+  const views =
+    viewsData.state.status === 'ready' ? viewsData.state.data : null;
 
+  const reloadAll = () => {
+    runsData.reload();
+    viewsData.reload();
+  };
   const finished = (next: Notice) => {
     setActing(null);
     setNotice(next);
-    runsData.reload();
+    reloadAll();
   };
   const dialogProps = {
     writeBlocked,
@@ -108,7 +163,7 @@ export function ArchiveRunsCard({
           disabled={state.status === 'loading'}
           onClick={() => {
             setNotice(null);
-            runsData.reload();
+            reloadAll();
           }}
         >
           Reload
@@ -122,6 +177,15 @@ export function ArchiveRunsCard({
       ) : null}
       <ServerErrorNote
         message={notice?.kind === 'unknown' ? notice.text : null}
+      />
+      {/* The views only add details (until when, why a load failed): the
+          runs still show each newest view's state without them. */}
+      <ServerErrorNote
+        message={
+          viewsData.state.status === 'error'
+            ? `The details of the archives loaded for viewing could not be loaded. ${viewsData.state.message}`
+            : null
+        }
       />
       {state.status === 'loading' ? (
         <LoadingState label="Loading runs" />
@@ -155,6 +219,11 @@ export function ArchiveRunsCard({
                 run={run}
                 canWrite={canWrite}
                 writeBlocked={writeBlocked}
+                view={
+                  run.view === null || views === null
+                    ? null
+                    : (views.find((view) => view.id === run.view?.id) ?? null)
+                }
                 onAction={(action) => {
                   setNotice(null);
                   setActing({ action, run });
@@ -176,6 +245,27 @@ export function ArchiveRunsCard({
       {acting?.action === 'confirm-copy' ? (
         <ConfirmCopyDialog run={acting.run} {...dialogProps} />
       ) : null}
+      {acting?.action === 'open-view' ? (
+        <OpenForViewingDialog
+          run={acting.run}
+          viewDays={viewDays}
+          {...dialogProps}
+        />
+      ) : null}
+      {acting?.action === 'cancel-view' && acting.run.view !== null ? (
+        <CancelViewDialog
+          run={acting.run}
+          view={acting.run.view}
+          {...dialogProps}
+        />
+      ) : null}
+      {acting?.action === 'close-view' && acting.run.view !== null ? (
+        <CloseViewDialog
+          run={acting.run}
+          view={acting.run.view}
+          {...dialogProps}
+        />
+      ) : null}
     </SettingsCard>
   );
 }
@@ -184,11 +274,14 @@ function RunRow({
   run,
   canWrite,
   writeBlocked,
+  view,
   onAction,
 }: {
   run: ArchiveRun;
   canWrite: boolean;
   writeBlocked: boolean;
+  /** The details of the run's newest view, once the views are read. */
+  view: ArchiveView | null;
   onAction: (action: RunAction) => void;
 }) {
   const skipped =
@@ -242,6 +335,9 @@ function RunRow({
           {canWrite && runCanBeCancelled(run)
             ? actionButton('cancel', 'Cancel…', `Cancel run ${run.id}…`)
             : null}
+          {canWrite ? (
+            <RunViewing run={run} view={view} actionButton={actionButton} />
+          ) : null}
         </div>
       </td>
       <td data-label="Cutoff and counts">
@@ -358,6 +454,78 @@ function RunTime({ label, at }: { label: string; at: string }) {
     <span className="admin-runtime">
       {label} <span className="admin-runwhen">{formatInstant(at)}</span>
     </span>
+  );
+}
+
+/** The viewing of a run's archive, under the run's state: its newest view
+ * with its state and details, View and Close viewing… on an open view,
+ * Cancel… on a waiting one, and Open for viewing… while the run is
+ * viewable and has no active view. Nothing for a run that was never
+ * viewed and cannot be. */
+function RunViewing({
+  run,
+  view,
+  actionButton,
+}: {
+  run: ArchiveRun;
+  view: ArchiveView | null;
+  actionButton: (action: RunAction, label: string, name: string) => ReactNode;
+}) {
+  const newest = run.view;
+  const canOpen = runCanBeOpenedForViewing(run);
+  if (newest === null && !canOpen) return null;
+  const detail = view === null ? null : viewDetailText(view);
+  return (
+    <div className="admin-runviewing">
+      {newest !== null ? (
+        <>
+          <span className={`pillnav ${viewStateTone(newest.state)}`}>
+            {viewStateLabel(newest.state)}
+          </span>
+          {detail !== null ? (
+            <span
+              className={
+                newest.state === 'FAILED' ? 'admin-runreason' : 'admin-runsub'
+              }
+            >
+              {detail}
+            </span>
+          ) : null}
+          {/* View is a navigation and a read: it stays available while
+              disconnected. */}
+          {newest.state === 'OPEN' ? (
+            <Link
+              className="admin-btn"
+              to={archiveViewerPath(newest.id)}
+              aria-label={`View the archive of run ${run.id}`}
+            >
+              View
+            </Link>
+          ) : null}
+          {newest.state === 'OPEN'
+            ? actionButton(
+                'close-view',
+                'Close viewing…',
+                `Close viewing of run ${run.id}…`,
+              )
+            : null}
+          {newest.state === 'REQUESTED'
+            ? actionButton(
+                'cancel-view',
+                'Cancel…',
+                `Cancel viewing of run ${run.id}…`,
+              )
+            : null}
+        </>
+      ) : null}
+      {canOpen
+        ? actionButton(
+            'open-view',
+            'Open for viewing…',
+            `Open run ${run.id} for viewing…`,
+          )
+        : null}
+    </div>
   );
 }
 
@@ -666,5 +834,129 @@ function ConfirmCopyDialog({
         </button>
       </div>
     </ModalDialog>
+  );
+}
+
+/** One viewing action's request, with what the card says once it is done
+ * or when its answer was lost; a refusal stays in the dialog as given. */
+function useViewingAction(
+  send: () => Promise<unknown>,
+  done: string,
+  unknown: string,
+  {
+    writeBlocked,
+    onFinished,
+  }: Pick<RunDialogProps, 'writeBlocked' | 'onFinished'>,
+) {
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const confirm = async () => {
+    if (busy || writeBlocked) return;
+    setBusy(true);
+    setServerError(null);
+    try {
+      await send();
+      onFinished({ kind: 'done', text: done });
+    } catch (error) {
+      if (writeOutcomeUnknown(error)) {
+        onFinished({ kind: 'unknown', text: unknown });
+        return;
+      }
+      setServerError(errorMessage(error));
+      setBusy(false);
+    }
+  };
+  return { busy, serverError, confirm };
+}
+
+function OpenForViewingDialog({
+  run,
+  viewDays,
+  writeBlocked,
+  onCancel,
+  onFinished,
+}: RunDialogProps & { viewDays: number | null }) {
+  const { busy, serverError, confirm } = useViewingAction(
+    () => openArchiveForViewing(run.id),
+    `Run ${run.id} is waiting to be loaded for viewing. The archival job on the server loads it within minutes: Reload shows when it is open, and View then opens it.`,
+    `The server did not answer, so run ${run.id} may or may not have been opened for viewing. Check its state in the table; opening it again is safe.`,
+    { writeBlocked, onFinished },
+  );
+  return (
+    <ConfirmDialog
+      title={`Open run ${run.id} for viewing?`}
+      cancelLabel="Cancel (Esc)"
+      confirmLabel="Open for viewing"
+      confirmDisabled={writeBlocked || busy}
+      onConfirm={() => void confirm()}
+      onCancel={busy ? () => undefined : onCancel}
+    >
+      <div className="admin-dlgparas">
+        {openForViewingText(run, viewDays).map((paragraph) => (
+          <p key={paragraph}>{paragraph}</p>
+        ))}
+      </div>
+      <ServerErrorNote message={serverError} />
+    </ConfirmDialog>
+  );
+}
+
+function CancelViewDialog({
+  run,
+  view,
+  writeBlocked,
+  onCancel,
+  onFinished,
+}: RunDialogProps & { view: ArchiveRunView }) {
+  const { busy, serverError, confirm } = useViewingAction(
+    () => cancelArchiveView(view.id),
+    `The viewing of run ${run.id} is cancelled.`,
+    `The server did not answer, so the viewing of run ${run.id} may or may not have been cancelled. Check its state in the table; cancelling it again is safe.`,
+    { writeBlocked, onFinished },
+  );
+  return (
+    <ConfirmDialog
+      title={`Cancel viewing of run ${run.id}?`}
+      cancelLabel="Keep waiting (Esc)"
+      confirmLabel="Cancel viewing"
+      confirmDisabled={writeBlocked || busy}
+      onConfirm={() => void confirm()}
+      onCancel={busy ? () => undefined : onCancel}
+    >
+      The archive of run {run.id} is not loaded, and nothing changes in the
+      database. To view it later, open the run for viewing again.
+      <ServerErrorNote message={serverError} />
+    </ConfirmDialog>
+  );
+}
+
+function CloseViewDialog({
+  run,
+  view,
+  writeBlocked,
+  onCancel,
+  onFinished,
+}: RunDialogProps & { view: ArchiveRunView }) {
+  const { busy, serverError, confirm } = useViewingAction(
+    () => closeArchiveView(view.id),
+    `The viewing of run ${run.id} is closed. The archival job on the server removes its loaded copy at its next start.`,
+    `The server did not answer, so the viewing of run ${run.id} may or may not have been closed. Check its state in the table; closing it again is safe.`,
+    { writeBlocked, onFinished },
+  );
+  return (
+    <ConfirmDialog
+      title={`Close viewing of run ${run.id}?`}
+      cancelLabel="Keep open (Esc)"
+      confirmLabel="Close viewing"
+      confirmDisabled={writeBlocked || busy}
+      onConfirm={() => void confirm()}
+      onCancel={busy ? () => undefined : onCancel}
+    >
+      The viewer page of run {run.id} closes now, and the archival job on the
+      server removes the loaded copy from the database at its next start. The
+      archive files stay as they are: to read them again, open the run for
+      viewing again.
+      <ServerErrorNote message={serverError} />
+    </ConfirmDialog>
   );
 }

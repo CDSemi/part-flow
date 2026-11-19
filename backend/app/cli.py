@@ -110,15 +110,17 @@ Commands:
 - ``history-archive (settings | recover | evaluate | next | export --run N |
   verify --run N | copy --run N | purge --run N [--backup NAME
   --backup-started-at UTC] | start-deletion --request N | delete --request N
-  --backup NAME --backup-started-at UTC | status)`` (Phase 16, history
-  archival design B steps 1 to 4; ``deploy/production/archive.sh``): the
-  host job of Movement-history archival, of its automatic runs
-  (``evaluate``) and of permanent deletion requests, run as the
-  maintenance database role with the archive folder in
+  --backup NAME --backup-started-at UTC | load-view --view N | close-view
+  --view N | status)`` (Phase 16, history archival design B steps 1 to 5;
+  ``deploy/production/archive.sh``): the host job of Movement-history
+  archival, of its automatic runs (``evaluate``), of permanent deletion
+  requests and of viewing an archive (``load-view``, ``close-view``), run as
+  the maintenance database role with the archive folder in
   ``PARTFLOW_ARCHIVE_DIR`` and the optional off-host copy folder in
   ``PARTFLOW_ARCHIVE_COPY_DIR`` (``app.application.history_archive_job``).
-  Only ``purge`` and ``delete`` delete: the archived Movements of a run, and
-  the stored rows of a deletion request, each after its pre-purge backup. 0
+  Only ``purge`` and ``delete`` delete history: the archived Movements of a
+  run, and the stored rows of a deletion request, each after its pre-purge
+  backup; ``close-view`` removes only the rows a view of an archive loaded. 0
   the step is done (``result`` says what happened), 1 refused (or, for
   ``status``, a finding), 2 could not run, its outcome is unknown, or it
   was interrupted, 3 the run or request failed and is now FAILED with its
@@ -1318,11 +1320,12 @@ def _run_delete_permanently(args: argparse.Namespace) -> int:
 
 
 _HISTORY_ARCHIVE_HELP = (
-    "The host job of Movement-history archival and of permanent deletion requests"
-    " (deploy/production/archive.sh), run as the maintenance database role with the archive"
-    " folder in PARTFLOW_ARCHIVE_DIR and the optional off-host copy folder in"
-    " PARTFLOW_ARCHIVE_COPY_DIR. Only purge and delete delete: the archived Movements of a run,"
-    " and the stored rows of a deletion request."
+    "The host job of Movement-history archival, of permanent deletion requests and of viewing"
+    " an archive (deploy/production/archive.sh), run as the maintenance database role with the"
+    " archive folder in PARTFLOW_ARCHIVE_DIR and the optional off-host copy folder in"
+    " PARTFLOW_ARCHIVE_COPY_DIR. Only purge and delete delete history: the archived Movements of"
+    " a run, and the stored rows of a deletion request; close-view removes only the rows a"
+    " view loaded."
 )
 _HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
     "settings": (
@@ -1358,9 +1361,17 @@ _HISTORY_ARCHIVE_COMMANDS: dict[str, str] = {
         "Carry out a RUNNING deletion request after its pre-purge backup (--backup and"
         " --backup-started-at): delete its stored rows in one transaction."
     ),
+    "load-view": (
+        "Load a REQUESTED view of an archive into the viewer tables, after checking every file of"
+        " its archive folder against SHA256SUMS and the run's manifest SHA-256 (OPEN)."
+    ),
+    "close-view": (
+        "Remove the loaded rows of a view a person closed, or of an open view whose days have"
+        " run out (CLOSED)."
+    ),
     "status": (
-        "Report the open run, the last finished run, the archive folder's space and the open and"
-        " last finished deletion requests."
+        "Report the open run, the last finished run, the archive folder's space, the open and"
+        " last finished deletion requests, and the views of archives not finished."
     ),
 }
 
@@ -1405,6 +1416,14 @@ def _add_history_archive_parser(subparsers: Any) -> None:
                 required=True,
                 metavar="N",
                 help="The deletion request number.",
+            )
+        if step in ("load-view", "close-view"):
+            step_parser.add_argument(
+                "--view",
+                type=_run_number,
+                required=True,
+                metavar="N",
+                help="The number of the view of an archive.",
             )
         if step == "delete":
             # Plain text: the job judges the backup and answers a refusal as JSON.
@@ -1474,6 +1493,10 @@ def _run_history_archive(args: argparse.Namespace) -> int:
                 args.request,
                 history_archive_job.PurgeBackup(args.backup, args.backup_started_at),
             )
+        elif args.step == "load-view":
+            report = history_archive_job.load_view(engine, folders, args.view)
+        elif args.step == "close-view":
+            report = history_archive_job.close_view(engine, folders, args.view)
         else:
             report = history_archive_job.status(engine, folders)
     finally:

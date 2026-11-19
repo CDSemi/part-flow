@@ -223,6 +223,15 @@ ROUTE_ACCESS: Final[Mapping[tuple[str, str], RouteAccess]] = {
     ("POST", "/api/history-archive/runs/{run_id}/approve"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs/{run_id}/dismiss"): _permission(_RHAP),
     ("POST", "/api/history-archive/runs/{run_id}/copy-confirmation"): _permission(_RHAP),
+    # Viewing an archive (Phase 16, design B step 5; D16): opening, cancelling
+    # and closing a view, and every read of the viewer.
+    ("GET", "/api/history-archive/views"): _permission(_RHAP),
+    ("POST", "/api/history-archive/views"): _permission(_RHAP),
+    ("POST", "/api/history-archive/views/{view_id}/cancel"): _permission(_RHAP),
+    ("POST", "/api/history-archive/views/{view_id}/close"): _permission(_RHAP),
+    ("GET", "/api/history-archive/views/{view_id}/movements"): _permission(_RHAP),
+    ("GET", "/api/history-archive/views/{view_id}/flows/{flow_id}"): _permission(_RHAP),
+    ("GET", "/api/history-archive/views/{view_id}/names"): _permission(_RHAP),
     # Permanent deletion requests (Phase 16, design B step 3; D17): the preview,
     # the list, the request and its cancellation.
     ("GET", "/api/permanent-deletion/preview"): _permission(_DWPP),

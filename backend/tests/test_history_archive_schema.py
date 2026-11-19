@@ -317,14 +317,17 @@ def test_the_migration_literals_match_the_model() -> None:
     assert migration._ENTITY_TYPES == deletion._PREVIOUS_ENTITY_TYPES
     assert migration._PREVIOUS_RETENTION_SQL == retention._RETENTION_SQL
     assert migration._RETENTION_SQL == models.POLICY_RETENTION_PERIOD_SQL
-    # Step 1's settings; step 2 (0041) adds the purge batch limits after them, and step 4
-    # (0043) the limits of the automatic runs and the days between them.
+    # Step 1's settings; step 2 (0041) adds the purge batch limits after them, step 4
+    # (0043) the limits of the automatic runs and the days between them, and step 5
+    # (0044) the settings of viewing an archive.
     assert {
         column: (minimum, maximum) for column, _, minimum, maximum in migration._POLICY_COLUMNS
     } == {
         column: bounds
         for column, bounds in models.HISTORY_ARCHIVE_POLICY_RANGES.items()
-        if not column.startswith(("archive_purge_", "archive_limit_", "archive_interval_"))
+        if not column.startswith(
+            ("archive_purge_", "archive_limit_", "archive_interval_", "archive_view_")
+        )
     }
     assert migration._POLICY_COLUMNS[0][1] == models.SHORTEST_RETENTION_MONTHS_DEFAULT
     assert migration._SECTION == policies.DATA_RETENTION_SECTION

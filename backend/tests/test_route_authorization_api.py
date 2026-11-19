@@ -607,6 +607,107 @@ def _run_waiting_for_copy(client: TestClient) -> tuple[str, dict[str, Any]]:
     )
 
 
+# Viewing an archive (Phase 16, design B step 5): a finished run whose archive was
+# verified, and at most one active view (the default setting).
+_VIEWS = "/api/history-archive/views"
+
+
+def _viewable_run(client: TestClient) -> int:
+    """A run that failed after its verification (owner, as the job): viewable."""
+    run_id = _requested_run(client)
+    owner = _owner(client)
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                sa.text("SELECT set_config('partflow.archive_run_id', :id, true)"),
+                {"id": str(run_id)},
+            )
+            for statement in (
+                "UPDATE history_archive_runs SET state = 'RUNNING', started_at = now()"
+                " WHERE id = :id",
+                "UPDATE history_archive_runs SET archive_name = 'run-' || id"
+                " || '-20271110T042000Z', exported_at = now(), exported_components = 1,"
+                " exported_flows = 1, exported_movements = 1, exported_lineage_edges = 0,"
+                " exported_assigned_routes = 0, archive_bytes = 1, manifest_sha256 ="
+                " repeat('ab', 32), verified_at = now(), skipped_components = 0,"
+                " skipped_flows = 0 WHERE id = :id",
+                "UPDATE history_archive_runs SET state = 'FAILED', finished_at = now(),"
+                " failure_reason = 'viewable by the authorization test' WHERE id = :id",
+            ):
+                connection.execute(sa.text(statement), {"id": run_id})
+    finally:
+        owner.dispose()
+    return run_id
+
+
+def _move_view(client: TestClient, view_id: int, *assignments: str) -> None:
+    """The host job's changes of a view (owner, with its setting)."""
+    owner = _owner(client)
+    try:
+        with owner.begin() as connection:
+            connection.execute(
+                sa.text("SELECT set_config('partflow.archive_view_id', :id, true)"),
+                {"id": str(view_id)},
+            )
+            for assignment in assignments:
+                connection.execute(
+                    sa.text(f"UPDATE history_archive_views SET {assignment} WHERE id = :id"),
+                    {"id": view_id},
+                )
+    finally:
+        owner.dispose()
+
+
+_LOADING = "state = 'LOADING', started_at = now()"
+_OPENED = (
+    "state = 'OPEN', opened_at = now(), loaded_movements = 0, loaded_flows = 0,"
+    " loaded_lineage_edges = 0, loaded_assigned_routes = 0, loaded_names = 0"
+)
+
+
+def _close_open_views(client: TestClient) -> None:
+    """End every active view: cancel a requested one, as a person would; fail a loading one
+    and close an open one, as the job would (none holds a row here)."""
+    for view in cast(list[dict[str, Any]], _ok(admin_of(client).get(_VIEWS))):
+        if view["state"] == "REQUESTED":
+            _ok(admin_of(client).post(f"{_VIEWS}/{view['id']}/cancel"))
+        elif view["state"] == "LOADING":
+            _move_view(
+                client, view["id"], "state = 'FAILED', failure_reason = 'x', finished_at = now()"
+            )
+        elif view["state"] in ("OPEN", "CLOSING"):
+            closing = (
+                []
+                if view["state"] == "CLOSING"
+                else ["state = 'CLOSING', closing_started_at = now()"]
+            )
+            _move_view(client, view["id"], *closing, "state = 'CLOSED', finished_at = now()")
+
+
+def _view_request(client: TestClient) -> tuple[str, dict[str, Any]]:
+    _close_open_views(client)
+    return _VIEWS, {"json": {"run_id": _viewable_run(client)}}
+
+
+def _requested_view(client: TestClient) -> int:
+    path, kwargs = _view_request(client)
+    return int(_ok(admin_of(client).post(path, **kwargs), 201)["id"])
+
+
+def _view_to_cancel(client: TestClient) -> tuple[str, dict[str, Any]]:
+    return f"{_VIEWS}/{_requested_view(client)}/cancel", {}
+
+
+def _open_view(client: TestClient) -> int:
+    view_id = _requested_view(client)
+    _move_view(client, view_id, _LOADING, _OPENED)
+    return view_id
+
+
+def _view_to_close(client: TestClient) -> tuple[str, dict[str, Any]]:
+    return f"{_VIEWS}/{_open_view(client)}/close", {}
+
+
 # Permanent deletion requests (Phase 16, design B step 3): one open at a time.
 _DELETIONS = "/api/permanent-deletion/requests"
 
@@ -969,6 +1070,33 @@ _WRITES: list[_Write] = [
         "history_archive_runs",
     ),
     _Write(
+        "archive-view-open",
+        "POST",
+        "/api/history-archive/views",
+        _key(RHAP),
+        _key(RHAP),
+        _view_request,
+        "history_archive_views",
+    ),
+    _Write(
+        "archive-view-cancel",
+        "POST",
+        "/api/history-archive/views/{view_id}/cancel",
+        _key(RHAP),
+        _key(RHAP),
+        _view_to_cancel,
+        "history_archive_views",
+    ),
+    _Write(
+        "archive-view-close",
+        "POST",
+        "/api/history-archive/views/{view_id}/close",
+        _key(RHAP),
+        _key(RHAP),
+        _view_to_close,
+        "history_archive_views",
+    ),
+    _Write(
         "deletion-request",
         "POST",
         "/api/permanent-deletion/requests",
@@ -1296,7 +1424,32 @@ _NON_WRITING_ROUTES = {
     ("GET", "/api/history-archive/preview"),
     ("GET", "/api/permanent-deletion/preview"),
     ("GET", "/api/permanent-deletion/requests"),
+    # Viewing an archive (Phase 16 step 5): the list and the viewer's reads.
+    ("GET", "/api/history-archive/views"),
+    ("GET", "/api/history-archive/views/{view_id}/movements"),
+    ("GET", "/api/history-archive/views/{view_id}/flows/{flow_id}"),
+    ("GET", "/api/history-archive/views/{view_id}/names"),
 }
+
+
+def test_the_viewer_reads_need_the_archival_key(client: TestClient, db_engine: Engine) -> None:
+    """Phase 16 step 5: the list of views and every read of an open view need Run history
+    archival and purge; none writes."""
+    view_id = _open_view(client)
+    lacking = client_as(client, *(key for key in ALL_PERMISSIONS if key is not RHAP))
+    holder = client_as(client, RHAP)
+    count = _audit_count(db_engine)
+    for path, status in (
+        (_VIEWS, 200),
+        (f"{_VIEWS}/{view_id}/movements", 200),
+        (f"{_VIEWS}/{view_id}/names", 200),
+        # The view loaded nothing here: the flow is not in it.
+        (f"{_VIEWS}/{view_id}/flows/1", 404),
+    ):
+        assert anonymous_client(client).get(path).status_code == 401
+        _denied(lacking.get(path), [RHAP], _A2)
+        assert holder.get(path).status_code == status, path
+    assert _audit_count(db_engine) == count
 
 
 def test_the_deletion_reads_need_the_deletion_key(client: TestClient, db_engine: Engine) -> None:

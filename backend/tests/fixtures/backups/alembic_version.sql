@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict IxEXHjaQtAtHr1ItEwrJy0IrvyNejiTzzKYsHa1HPX53LqOnZ3wpuiuHvtwNyMu
+\restrict Xo3IKWY6bsmLhCt3KeZntp7IoS1xBVkuTbi2eFtCYRiPI6kuTeG9ZzGQ3HZvtg5
 
 -- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)
 -- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)
@@ -23,7 +23,7 @@ SET row_security = off;
 --
 
 COPY public.alembic_version (version_num) FROM stdin;
-0042_phase16_deletion_requests
+0044_phase16_archive_viewing
 \.
 
 
@@ -31,5 +31,5 @@ COPY public.alembic_version (version_num) FROM stdin;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict IxEXHjaQtAtHr1ItEwrJy0IrvyNejiTzzKYsHa1HPX53LqOnZ3wpuiuHvtwNyMu
+\unrestrict Xo3IKWY6bsmLhCt3KeZntp7IoS1xBVkuTbi2eFtCYRiPI6kuTeG9ZzGQ3HZvtg5
 

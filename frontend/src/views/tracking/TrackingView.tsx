@@ -83,6 +83,7 @@ import {
   traceText,
 } from './tracking-logic';
 import { LONG_PREVIEW_PAGE } from './tracking-preview';
+import { WholeCodes } from './WholeCodes';
 
 const STATUS_OPTIONS: { value: TrackingFilters['status']; label: string }[] = [
   { value: 'ACTIVE', label: 'Active' },
@@ -987,7 +988,9 @@ function ArchivedHistoryRow({
     <li className="archived">
       <span className="t">{archivedTimestamp(archived.lastOccurredAt)}</span>
       <span className="mtype arc">ARCHIVED</span>
-      <span className="desc">{describeArchivedHistory(archived)}</span>
+      <span className="desc">
+        <WholeCodes text={describeArchivedHistory(archived)} />
+      </span>
     </li>
   );
 }
@@ -1011,7 +1014,9 @@ function MovementRow({ movement: m }: { movement: TrackingMovement }) {
           REVERSED
         </span>
       ) : null}
-      <span className="desc">{describeMovement(m)}</span>
+      <span className="desc">
+        <WholeCodes text={describeMovement(m)} />
+      </span>
     </li>
   );
 }

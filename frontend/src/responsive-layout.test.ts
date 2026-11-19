@@ -160,3 +160,11 @@ test('the narrow Area Board stacks the overview (Summary on) or pages the detail
     /\.abd-scroll \.abd-page \{[^}]*scroll-snap-align: center/s,
   );
 });
+
+test('a code in a history row or a flow note never breaks at its hyphen in a narrow panel', () => {
+  // Tracking's detail panel and the archive viewer share the rule: the
+  // codes of a line (`QF-44`, `ST-PACK`) are `wholecode` spans.
+  expect(css('views/tracking/tracking.css')).toMatch(
+    /\.wholecode \{\s*white-space: nowrap;\s*\}/s,
+  );
+});

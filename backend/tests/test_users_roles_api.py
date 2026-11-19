@@ -1077,6 +1077,11 @@ def test_users_are_never_workers(client: TestClient, db_engine: Engine) -> None:
         # a permanent deletion request.
         "fk_deletion_requests_requested_by_user_id_users",
         "fk_deletion_requests_cancelled_by_user_id_users",
+        # Phase 16, history archival step 5: the people who open, cancel or
+        # close a view of an archive.
+        "fk_history_archive_views_requested_by_user_id_users",
+        "fk_history_archive_views_cancelled_by_user_id_users",
+        "fk_history_archive_views_closed_by_user_id_users",
     }
     assert "badge_barcode" not in {
         str(column["name"]) for column in sa.inspect(db_engine).get_columns("users")
@@ -1290,6 +1295,8 @@ _PERMISSION_READERS = _USER_ROLE_READERS | {
     # runs, still holds Run history archival and purge (the job and the settings
     # read it there).
     "app/application/history_archive.py",
+    # Phase 16, history archival step 5: the routes of viewing an archive.
+    "app/api/history_archive_views.py",
 }
 
 

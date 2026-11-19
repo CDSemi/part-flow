@@ -85,6 +85,7 @@ from app.domain.worker_badge import InvalidBadgeBarcodeError, normalize_badge_ba
 from app.infrastructure.database_privileges import GUARD_TABLES
 from app.infrastructure.models import (
     ALLOCATION_DEVICE_EVENT_ID_CONSTRAINT,
+    ARCHIVE_VIEW_NAME_KEY_SQL,
     AREA_BARCODE_SQL,
     ASSET_TAG_PREFIX_SQL,
     CANONICAL_PART_NUMBER_SQL,
@@ -163,6 +164,9 @@ CHECK_TABLES: Final[Mapping[str, tuple[str, ...]]] = {
     "h": GUARD_TABLES,
     "i": ("work_order_demands", "work_orders"),
     "j": (
+        "archive_view_flows",
+        "archive_view_movements",
+        "archive_view_names",
         "areas",
         "history_archived_flows",
         "machine_asset_tag_config",
@@ -2223,6 +2227,36 @@ _CANONICAL_CHECKS: Final = (
         CANONICAL_PART_NUMBER_SQL,
         True,
     ),
+    # The Part Numbers of a loaded archive (viewing an archive, Phase 16 step
+    # 5): its Movements, its flows and its Part Number names (keyed by the
+    # view and the row, "<view id>/<id>").
+    _CanonicalCheck(
+        "archive_view_movements",
+        "view_id || '/' || id",
+        "part_number",
+        "ArchiveViewMovement",
+        "ck_archive_view_movements_part_number_canonical",
+        CANONICAL_PART_NUMBER_SQL,
+        True,
+    ),
+    _CanonicalCheck(
+        "archive_view_flows",
+        "view_id || '/' || flow_id",
+        "part_number",
+        "ArchiveViewFlow",
+        "ck_archive_view_flows_part_number_canonical",
+        CANONICAL_PART_NUMBER_SQL,
+        True,
+    ),
+    _CanonicalCheck(
+        "archive_view_names",
+        "view_id || '/' || key",
+        "key",
+        "ArchiveViewName",
+        "ck_archive_view_names_part_number_canonical",
+        ARCHIVE_VIEW_NAME_KEY_SQL,
+        True,
+    ),
     _CanonicalCheck(
         "workers",
         "id",
@@ -2301,6 +2335,10 @@ _PART_NUMBER_SOURCES: Final = (
     "work_order_allocations",
     # The carry-forward records of archived flows (history archival, Phase 16).
     "history_archived_flows",
+    # A loaded archive's Movements and flows (viewing an archive, Phase 16
+    # step 5): read by no other check.
+    "archive_view_movements",
+    "archive_view_flows",
 )
 
 

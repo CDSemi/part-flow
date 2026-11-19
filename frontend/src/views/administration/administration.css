@@ -671,6 +671,217 @@
   gap: 6px;
 }
 
+/* The viewing of a run's archive, under the run's state and actions: its
+   newest view's pill, its line and its actions, set apart by a separator
+   line on the border token, which stays visible in the dark theme. */
+.admin-runviewing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  align-self: stretch;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+/* A link that reads as a compact button (View, which opens the archive
+   viewer). */
+a.admin-btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+/* The paragraphs of a confirmation (Open for viewing). */
+.admin-dlgparas p + p {
+  margin-top: 10px;
+}
+
+/* --- The archive viewer (History archival & purge, build step 5) ------- */
+
+.admin-arv-back {
+  display: inline-block;
+  margin-bottom: 10px;
+  color: var(--info-t);
+  font-size: 13.5px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.admin-arv-back:hover {
+  text-decoration: underline;
+}
+
+.admin-arv-back:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+/* The heading takes the focus on arrival; it is not a control. */
+.admin-arv h1:focus {
+  outline: none;
+}
+
+/* The permanent mark: archived history, a read-only copy, not live — on
+   the archived tone (a dashed frame, like an archived route step) and in
+   sight while the page scrolls. */
+.admin-arv-mark {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 10px 0 12px;
+  padding: 9px 14px;
+  border: 1px dashed var(--border2);
+  border-radius: 10px;
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.admin-arv-badge,
+.admin-arv-flowmark {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.admin-arv-badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--chip);
+}
+
+.admin-arv-flowmark {
+  margin-bottom: 4px;
+}
+
+.admin-arv-about {
+  max-width: 80ch;
+  margin-bottom: 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* A view the server cannot read (waiting, closed, ended, unknown): its
+   words and, while it waits, Check again. The page moves the focus here
+   when it changes to this state. */
+.admin-arv-unavailable:focus {
+  outline: none;
+}
+
+.admin-arv-unavailable:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+}
+
+.admin-arv-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 80ch;
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.admin-arv-search {
+  margin-bottom: 8px;
+  padding: 14px 16px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+/* As many columns of fields as fit fields 12rem wide. */
+.admin-configgrid.admin-arv-fields {
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+}
+
+.admin-arv-search > .err {
+  margin: 0 0 8px;
+  color: var(--err-t);
+  font-size: 13px;
+}
+
+.admin-arv-results > .err {
+  color: var(--err-t);
+  font-size: 13px;
+}
+
+.admin-arv-count {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* A result row opens its flow's archived history: the whole row is the
+   target, and the rows of the open flow are marked. */
+.admin-arv-list li {
+  padding-left: 6px;
+  padding-right: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* Every archived row carries its year, so its time track is wider than
+   Tracking's; on a phone the row wraps as Tracking's does. */
+@media (min-width: 561px) {
+  .admin-arv .mv .t {
+    width: 140px;
+  }
+}
+
+.admin-arv-list li:hover,
+.admin-arv-list li.sel {
+  background: var(--info-surface-weak);
+}
+
+/* The row's one button (its Part Number) and a lineage link of the flow
+   panel. */
+.admin-arv-rowbtn,
+.admin-arv-flowlink {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--info-t);
+  font-family: var(--mono), monospace;
+  font-weight: 750;
+  text-align: left;
+}
+
+.admin-arv-flowlink {
+  text-decoration: underline;
+}
+
+.admin-arv-rowbtn:focus-visible,
+.admin-arv-flowlink:focus-visible {
+  outline: 2px solid var(--info-t);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.admin-arv-lineage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  font-size: 13px;
+}
+
 /* Switching the approval step of automatic runs off, or renewing its
    standing authorization, in the Automatic runs dialog: the plain
    warning, the reason and the typed confirmation on a warning-toned
