@@ -72,11 +72,16 @@ _ALL_RUN = ("a", "b", "c", "d", "e", "f", "g", "i", "j")
 #: Examined counts of archived history (history archival, Phase 16): zero in
 #: a database whose history was never purged.
 _ARCHIVAL_COUNTS = frozenset({"purged_flows", "archived_releases", "purged_records", "purge_runs"})
+#: Check (j)'s count of the tables it reads that the database does not have:
+#: zero at this code's schema (N-9b covers the previous release's schema).
+_ZERO_AT_CURRENT_SCHEMA = frozenset({"tables_not_present"})
 
 
 def _examined_something(check: dict[str, Any]) -> bool:
     return all(
-        count > 0 for name, count in check["examined"].items() if name not in _ARCHIVAL_COUNTS
+        count > 0
+        for name, count in check["examined"].items()
+        if name not in _ARCHIVAL_COUNTS | _ZERO_AT_CURRENT_SCHEMA
     )
 
 
@@ -2355,6 +2360,27 @@ def test_schema_revision_mismatch(case: Case, run: Callable[..., Run]) -> None:
     assert checks["j"]["status"] == "pass"
     assert result.exit_code == 2
     assert run(case.url, "--check", "j").exit_code == 0
+
+
+def test_check_j_runs_on_the_previous_release_schema(case: Case, run: Callable[..., Run]) -> None:
+    """N-9b: release.sh runs the candidate image's check (j) against the
+    running release's database before it migrates, so a table that a later
+    migration creates does not exist there yet (history_archived_flows before
+    0040). Check (j) checks the tables that exist; every other check still
+    needs all its tables."""
+    _, previous = _head_down_revision()
+    case.execute("DROP TABLE history_archived_flows CASCADE")
+    case.execute("UPDATE alembic_version SET version_num = :revision", revision=previous)
+    result = run(case.url, "--check", "j")
+    assert result.exit_code == 0, result.report
+    check = _checks(result.report)["j"]
+    assert check["status"] == "pass"
+    assert check["examined"]["tables_not_present"] == 1
+    assert check["examined"]["part_numbers"] > 0
+    full = run(case.url)
+    assert full.exit_code == 2
+    assert full.report["error"]["code"] == "schema_mismatch"
+    assert full.report["checks"] == []
 
 
 def test_missing_alembic_version_table(case: Case, run: Callable[..., Run]) -> None:

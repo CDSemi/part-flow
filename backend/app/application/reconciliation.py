@@ -796,20 +796,33 @@ def run_reconciliation(
             isolation = session.execute(text("SHOW transaction_isolation")).scalar_one()
             if read_only != "on" or isolation != "repeatable read":
                 return run_error("not_read_only")
-            # 4. Every table the selected checks read, locked before the snapshot.
+            # 4. Every table the selected checks read, locked before the snapshot, one
+            # table at a time in a savepoint (neither takes a snapshot). Only check (j)
+            # runs across revisions: release.sh runs the candidate image's (j) before it
+            # migrates, so a table that a later migration creates may be missing there;
+            # every other check needs all its tables.
             tables = sorted({table for check_id in selected for table in CHECK_TABLES[check_id]})
-            if tables:
+            missing: list[str] = []
+            for table in tables:
                 try:
-                    session.execute(text(f"LOCK TABLE {', '.join(tables)} IN ACCESS SHARE MODE"))
+                    with session.begin_nested():
+                        session.execute(text(f"LOCK TABLE {table} IN ACCESS SHARE MODE"))
                 except DBAPIError as exc:
                     lock_failure = _lock_failure_message(exc, statement_timeout)
                     if lock_failure is not None:
                         return run_error("lock_timeout", lock_failure)
                     if isinstance(exc.orig, psycopg.errors.UndefinedTable):
-                        return run_error("schema_mismatch")
+                        missing.append(table)
+                        continue
                     if _is_connection_failure(exc):
                         return run_error("database_unavailable")
                     raise
+            if any(
+                set(missing) & set(CHECK_TABLES[check_id])
+                for check_id in selected
+                if check_id not in _REVISION_INDEPENDENT
+            ):
+                return run_error("schema_mismatch")
             # 5. First SELECT: the snapshot starts here.
             try:
                 database = _database_block(session)
@@ -2280,7 +2293,38 @@ _IDENTITY_KEYS: Final = (
 )
 
 
-def _identity_key_findings(context: _Context) -> list[Finding]:
+#: The tables that hold a canonical Part Number by value, read by (j)1.
+_PART_NUMBER_SOURCES: Final = (
+    "part_numbers",
+    "work_order_demands",
+    "quantity_flows",
+    "work_order_allocations",
+    # The carry-forward records of archived flows (history archival, Phase 16).
+    "history_archived_flows",
+)
+
+
+def _present_tables(context: _Context, names: Iterable[str]) -> frozenset[str]:
+    """The tables among ``names`` that exist in the connected database.
+
+    ``release.sh`` runs the candidate image's check (j) against the running
+    release's database before it migrates it, so a table that a later
+    migration creates may not exist yet. Check (j) checks the tables that
+    are there; a missing one holds nothing to check.
+    """
+    return frozenset(
+        str(row.relname)
+        for row in context.rows(
+            "SELECT c.relname FROM pg_catalog.pg_class c"
+            " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p')"
+            " AND c.relname = ANY(:names)",
+            names=sorted(set(names)),
+        )
+    )
+
+
+def _identity_key_findings(context: _Context, present: frozenset[str]) -> list[Finding]:
     """(j)6: duplicate identity keys found without trusting their indexes.
 
     The text column is grouped under ``COLLATE "C"`` (byte order), so
@@ -2289,6 +2333,8 @@ def _identity_key_findings(context: _Context) -> list[Finding]:
     """
     findings: list[Finding] = []
     for key in _IDENTITY_KEYS:
+        if key.table not in present:
+            continue
         grouped = ", ".join(
             f'{column} COLLATE "C"' if column != "command_sequence" else column
             for column in key.columns
@@ -2341,20 +2387,26 @@ def _check_h(context: _Context) -> _Outcome:
 
 def _check_j(context: _Context) -> _Outcome:
     findings: list[Finding] = []
+    # Only the tables that exist: before a release migrates, a table of the
+    # candidate's schema may not exist yet (release.sh's candidate check).
+    read = {
+        *_PART_NUMBER_SOURCES,
+        *(check.table for check in _CANONICAL_CHECKS),
+        *(key.table for key in _IDENTITY_KEYS),
+    }
+    present = _present_tables(context, read)
     # 1. Canonical PNs, wherever production stores one by value.
+    sources = [table for table in _PART_NUMBER_SOURCES if table in present]
     part_numbers: dict[str, list[str]] = {
         row.value: list(row.tables)
         for row in context.rows(
             'SELECT value COLLATE "C" AS value, array_agg(DISTINCT source ORDER BY source)'
             " AS tables FROM ("
-            " SELECT part_number AS value, 'part_numbers' AS source FROM part_numbers"
-            " UNION ALL SELECT DISTINCT part_number, 'work_order_demands' FROM work_order_demands"
-            " UNION ALL SELECT DISTINCT part_number, 'quantity_flows' FROM quantity_flows"
-            " UNION ALL SELECT DISTINCT part_number, 'work_order_allocations'"
-            " FROM work_order_allocations"
-            " UNION ALL SELECT DISTINCT part_number, 'history_archived_flows'"
-            " FROM history_archived_flows"
-            ') pn GROUP BY value COLLATE "C"'
+            + " UNION ALL ".join(
+                f"SELECT DISTINCT part_number AS value, '{table}' AS source FROM {table}"
+                for table in sources
+            )
+            + ') pn GROUP BY value COLLATE "C"'
         )
     }
     findings.extend(part_number_identity_findings(part_numbers))
@@ -2382,6 +2434,8 @@ def _check_j(context: _Context) -> _Outcome:
     # 4. Every canonical-form CHECK re-evaluated by the running server.
     check_rows = 0
     for check in _CANONICAL_CHECKS:
+        if check.table not in present:
+            continue
         not_null = f"{check.column} IS NOT NULL"
         check_rows += context.scalar_int(f"SELECT count(*) FROM {check.table} WHERE {not_null}")
         for row in context.rows(
@@ -2410,13 +2464,14 @@ def _check_j(context: _Context) -> _Outcome:
         )
     )
     # 6. Identity keys without trusting their indexes.
-    findings.extend(_identity_key_findings(context))
+    findings.extend(_identity_key_findings(context, present))
     return _Outcome(
         {
             "part_numbers": len(part_numbers),
             "badges": len(workers),
             "check_rows": check_rows,
-            "identity_keys": len(_IDENTITY_KEYS),
+            "identity_keys": sum(1 for key in _IDENTITY_KEYS if key.table in present),
+            "tables_not_present": len(read - present),
         },
         findings,
     )
